@@ -1,0 +1,85 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum RiskTier {
+  SAFE
+  RISK
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum TradeStatus {
+  ALERTED
+  SNIPED
+  SKIPPED_SECURITY
+  SKIPPED_IMPACT
+  SKIPPED_DUPLICATE
+  ERROR
+}
+
+model TrackedWallet {
+  id                String      @id @default(cuid())
+  address           String      @unique
+  label             String?
+  tier              RiskTier
+  strategyProfile   String
+  winRate           Float
+  profitFactor      Float
+  totalTrades       Int
+  medianHoldSeconds Int
+  netSolProfit      Float       @default(0.0)
+  isActive          Boolean     @default(true)
+  lastScoredAt      DateTime    @default(now())
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  trades            TradeLog[]
+
+  @@index([tier, isActive])
+  @@index([winRate])
+}
+
+model TradeLog {
+  id                String       @id @default(cuid())
+  signature         String       @unique
+  walletAddress     String
+  tokenMint         String
+  tokenSymbol       String?
+  side              TradeSide
+  solAmount         Float
+  tokenAmount       Float
+  entryMarketCap    Float?
+  status            TradeStatus  @default(ALERTED)
+  rejectionReason   String?
+  executedAt        DateTime
+  createdAt         DateTime     @default(now())
+
+  wallet            TrackedWallet? @relation(fields: [walletAddress], references: [address])
+
+  @@index([walletAddress])
+  @@index([tokenMint])
+  @@index([createdAt])
+}
+
+model UserPreference {
+  id                 String   @id @default(cuid())
+  telegramUserId     String   @unique
+  username           String?
+  receiveSafeAlerts  Boolean  @default(true)
+  receiveRiskAlerts  Boolean  @default(true)
+  minWinRate         Float    @default(0.60)
+  autoSnipeEnabled   Boolean  @default(false)
+  autoSnipeSolAmount Float    @default(0.1)
+  maxSlippagePercent Float    @default(15.0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
