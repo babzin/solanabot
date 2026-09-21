@@ -1,9 +1,9 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { env } from '../config/env.js';
-import { runWalletDiscovery } from '../cron/walletDiscovery.js';
-import { swapQueue } from '../services/queue.js';
-import { redis, REDIS_KEYS } from '../services/redis.js';
-import { RiskTier } from '../types/index.js';
+import { prisma } from '../services/db.js';
+import { runEarlyTrendingRadarCycle } from '../services/earlyTrending.js';
+import { checkPriceMilestones } from '../services/priceTracker.js';
+import { redis } from '../services/redis.js';
 
 export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
   // Authentication hook for all /api/admin routes
@@ -15,82 +15,50 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Trigger on-demand wallet discovery & scoring
+   * Trigger on-demand Early Trending Radar Cycle
    */
-  fastify.post('/api/admin/discover', async (request: FastifyRequest<{ Querystring: { tier?: string } }>, reply: FastifyReply) => {
-    const tierQuery = request.query.tier?.toUpperCase();
-    let filterTier: RiskTier | undefined;
-    if (tierQuery === 'SAFE') filterTier = RiskTier.SAFE;
-    if (tierQuery === 'RISK') filterTier = RiskTier.RISK;
-
-    // Run discovery in background and respond
-    runWalletDiscovery(filterTier)
-      .then((wallets) => console.log(`Admin discovery run finished with ${wallets.length} wallets.`))
-      .catch((err) => console.error('Admin discovery error:', err));
+  fastify.post('/api/admin/scan', async (_req: FastifyRequest, reply: FastifyReply) => {
+    runEarlyTrendingRadarCycle()
+      .then((count) => console.log(`[Admin Trigger] Scan finished. ${count} new alerts dispatched.`))
+      .catch((err) => console.error('[Admin Trigger Error]:', err));
 
     return reply.send({
-      message: 'On-demand wallet discovery job initiated successfully.',
-      filterTier: filterTier || 'ALL',
+      message: 'On-demand Early Trending Radar scan cycle initiated successfully.',
     });
   });
 
   /**
-   * View active tracked wallets and counts
+   * Trigger on-demand Price Milestone Evaluation (+50% / -50%)
    */
-  fastify.get('/api/admin/wallets', async (_req: FastifyRequest, reply: FastifyReply) => {
-    const [allWallets, safeWallets, riskWallets] = await Promise.all([
-      redis.smembers(REDIS_KEYS.WALLETS_ALL),
-      redis.smembers(REDIS_KEYS.WALLETS_SAFE),
-      redis.smembers(REDIS_KEYS.WALLETS_RISK),
-    ]);
+  fastify.post('/api/admin/check-milestones', async (_req: FastifyRequest, reply: FastifyReply) => {
+    checkPriceMilestones()
+      .then((count) => console.log(`[Admin Trigger] Milestone check finished. ${count} alerts sent.`))
+      .catch((err) => console.error('[Admin Trigger Error]:', err));
 
     return reply.send({
-      totalActive: allWallets.length,
-      safeCount: safeWallets.length,
-      riskCount: riskWallets.length,
-      safeWallets,
-      riskWallets,
+      message: 'On-demand Price Milestone evaluation initiated successfully.',
     });
   });
 
   /**
-   * System health and queue status
+   * System health and database status
    */
   fastify.get('/api/admin/health', async (_req: FastifyRequest, reply: FastifyReply) => {
-    const [waiting, active, failed, completed] = await Promise.all([
-      swapQueue.getWaitingCount(),
-      swapQueue.getActiveCount(),
-      swapQueue.getFailedCount(),
-      swapQueue.getCompletedCount(),
+    const today = new Date().toISOString().slice(0, 10);
+    const [totalTrendingTokens, todayAlertedCount] = await Promise.all([
+      prisma.earlyTrendingToken.count(),
+      prisma.earlyTrendingToken.count({ where: { alertDate: today } }),
     ]);
 
     return reply.send({
       status: 'healthy',
+      system: 'Soul Terminal & Solana Early Trending Radar',
       uptime: process.uptime(),
       redisConnected: redis.status === 'ready',
-      queue: {
-        waiting,
-        active,
-        failed,
-        completed,
+      database: {
+        totalTrendingTokens,
+        todayAlertedCount,
       },
     });
-  });
-
-  /**
-   * View recent trade logs from database
-   */
-  fastify.get('/api/admin/trades', async (request: FastifyRequest<{ Querystring: { limit?: string } }>, reply: FastifyReply) => {
-    const limit = Math.min(100, parseInt(request.query.limit || '25', 10));
-    try {
-      const { prisma } = await import('../services/db.js');
-      const trades = await prisma.tradeLog.findMany({
-        take: limit,
-        orderBy: { executedAt: 'desc' },
-      });
-      return reply.send({ count: trades.length, trades });
-    } catch (err: any) {
-      return reply.code(500).send({ error: 'Failed to retrieve trade logs from database', details: err.message });
-    }
   });
 }

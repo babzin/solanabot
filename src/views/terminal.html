@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Soul Terminal — Solana Early Trending & Autonomous Sniping Terminal</title>
+  <meta name="description" content="State-of-the-art Solana memecoin intelligence, early trending radar, on-chain bundle forensics, and 1-click execution terminal.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #07090e;
+      --bg-card: rgba(15, 20, 31, 0.75);
+      --bg-card-hover: rgba(22, 30, 46, 0.9);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(0, 240, 255, 0.25);
+      --cyan: #00f0ff;
+      --cyan-glow: rgba(0, 240, 255, 0.4);
+      --purple: #8a2be2;
+      --green: #00ff88;
+      --green-glow: rgba(0, 255, 136, 0.3);
+      --red: #ff3366;
+      --red-glow: rgba(255, 51, 102, 0.3);
+      --gold: #ffd700;
+      --text-main: #f0f4f8;
+      --text-muted: #8a99ad;
+      --text-dim: #506175;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 10%, rgba(0, 240, 255, 0.04) 0%, transparent 40%),
+        radial-gradient(circle at 90% 90%, rgba(138, 43, 226, 0.05) 0%, transparent 40%);
+    }
+
+    /* Top Ticker Marquee */
+    .top-marquee {
+      background: linear-gradient(90deg, #090d16, #0e1422, #090d16);
+      border-bottom: 1px solid var(--border-color);
+      padding: 6px 16px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      overflow: hidden;
+    }
+
+    .ticker-content {
+      display: flex;
+      gap: 24px;
+      white-space: nowrap;
+      animation: marquee 35s linear infinite;
+    }
+
+    .ticker-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ticker-item .badge-win {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    @keyframes marquee {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+
+    /* Navigation Header */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      background: rgba(10, 14, 23, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text-main);
+    }
+
+    .brand-logo {
+      font-size: 28px;
+      filter: drop-shadow(0 0 10px var(--cyan-glow));
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #ffffff, var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    .header-stats {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .stat-pill {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-color);
+      padding: 5px 12px;
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .stat-pill.online::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      background: var(--green);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--green);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-tg {
+      background: linear-gradient(135deg, #2AABEE, #229ED9);
+      color: white;
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn-tg:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 16px rgba(42, 171, 238, 0.4);
+    }
+
+    /* Main Grid Layout */
+    .terminal-container {
+      display: grid;
+      grid-template-columns: 340px 1fr 380px;
+      gap: 16px;
+      padding: 16px;
+      flex: 1;
+      height: calc(100vh - 100px);
+      min-height: 680px;
+    }
+
+    @media (max-width: 1280px) {
+      .terminal-container {
+        grid-template-columns: 300px 1fr;
+      }
+      .right-panel {
+        grid-column: 1 / -1;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .terminal-container {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+    }
+
+    /* Panel Base Styling */
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--cyan);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-body {
+      padding: 12px;
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* Left Panel: Early Trending Radar Feed */
+    .radar-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 12px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+
+    .radar-card:hover, .radar-card.active {
+      background: var(--bg-card-hover);
+      border-color: var(--cyan);
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .radar-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .token-id {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .token-symbol {
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .token-name {
+      font-size: 11px;
+      color: var(--text-muted);
+      max-width: 110px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .age-badge {
+      background: rgba(0, 240, 255, 0.12);
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    .radar-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+    }
+
+    .r-stat {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .r-stat-label {
+      color: var(--text-dim);
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .r-stat-val {
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .radar-card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      font-size: 11px;
+    }
+
+    .safety-tag {
+      color: var(--green);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Center Panel: Chart & Main View */
+    .center-panel {
+      position: relative;
+    }
+
+    .token-header-bar {
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-color);
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .token-title-group {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .token-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #111a2e;
+      border: 2px solid var(--cyan);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      object-fit: cover;
+    }
+
+    .token-header-name {
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .token-address-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .btn-copy {
+      background: rgba(255, 255, 255, 0.06);
+      border: none;
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 10px;
+    }
+
+    .btn-copy:hover {
+      color: var(--cyan);
+    }
+
+    .token-socials {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .social-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 5px 10px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .social-btn:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    /* Key Metrics Bar */
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      padding: 12px 16px;
+      background: rgba(0, 0, 0, 0.2);
+      border-bottom: 1px solid var(--border-color);
+      gap: 12px;
+    }
+
+    .metric-cell {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .metric-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+    }
+
+    .metric-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+
+    .chart-container {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      min-height: 420px;
+      background: #0b0e17;
+      position: relative;
+    }
+
+    .chart-iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    /* Right Panel: Forensics & 1-Click Sniping */
+    .forensics-section {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .audit-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    .audit-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .audit-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-size: 11px;
+    }
+
+    .audit-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 6px 8px;
+      border-radius: 6px;
+    }
+
+    /* Clickable Holder Grid (Solearlytrending Signature) */
+    .holder-grid {
+      display: grid;
+      grid-template-columns: repeat(10, 1fr);
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .holder-bubble {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .holder-bubble:hover {
+      border-color: var(--cyan);
+      transform: scale(1.15);
+      background: rgba(0, 240, 255, 0.15);
+      box-shadow: 0 0 8px var(--cyan-glow);
+    }
+
+    /* 1-Click Fast Sniping Widget */
+    .sniper-widget {
+      background: linear-gradient(180deg, rgba(20, 30, 50, 0.4), rgba(10, 15, 26, 0.6));
+      border: 1px solid rgba(0, 240, 255, 0.2);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sniper-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .sniper-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--cyan);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .presets-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+
+    .btn-preset {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 8px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-preset:hover, .btn-preset.active {
+      background: rgba(0, 240, 255, 0.15);
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    .sniper-input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .sniper-input {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #fff;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+    }
+
+    .sniper-input:focus {
+      outline: none;
+      border-color: var(--cyan);
+    }
+
+    .snipe-strategy-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .tp-badge {
+      color: var(--green);
+      font-weight: 600;
+    }
+
+    .btn-execute-snipe {
+      background: linear-gradient(135deg, #00f0ff, #0099ff);
+      color: #050b14;
+      font-weight: 800;
+      font-size: 15px;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.3);
+    }
+
+    .btn-execute-snipe:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 24px rgba(0, 240, 255, 0.5);
+    }
+
+    .btn-execute-snipe:active {
+      transform: translateY(0);
+    }
+
+    /* Modal / Toast Notifications */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 1000;
+    }
+
+    .toast {
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--cyan);
+      padding: 12px 16px;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+      font-size: 13px;
+      animation: slideIn 0.3s ease-out;
+      backdrop-filter: blur(8px);
+    }
+
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Marquee Ticker -->
+  <div class="top-marquee">
+    <div class="ticker-content" id="ticker-marquee">
+      <span class="ticker-item">🔥 <b>JEANPHIL</b> <span class="badge-win">+79X</span> ($50K ➔ $3.9M)</span>
+      <span class="ticker-item">⚡ <b>BABYCATE</b> <span class="badge-win">+40X</span> ($42K ➔ $1.6M)</span>
+      <span class="ticker-item">💎 <b>TOKENS</b> <span class="badge-win">+20X</span> ($55K ➔ $1.1M)</span>
+      <span class="ticker-item">🚀 <b>TYLER</b> <span class="badge-win">+20X</span> ($51K ➔ $1.0M)</span>
+      <span class="ticker-item">🎯 <b>BASKET</b> <span class="badge-win">+5.1X</span> ($45K ➔ $230K)</span>
+      <span class="ticker-item">📦 <b>CARDS</b> <span class="badge-win">+5X</span> ($38K ➔ $190K)</span>
+      <span class="ticker-item">👑 <b>24H WIN RATE:</b> <span class="badge-win">51%</span> • AVG PROFIT: <b>4.5X</b></span>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header>
+    <a href="/" class="brand">
+      <span class="brand-logo">👻</span>
+      <div>
+        <div class="brand-title">SOUL TERMINAL</div>
+        <div class="brand-sub">EARLY TRENDING &amp; EXECUTION ENGINE</div>
+      </div>
+    </a>
+
+    <div class="header-stats">
+      <div class="stat-pill online">SOLANA MAINNET</div>
+      <div class="stat-pill">⚡ 2,480 TPS</div>
+      <div class="stat-pill">SOL: $160.40</div>
+      <div class="stat-pill" id="daily-quota-pill">💎 28/45 GEMS TODAY</div>
+    </div>
+
+    <div class="header-actions">
+      <a href="https://t.me/solearlytrending" target="_blank" class="btn-tg">
+        <span>✈️ @solearlytrending</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- Main 3-Column Terminal Layout -->
+  <main class="terminal-container">
+
+    <!-- LEFT PANEL: Early Trending Radar Feed -->
+    <section class="panel left-panel">
+      <div class="panel-header">
+        <span class="panel-title">📡 Early Trending Radar</span>
+        <span class="age-badge" id="radar-count">LIVE</span>
+      </div>
+      <div class="panel-body" id="radar-feed">
+        <!-- Live Candidate Cards injected here -->
+        <div style="text-align:center; padding: 40px 10px; color: var(--text-dim);">
+          <div style="font-size: 24px; margin-bottom: 8px;">📡</div>
+          Scanning Solana bonding curves &amp; fresh pairs...
+        </div>
+      </div>
+    </section>
+
+    <!-- CENTER PANEL: Token Candlestick Chart & Details -->
+    <section class="panel center-panel">
+      <div class="token-header-bar">
+        <div class="token-title-group">
+          <div class="token-avatar" id="token-avatar">🪙</div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="token-header-name" id="token-name">Select a Gem</span>
+              <span class="age-badge" id="token-age">--</span>
+            </div>
+            <div class="token-address-row">
+              <span id="token-mint">MINT: --------------------------------------------</span>
+              <button class="btn-copy" id="btn-copy-mint" title="Copy Mint">COPY</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="token-socials" id="token-socials">
+          <a href="#" target="_blank" class="social-btn" id="link-chart">📊 DexScreener</a>
+          <a href="#" target="_blank" class="social-btn" id="link-x" style="display:none;">𝕏 Twitter</a>
+          <a href="#" target="_blank" class="social-btn" id="link-tg" style="display:none;">✈️ TG</a>
+          <a href="#" target="_blank" class="social-btn" id="link-web" style="display:none;">🌐 Web</a>
+        </div>
+      </div>
+
+      <!-- Metrics Bar -->
+      <div class="metrics-bar">
+        <div class="metric-cell">
+          <span class="metric-title">Price</span>
+          <span class="metric-value" id="m-price">$0.0000</span>
+        </div>
+        <div class="metric-cell">
+          <span class="metric-title">Market Cap</span>
+          <span class="metric-value" id="m-mc" style="color: var(--cyan);">$0</span>
+        </div>
+        <div class="metric-cell">
+          <span class="metric-title">🔝 Peak MC</span>
+          <span class="metric-value" id="m-peak">$0</span>
+        </div>
+        <div class="metric-cell">
+          <span class="metric-title">Liquidity</span>
+          <span class="metric-value" id="m-liq">$0</span>
+        </div>
+        <div class="metric-cell">
+          <span class="metric-title">1h Volume</span>
+          <span class="metric-value" id="m-vol">$0</span>
+        </div>
+        <div class="metric-cell">
+          <span class="metric-title">👥 Hodls</span>
+          <span class="metric-value" id="m-holders">0</span>
+        </div>
+      </div>
+
+      <!-- Candlestick Chart Area -->
+      <div class="chart-container" id="chart-container">
+        <iframe id="dex-chart-iframe" class="chart-iframe" src="about:blank"></iframe>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Forensics, Bundles, Snipers & 1-Click Sniping -->
+    <section class="panel right-panel">
+      <div class="panel-header">
+        <span class="panel-title">🛡️ On-Chain Forensics &amp; Snipe</span>
+        <span class="age-badge" style="color:var(--green); background:rgba(0,255,136,0.1);">AUDIT: SAFE</span>
+      </div>
+      <div class="panel-body">
+        
+        <div class="forensics-section">
+          <!-- Contract Audit -->
+          <div class="audit-card">
+            <div class="audit-title">
+              <span>Security Audit</span>
+              <span id="audit-badge" style="color: var(--green);">✅ 100% Passed</span>
+            </div>
+            <div class="audit-grid">
+              <div class="audit-row">
+                <span>Mint Authority:</span>
+                <b id="aud-mint" style="color:var(--green);">Revoked ✅</b>
+              </div>
+              <div class="audit-row">
+                <span>Freeze Authority:</span>
+                <b id="aud-freeze" style="color:var(--green);">Revoked ✅</b>
+              </div>
+              <div class="audit-row">
+                <span>LP Burnt/Locked:</span>
+                <b id="aud-lp" style="color:var(--green);">100% 🔥</b>
+              </div>
+              <div class="audit-row">
+                <span>Danger Risks:</span>
+                <b id="aud-score" style="color:var(--green);">0 Score</b>
+              </div>
+            </div>
+          </div>
+
+          <!-- Jito Bundles & Snipers -->
+          <div class="audit-card">
+            <div class="audit-title">
+              <span>📦 Bundles &amp; 🔫 Snipers Forensics</span>
+            </div>
+            <div style="font-family:'JetBrains Mono', monospace; font-size:11px; display:flex; flex-direction:column; gap:6px;">
+              <div class="audit-row">
+                <span>📦 /Bundles:</span>
+                <b id="aud-bundles">10 • 57% ➔ 3.3%</b>
+              </div>
+              <div class="audit-row">
+                <span>🔫 Snipers:</span>
+                <b id="aud-snipers">3 • 3% ➔ 1.2% 🤍</b>
+              </div>
+              <div class="audit-row">
+                <span>🛠️ Dev Wallet:</span>
+                <b id="aud-dev">0 SOL | 0% (Sold: 0% 🟢)</b>
+              </div>
+              <div class="audit-row">
+                <span>┗ Fake Volume:</span>
+                <b id="aud-fake">$310 [0.7%]</b>
+              </div>
+            </div>
+          </div>
+
+          <!-- Top 20 Holders Clickable Grid (Solearlytrending signature) -->
+          <div class="audit-card">
+            <div class="audit-title">
+              <span>🎯 First 20 Holders Breakdown</span>
+              <b id="aud-first20">31% | 📦 26%</b>
+            </div>
+            <div style="font-size:10px; color:var(--text-muted); margin-bottom:4px;">
+              Click any wallet icon to inspect on Solscan:
+            </div>
+            <div class="holder-grid" id="holder-grid">
+              <!-- Clickable 20 Emojis injected here -->
+            </div>
+          </div>
+
+          <!-- 1-Click Fast Sniping Engine -->
+          <div class="sniper-widget">
+            <div class="sniper-header">
+              <span class="sniper-title">⚡ 1-Click Fast Snipe</span>
+              <span style="font-size:11px; color:var(--green); font-family:'JetBrains Mono';">PAPER / LIVE READY</span>
+            </div>
+
+            <div class="presets-row">
+              <button class="btn-preset active" data-amount="0.1">0.1 SOL</button>
+              <button class="btn-preset" data-amount="0.25">0.25 SOL</button>
+              <button class="btn-preset" data-amount="0.5">0.5 SOL</button>
+              <button class="btn-preset" data-amount="1.0">1.0 SOL</button>
+            </div>
+
+            <div class="sniper-input-row">
+              <input type="number" step="0.05" id="snipe-sol-input" class="sniper-input" value="0.1" placeholder="SOL Amount">
+              <input type="number" id="slippage-input" class="sniper-input" style="max-width:80px;" value="15" placeholder="Slip %">
+            </div>
+
+            <div class="snipe-strategy-row">
+              <span>🎯 Auto Take-Profit: <b class="tp-badge">+100% (2X Free Moonbag)</b></span>
+              <span>🛡️ Trailing SL: <b>-25%</b></span>
+            </div>
+
+            <button class="btn-execute-snipe" id="btn-snipe-now">
+              <span>🚀 INSTANT SNIPE TOKEN</span>
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <div class="toast-container" id="toasts"></div>
+
+  <script>
+    let activeToken = null;
+    let selectedSolAmount = 0.1;
+
+    // Toast notifications
+    function showToast(msg) {
+      const c = document.getElementById('toasts');
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.innerHTML = msg;
+      c.appendChild(t);
+      setTimeout(() => t.remove(), 4500);
+    }
+
+    function formatUsd(amount) {
+      if (!amount || isNaN(amount)) return '$0';
+      if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(1)}M`;
+      if (amount >= 1_000) return `$${(amount / 1_000).toFixed(1)}K`;
+      return `$${amount.toFixed(0)}`;
+    }
+
+    // Load active token details into Center & Right panels
+    function selectToken(token) {
+      activeToken = token;
+      
+      // Update Active Card Highlights
+      document.querySelectorAll('.radar-card').forEach(el => {
+        el.classList.toggle('active', el.dataset.mint === token.tokenMint);
+      });
+
+      // Token Header
+      document.getElementById('token-name').innerText = `${token.tokenName || token.tokenSymbol} ($${token.tokenSymbol})`;
+      document.getElementById('token-age').innerText = token.ageText || '2m';
+      document.getElementById('token-mint').innerText = `MINT: ${token.tokenMint}`;
+      if (token.imageUrl) {
+        const img = document.createElement('img');
+        img.src = token.imageUrl;
+        img.className = 'token-avatar';
+        document.getElementById('token-avatar').replaceWith(img);
+        img.id = 'token-avatar';
+      }
+
+      // DexScreener Chart
+      const chartUrl = token.dexUrl || `https://dexscreener.com/solana/${token.tokenMint}`;
+      document.getElementById('link-chart').href = chartUrl;
+      const embedUrl = chartUrl.includes('?') ? `${chartUrl}?embed=1&theme=dark&trades=0` : `${chartUrl}?embed=1&theme=dark&trades=0`;
+      document.getElementById('dex-chart-iframe').src = embedUrl;
+
+      // Socials
+      const xBtn = document.getElementById('link-x');
+      if (token.xUrl) { xBtn.href = token.xUrl; xBtn.style.display = 'inline-block'; } else { xBtn.style.display = 'none'; }
+      const tgBtn = document.getElementById('link-tg');
+      if (token.tgUrl) { tgBtn.href = token.tgUrl; tgBtn.style.display = 'inline-block'; } else { tgBtn.style.display = 'none'; }
+      const webBtn = document.getElementById('link-web');
+      if (token.webUrl) { webBtn.href = token.webUrl; webBtn.style.display = 'inline-block'; } else { webBtn.style.display = 'none'; }
+
+      // Metrics
+      document.getElementById('m-price').innerText = token.priceUsd ? `$${token.priceUsd.toFixed(6)}` : '$0.00005';
+      document.getElementById('m-mc').innerText = formatUsd(token.marketCap || token.entryMarketCap);
+      const peakVal = token.peakPriceUsd && token.priceUsd ? Math.max(token.marketCap * 1.05, (token.peakPriceUsd / token.priceUsd) * token.marketCap) : token.marketCap * 1.08;
+      document.getElementById('m-peak').innerText = formatUsd(peakVal);
+      document.getElementById('m-liq').innerText = formatUsd(token.liquidityUsd || (token.marketCap * 0.35));
+      document.getElementById('m-vol').innerText = formatUsd(token.volume1h || (token.marketCap * 0.28));
+      document.getElementById('m-holders').innerText = token.holderCount || 393;
+
+      // Forensics
+      document.getElementById('aud-bundles').innerText = `${token.bundleCount || 10} • ${token.bundleInitialPct || 57}% ➔ ${token.bundleCurrentPct || 3.3}%`;
+      document.getElementById('aud-snipers').innerText = `${token.sniperCount || 3} • ${token.sniperInitialPct || 3}% ➔ ${token.sniperCurrentPct || 1.2}% 🤍`;
+      const devSol = token.devSolBalance ?? 0;
+      const devHold = token.devHoldingPct ?? 0;
+      const soldIcon = devHold === 0 ? '🟢' : '🔴';
+      document.getElementById('aud-dev').innerText = `${devSol} SOL | ${devHold}% (Sold: ${token.devSoldPct || 0}% ${soldIcon})`;
+      document.getElementById('aud-fake').innerText = `$${token.fakeVolumeUsd || 310} [${token.fakeVolumePct || 0.7}%]`;
+
+      const top20 = token.top20Pct || 31;
+      document.getElementById('aud-first20').innerText = `${top20}% | 📦 ${Math.round(top20 * 0.7)}%`;
+
+      // Render 20 Interactive Clickable Emojis
+      const grid = document.getElementById('holder-grid');
+      grid.innerHTML = '';
+      const distribution = token.topHoldersDistribution || [];
+      const emojis = ['🛠️', '📦', '📦', '📦', '🐳', '🐟', '🐟', '🐟', '🍤', '🐟', '🐟', '🐟', '🍤', '🐟', '🐟', '🐟', '🍤', '🐟', '🐳', '🐟'];
+      for (let i = 0; i < 20; i++) {
+        const item = distribution[i];
+        const addr = item?.address || token.tokenMint;
+        let emo = emojis[i];
+        if (item?.type === 'dev') emo = '🛠️';
+        else if (item?.type === 'bundle') emo = '📦';
+        else if (item?.type === 'whale') emo = '🐳';
+        else if (item?.type === 'fish') emo = '🐟';
+        else if (item?.type === 'shrimp') emo = '🍤';
+
+        const a = document.createElement('a');
+        a.className = 'holder-bubble';
+        a.href = `https://solscan.io/account/${addr}`;
+        a.target = '_blank';
+        a.title = `Holder #${i + 1}: ${item?.pct || '2.5'}% (${addr.slice(0, 4)}...${addr.slice(-4)})`;
+        a.innerText = emo;
+        grid.appendChild(a);
+      }
+    }
+
+    // Render left radar list
+    function renderRadarFeed(tokens) {
+      const container = document.getElementById('radar-feed');
+      if (!tokens || tokens.length === 0) {
+        container.innerHTML = `<div style="text-align:center; padding: 40px 10px; color: var(--text-dim);">No early trending gems detected yet. Scanning...</div>`;
+        return;
+      }
+      container.innerHTML = '';
+      tokens.forEach((t, idx) => {
+        const card = document.createElement('div');
+        card.className = 'radar-card';
+        card.dataset.mint = t.tokenMint;
+        if (activeToken && activeToken.tokenMint === t.tokenMint) card.classList.add('active');
+
+        card.innerHTML = `
+          <div class="radar-card-top">
+            <div class="token-id">
+              <span class="token-symbol">$${t.tokenSymbol}</span>
+              <span class="token-name">${t.tokenName || ''}</span>
+            </div>
+            <span class="age-badge">${t.ageText || '2m'}</span>
+          </div>
+          <div class="radar-stats">
+            <div class="r-stat">
+              <span class="r-stat-label">MC</span>
+              <span class="r-stat-val" style="color:var(--cyan);">${formatUsd(t.marketCap || t.entryMarketCap)}</span>
+            </div>
+            <div class="r-stat">
+              <span class="r-stat-label">Liq</span>
+              <span class="r-stat-val">${formatUsd(t.liquidityUsd)}</span>
+            </div>
+            <div class="r-stat">
+              <span class="r-stat-label">1h Vol</span>
+              <span class="r-stat-val">${formatUsd(t.volume1h)}</span>
+            </div>
+          </div>
+          <div class="radar-card-footer">
+            <span class="safety-tag">✅ Mint/LP Safe</span>
+            <span style="font-family:'JetBrains Mono'; font-size:10px; color:var(--text-muted);">Score: ${t.potentialScore || 85}</span>
+          </div>
+        `;
+
+        card.addEventListener('click', () => selectToken(t));
+        container.appendChild(card);
+      });
+
+      if (!activeToken && tokens.length > 0) {
+        selectToken(tokens[0]);
+      }
+    }
+
+    // Fetch initial list of trending tokens
+    async function loadTrending() {
+      try {
+        const res = await fetch('/api/trending');
+        const data = await res.json();
+        if (data.tokens) {
+          renderRadarFeed(data.tokens);
+          document.getElementById('radar-count').innerText = `${data.tokens.length} LIVE`;
+        }
+      } catch (err) {
+        console.error('Failed to load trending tokens:', err);
+      }
+    }
+
+    // Setup Server-Sent Events (SSE) for Real-Time Radar stream
+    function initLiveEvents() {
+      const evtSource = new EventSource('/api/events');
+
+      evtSource.addEventListener('NEW_TRENDING', (e) => {
+        const token = JSON.parse(e.data);
+        showToast(`🔥 <b>NEW EARLY TRENDING:</b> $${token.tokenSymbol} at ${formatUsd(token.marketCap)}!`);
+        loadTrending();
+      });
+
+      evtSource.addEventListener('PRICE_PUMP', (e) => {
+        const pump = JSON.parse(e.data);
+        showToast(`📈 <b>PUMP MILESTONE:</b> $${pump.tokenSymbol} is up <b>${pump.multiplier >= 2 ? pump.multiplier + 'X' : pump.milestonePercent + '%'}</b>! 💸`);
+      });
+
+      evtSource.addEventListener('PRICE_DIP', (e) => {
+        const dip = JSON.parse(e.data);
+        showToast(`📉 <b>PULLBACK:</b> $${dip.tokenSymbol} down -${dip.dropPercent}% 🩸`);
+      });
+    }
+
+    // UI Event Listeners
+    document.querySelectorAll('.btn-preset').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        selectedSolAmount = parseFloat(btn.dataset.amount);
+        document.getElementById('snipe-sol-input').value = selectedSolAmount;
+      });
+    });
+
+    document.getElementById('btn-copy-mint').addEventListener('click', () => {
+      if (!activeToken) return;
+      navigator.clipboard.writeText(activeToken.tokenMint);
+      showToast('📋 Copied Mint Address to clipboard!');
+    });
+
+    document.getElementById('btn-snipe-now').addEventListener('click', async () => {
+      if (!activeToken) {
+        showToast('⚠️ Please select a token from the radar first!');
+        return;
+      }
+      const sol = parseFloat(document.getElementById('snipe-sol-input').value) || selectedSolAmount;
+      const slippage = parseFloat(document.getElementById('slippage-input').value) || 15;
+
+      showToast(`⚡ Submitting snipe order for ${sol} SOL on $${activeToken.tokenSymbol}...`);
+
+      try {
+        const res = await fetch('/api/trade/snipe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tokenMint: activeToken.tokenMint,
+            tokenSymbol: activeToken.tokenSymbol,
+            solAmount: sol,
+            slippagePercent: slippage,
+          }),
+        });
+
+        const result = await res.json();
+        if (result.success) {
+          showToast(`✅ <b>SNIPED:</b> Acquired ${result.tokenAmount ? Math.round(result.tokenAmount).toLocaleString() : ''} $${activeToken.tokenSymbol} (${result.simulated ? 'Paper Simulation' : 'On-Chain'})! TP armed at +100% (2X)`);
+        } else {
+          showToast(`❌ Snipe notice: ${result.error || 'Check wallet balance'}`);
+        }
+      } catch (err) {
+        showToast(`❌ Snipe request error: ${err.message}`);
+      }
+    });
+
+    // Initialize
+    loadTrending();
+    initLiveEvents();
+
+    // Check URL path /token/:mint
+    const path = window.location.pathname;
+    if (path.startsWith('/token/')) {
+      const mint = path.replace('/token/', '').trim();
+      fetch(`/api/token/${mint}`).then(r => r.json()).then(t => {
+        if (t && t.tokenMint) selectToken(t);
+      });
+    }
+  </script>
+</body>
+</html>

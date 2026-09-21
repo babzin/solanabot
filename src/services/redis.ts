@@ -30,6 +30,9 @@ export const REDIS_KEYS = {
   SECURITY_CACHE: (mint: string) => `security:cache:${mint}`,
 };
 
+// Fast-path in-memory set for 0ms lookup across hundreds of accounts in swap transactions
+const localTrackedSet = new Set<string>();
+
 /**
  * Checks if a transaction signature was already ingested/processed.
  * Sets key with 24-hour expiration if new.
@@ -45,6 +48,11 @@ export async function isDuplicateSignature(signature: string): Promise<boolean> 
  * Syncs the active wallet sets and metadata into Redis
  */
 export async function syncWalletsToRedis(wallets: ScoredWallet[]): Promise<void> {
+  localTrackedSet.clear();
+  for (const w of wallets) {
+    localTrackedSet.add(w.address);
+  }
+
   const pipeline = redis.pipeline();
 
   // Clear previous active sets
@@ -74,11 +82,22 @@ export async function syncWalletsToRedis(wallets: ScoredWallet[]): Promise<void>
 }
 
 /**
- * Checks if an address is currently in the active tracked set
+ * Checks if an address is currently in the active tracked set (0ms in-memory fast-path)
  */
 export async function isWalletTracked(address: string): Promise<boolean> {
+  if (localTrackedSet.size > 0) {
+    return localTrackedSet.has(address);
+  }
   const isMember = await redis.sismember(REDIS_KEYS.WALLETS_ALL, address);
-  return isMember === 1;
+  if (isMember === 1) {
+    localTrackedSet.add(address);
+    return true;
+  }
+  return false;
+}
+
+export function getLocalTrackedAddresses(): string[] {
+  return Array.from(localTrackedSet);
 }
 
 /**

@@ -32,6 +32,15 @@ export interface StrategyCriteria {
   strategyNotes: string;
 }
 
+export interface DiscoveredBuy {
+  signature: string;
+  tokenMint: string;
+  tokenSymbol?: string;
+  tokenAmount: number;
+  solAmount: number;
+  timestamp: number;
+}
+
 export interface ScoredWallet {
   address: string;
   label?: string;
@@ -42,6 +51,7 @@ export interface ScoredWallet {
   totalTrades: number;
   medianHoldSeconds: number;
   netSolProfit: number;
+  recentBuys?: DiscoveredBuy[];
 }
 
 export interface SwapEvent {
@@ -71,7 +81,7 @@ export interface SecurityCheckResult {
 export interface HolderDistributionItem {
   address: string;
   pct: number;
-  type: 'dev' | 'bundle' | 'whale' | 'dolphin' | 'shrimp';
+  type: 'dev' | 'bundle' | 'whale' | 'fish' | 'shrimp';
 }
 
 export interface TokenAnalytics {

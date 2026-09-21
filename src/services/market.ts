@@ -44,7 +44,7 @@ interface DexScreenerResponse {
 const ESTIMATED_SOL_PRICE_USD = 160.0;
 
 export function formatAgeFromTimestamp(createdAtMs?: number): string {
-  if (!createdAtMs) return '3m';
+  if (!createdAtMs) return 'Just now';
   const diffSec = Math.max(1, Math.floor((Date.now() - createdAtMs) / 1000));
   if (diffSec < 60) return `${diffSec}s`;
   const diffMin = Math.floor(diffSec / 60);
@@ -158,19 +158,19 @@ export async function getMarketData(
             { address: 'EjH1...uCMd', pct: 3.1, type: 'bundle' },
             { address: '3LLi...GCp7', pct: 2.8, type: 'whale' },
             { address: 'Aqk9...dbwS', pct: 2.5, type: 'whale' },
-            { address: '5dGw...2HJk', pct: 2.0, type: 'dolphin' },
-            { address: 'H2TC...Hcff', pct: 1.7, type: 'dolphin' },
+            { address: '5dGw...2HJk', pct: 2.0, type: 'fish' },
+            { address: 'H2TC...Hcff', pct: 1.7, type: 'fish' },
             { address: 'FhwF...Zqwj', pct: 1.3, type: 'shrimp' },
-            { address: 'G9G3...wbj4', pct: 1.1, type: 'dolphin' },
+            { address: 'G9G3...wbj4', pct: 1.1, type: 'fish' },
             { address: 'DiqY...hc3j', pct: 0.9, type: 'shrimp' },
-            { address: '7hrm...UFGa', pct: 0.8, type: 'dolphin' },
+            { address: '7hrm...UFGa', pct: 0.8, type: 'fish' },
             { address: 'CA5C...AN2v', pct: 0.7, type: 'shrimp' },
             { address: '95rj...gMno', pct: 0.6, type: 'shrimp' },
-            { address: 'CVxU...Jev8', pct: 0.5, type: 'dolphin' },
-            { address: 'Cqyd...P3J', pct: 0.5, type: 'dolphin' },
-            { address: 'FsiC...NSTg', pct: 0.4, type: 'dolphin' },
-            { address: '7nY4...Sgtu', pct: 0.4, type: 'dolphin' },
-            { address: '4VYX...j6CM', pct: 0.4, type: 'dolphin' },
+            { address: 'CVxU...Jev8', pct: 0.5, type: 'fish' },
+            { address: 'Cqyd...P3J', pct: 0.5, type: 'fish' },
+            { address: 'FsiC...NSTg', pct: 0.4, type: 'fish' },
+            { address: '7nY4...Sgtu', pct: 0.4, type: 'fish' },
+            { address: '4VYX...j6CM', pct: 0.4, type: 'fish' },
           ],
         },
       };
@@ -244,8 +244,8 @@ export async function getMarketData(
           { address: 'EjH1...uCMd', pct: 3.1, type: 'bundle' },
           { address: '3LLi...GCp7', pct: 2.8, type: 'whale' },
           { address: 'Aqk9...dbwS', pct: 2.5, type: 'whale' },
-          { address: '5dGw...2HJk', pct: 2.0, type: 'dolphin' },
-          { address: 'H2TC...Hcff', pct: 1.7, type: 'dolphin' },
+          { address: '5dGw...2HJk', pct: 2.0, type: 'fish' },
+          { address: 'H2TC...Hcff', pct: 1.7, type: 'fish' },
           { address: 'FhwF...Zqwj', pct: 1.3, type: 'shrimp' },
         ],
       },

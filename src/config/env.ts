@@ -24,6 +24,9 @@ const envSchema = z.object({
   TROJAN_REF_CODE: z.string().default(''),
   PHOTON_REF_CODE: z.string().default(''),
 
+  APP_BASE_URL: z.string().optional(),
+  TELEGRAM_BOT_USERNAME: z.string().default('solearlytrending_bot'),
+
   USER_SOLANA_WALLET: z.string().default('6hb1Nmj9C8xZe5oWAKYBgJcPMZnqxAGTHPBqouuy5NmM'),
   SNIPER_PRIVATE_KEY: z.string().optional(),
   AUTO_SNIPE_DEFAULT_SOL: z.coerce.number().default(0.01),
@@ -35,6 +38,7 @@ const envSchema = z.object({
   PRICE_IMPACT_MAX_PERCENT: z.coerce.number().default(3.0),
   MIN_POOL_RESERVE_SOL: z.coerce.number().default(25.0),
   DISCOVERY_INTERVAL_HOURS: z.coerce.number().default(24),
+  ENABLE_TUNNEL: z.coerce.boolean().default(true),
 });
 
 const parsed = envSchema.safeParse(process.env);

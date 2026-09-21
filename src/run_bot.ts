@@ -1,37 +1,37 @@
-import { bot, initTelegramCommands } from './services/telegram.js';
 import { env } from './config/env.js';
+import { prisma } from './services/db.js';
+import { initEarlyTrendingCron } from './services/earlyTrending.js';
+import { initPriceMilestoneTracker } from './services/priceTracker.js';
+import { redis } from './services/redis.js';
+import { bot, initTelegramCommands } from './services/telegram.js';
 
-async function startBot() {
+async function startFullBot() {
   console.log('====================================================');
-  console.log('🤖 SOLANA COPY TRADING BOT - TELEGRAM RUNNER');
+  console.log('🔥 SOLANA EARLY & WHALE TRENDING RADAR (@solearlytrending)');
   console.log('====================================================');
 
   if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-    console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing or dummy in .env');
-    console.error('Please configure your token from @BotFather in your .env file.');
+    console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing in .env');
     process.exit(1);
   }
 
   try {
+    // 1. Telegram Connection
     const me = await bot.getMe();
     console.log(`✅ Connected to Telegram as @${me.username} (${me.first_name})`);
     console.log(`📡 Registered Chat ID: ${env.TELEGRAM_CHAT_ID}`);
-    console.log('🟢 Polling mode active: Bot is listening for incoming messages...');
-    console.log('\n💡 Try sending any of these commands on Telegram:');
-    console.log('   /start     - Welcome message and interactive menu');
-    console.log('   /filter    - 1-on-1 Signal filter (Safe, Risk, Show All)');
-    console.log('   /wallets   - View All 30 Tracked Smart Wallets with names');
-    console.log('   /top       - Highest win-rate trader and stats today');
-    console.log('   /daily     - Total money made and PnL breakdown');
-    console.log('   /snipe 0.05- Configure auto-snipe trade size');
-    console.log('   /autosnipe - Toggle auto-sniping on/off');
-    console.log('   /status    - View current sniper and filter settings');
-    console.log('----------------------------------------------------\n');
 
-    // Initialize command handlers and start polling
+    // 2. Initialize Early & Whale Radar Cron (2-Min Breakouts, 25-30/Day, @solearlytrending Style)
+    initEarlyTrendingCron();
+
+    // 3. Initialize 50% Price Milestone Tracker (+50% Pump & -50% Dip Alerts)
+    initPriceMilestoneTracker();
+
+    // 4. Initialize Telegram Commands & Polling
     initTelegramCommands();
+    console.log('🟢 Telegram Polling: Online (Listening for /start, /daily, /top, /milestones, /positions, /autosnipe)');
 
-    // Log incoming messages for visibility in terminal
+    // Log user interactions
     bot.on('message', (msg) => {
       const from = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || 'User');
       console.log(`📥 [Incoming Message] From: ${from} | Text: "${msg.text || ''}"`);
@@ -42,10 +42,23 @@ async function startBot() {
       console.log(`🔘 [Button Clicked] From: ${from} | Action: "${query.data}"`);
     });
 
+    console.log('----------------------------------------------------');
+    console.log('✨ All systems operational. Solana Early Trending Radar ready!\n');
+
+    // Graceful shutdown
+    const shutdown = async () => {
+      console.log('\n🛑 Shutting down bot gracefully...');
+      redis.disconnect();
+      await prisma.$disconnect();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   } catch (err: any) {
-    console.error('❌ Failed to connect to Telegram:', err.message);
+    console.error('❌ Failed to start bot runner:', err.message);
     process.exit(1);
   }
 }
 
-startBot();
+startFullBot();

@@ -83,3 +83,40 @@ model UserPreference {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
+
+model EarlyTrendingToken {
+  id                  String   @id @default(cuid())
+  tokenMint           String   @unique
+  tokenSymbol         String
+  tokenName           String
+  pairAddress         String?
+  dexUrl              String?
+  imageUrl            String?
+  pairCreatedAt       BigInt?
+  ageMinutes          Int?
+  liquidityUsd        Float?
+  volume1h            Float?
+  holderCount         Int?
+  top20Pct            Float?
+  devHoldingPct       Float?
+  xUrl                String?
+  webUrl              String?
+  tgUrl               String?
+  entryPriceUsd       Float
+  entryMarketCap      Float
+  peakPriceUsd        Float
+  lowestPriceUsd      Float
+  lastAlertedPriceUsd Float
+  lastMilestonePct    Int      @default(0) // Highest +50% milestone reached (e.g. 50, 100, 150...)
+  lastDipMilestonePct Int      @default(0) // Lowest -50% dip milestone reached (e.g. -50)
+  status              String   @default("ACTIVE") // ACTIVE, GRADUATED, STOPPED
+  alertDate           String   // Date string "YYYY-MM-DD" for strict quota
+  whaleSolAmount      Float?   // Whale buy amount in SOL if detected
+  dailyQuotaIndex     Int      // Number for this day
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([alertDate])
+  @@index([status])
+}
+

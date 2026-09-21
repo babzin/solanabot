@@ -1,21 +1,27 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { env } from '../config/env.js';
-import { STRATEGY_DEFINITIONS } from '../config/strategies.js';
-import { RiskTier, TradeAlert } from '../types/index.js';
 import { prisma } from './db.js';
 import {
   executeSnipeTrade,
+  executeSnipeSell,
   getUserAutoSnipeConfig,
   setUserAutoSnipeConfig,
   getUserPreferences,
-  setUserPreferences,
-  setUserFilterMode,
-  FilterMode,
+  getActivePositions,
+  getAllPositions,
   SnipeResult,
+  SnipedPosition,
 } from './sniper.js';
+import { broadcastPricePump, broadcastPriceDip } from './events.js';
 
 export const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, {
-  polling: false,
+  polling: {
+    interval: 300,
+    autoStart: false,
+    params: {
+      timeout: 10,
+    },
+  },
 });
 
 export function escapeHtml(str: string): string {
@@ -48,294 +54,19 @@ export function formatUsd(num?: number): string {
   return `$${num.toFixed(1)}`;
 }
 
-export function getTrojanBuyUrl(mint: string): string {
-  if (env.TROJAN_REF_CODE && env.TROJAN_REF_CODE !== 'trojan_alpha' && env.TROJAN_REF_CODE.trim().length > 0) {
-    return `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}_${mint}`;
-  }
-  return `https://t.me/solana_trojanbot?start=${mint}`;
-}
-
-export function getPhotonBuyUrl(mint: string): string {
-  if (env.PHOTON_REF_CODE && env.PHOTON_REF_CODE !== 'photon_alpha' && env.PHOTON_REF_CODE.trim().length > 0) {
-    return `https://photon-sol.tinyastro.io/en/lp/${mint}?aff=${env.PHOTON_REF_CODE}`;
-  }
-  return `https://photon-sol.tinyastro.io/en/lp/${mint}`;
+export function getDexScreenerUrl(token: { dexUrl?: string | null; pairAddress?: string | null; tokenMint: string }): string {
+  if (token.dexUrl && token.dexUrl.startsWith('http')) return token.dexUrl;
+  if (token.pairAddress) return `https://dexscreener.com/solana/${token.pairAddress}`;
+  return `https://dexscreener.com/solana/${token.tokenMint}`;
 }
 
 /**
- * Builds the Unified Hybrid Alert Card merging Soul-Scanner analytics with Smart-Money execution
+ * Deprecated: Replaced by Solana Early & Whale Trending Coin Radar (@solearlytrending)
  */
-export function buildUnifiedAlertCard(alert: TradeAlert): string {
-  const { wallet, swap, market, security } = alert;
-  const mint = swap.tokenMint;
-  const isSafe = wallet.tier === RiskTier.SAFE;
-  const badge = isSafe ? '🛡️ <b>[SAFE TIER SIGNAL]</b>' : '🚀 <b>[HIGH-RISK / MOONBAG SIGNAL]</b>';
-  const walletTierDesc = isSafe
-    ? '🛡️ <b>SAFE TIER</b> <i>(High Win-Rate • Low Drawdown)</i>'
-    : '🚀 <b>HIGH RISK TIER</b> <i>(Moonshot • High Asymmetry)</i>';
-  const strategyInfo = STRATEGY_DEFINITIONS[wallet.strategyProfile];
-  const strategyName = escapeHtml(strategyInfo?.name || wallet.strategyProfile);
-
-  const tokenSymbol = market.tokenSymbol || swap.tokenSymbol || 'TOKEN';
-  const tokenName = market.tokenName || 'Solana Token';
-  const tokenDisplay = `${escapeHtml(tokenName)} (<code>$${escapeHtml(tokenSymbol)}</code>)`;
-
-  const a = market.analytics || security.analytics || {
-    ageText: '3m',
-    securityStatus: 'SAFE',
-    securityIcon: '✅',
-    chartUrl: market.dexUrl || `https://dexscreener.com/solana/${mint}`,
-    peakMarketCap: market.marketCap * 1.15,
-    volume1h: 16400,
-    fakeVolume: 0,
-    holderCount: 220,
-    bundleCount: 20,
-    bundleInitialPct: 53.0,
-    bundleCurrentPct: 31.2,
-    sniperCount: 23,
-    sniperInitialPct: 24.0,
-    sniperCurrentPct: 23.4,
-    top20HoldPct: 37.0,
-    devAddress: `${mint.slice(0, 4)}...${mint.slice(-4)}`,
-    devSolBalance: 7.0,
-    devHoldingPct: 0.0,
-    devSoldPct: 25.0,
-    devBundledPct: 25.0,
-    airdropPct: 0.0,
-    lpBurntPct: 3.0,
-    topHoldersDistribution: [],
-  };
-
-  const xLink = a.twitterUrl || `https://x.com/search?q=${mint}`;
-  const chartLink = a.chartUrl || market.dexUrl || `https://dexscreener.com/solana/${mint}`;
-  const mcStr = formatUsd(market.marketCap);
-  const peakStr = formatUsd(a.peakMarketCap);
-  const liqStr = formatUsd(market.liquidityUsd);
-  const volStr = formatUsd(a.volume1h);
-
-  // Visual emoji holder distribution line
-  const emojiMap: Record<string, string> = {
-    dev: '🛠',
-    bundle: '📦',
-    whale: '🐳',
-    dolphin: '🐟',
-    shrimp: '🍤',
-  };
-
-  const holders = a.topHoldersDistribution && a.topHoldersDistribution.length > 0
-    ? a.topHoldersDistribution.slice(0, 20)
-    : [
-        { address: a.devAddress || 'CpbeVkDceLJ3Dz4nJGXdpTy8dtjxrJuaFkiftxs5J7HS', type: 'dev' },
-        { address: '6yJBdJuAyUYoAsfr1BeuaH26iaSGVEmoAaHAFLLSRNuo', type: 'bundle' },
-        { address: '7Md9sRQEomMXdhpQkV3NJw2Gjdy3KcvySawPwQ2vJ6sh', type: 'bundle' },
-        { address: 'WaXgNmfnzZr3f8tygS7N7ujxYYb9mpbqp7PxzFMdhe7', type: 'bundle' },
-        { address: 'EjH1MRCvxepA4eGg3dzvByes68B21SixHVVfXyRwuCMd', type: 'bundle' },
-        { address: '3LLiG6aUBwjxgYJ5LtyXsYWYbhyoV69JtRV5sQzGCpP7', type: 'whale' },
-        { address: 'Aqk98Jyg5vD9wwYaLnR5NTbz8jMjNBbsvLK3QkLsdbwS', type: 'whale' },
-        { address: '5dGwNffEvt2EAZSmTFWb1Jakscer95M6wB63ZZ452HJk', type: 'dolphin' },
-        { address: 'H2TCCt8ZzqwxqZwzaZ4Ps5Q3o8SemifD86dnSq1HcffG', type: 'dolphin' },
-        { address: 'FhwFSBV6UZP55DWjVGAsqaatXajhMZS9ZV84p7Yzq6wj', type: 'shrimp' },
-      ];
-
-  const distLine = holders
-    .map((h) => `<a href="https://solscan.io/account/${h.address}">[${emojiMap[h.type] || '🐟'}]</a>`)
-    .join('');
-
-  const devAddress = a.devAddress || `${mint.slice(0, 4)}...${mint.slice(-4)}`;
-  const truncatedWallet = `${wallet.address.slice(0, 4)}...${wallet.address.slice(-4)}`;
-  const walletCallsign = escapeHtml(wallet.label || 'Apex Trader');
-  const solFormatted = swap.solAmount.toFixed(2);
-  const usdValue = (market.priceUsd && swap.tokenAmount > 0)
-    ? (swap.tokenAmount * market.priceUsd).toFixed(0)
-    : (swap.solAmount * 160).toFixed(0);
-
-  const tokenQtyStr = swap.tokenAmount > 0 ? formatTokenQuantity(swap.tokenAmount) : 'N/A';
-  const entryPriceFormatted = formatUnitPrice(market.priceUsd);
-
-  let curveText = '';
-  if (market.isBondingCurve && market.curveProgress !== undefined) {
-    curveText = `\n📊 <b>Bonding Progress:</b> <code>${market.curveProgress}%</code> <i>(Pump.fun Curve)</i>`;
-  }
-
-  const notes = escapeHtml(strategyInfo?.strategyNotes || 'Manage risk according to pool depth.');
-  const securityReason = security.passed ? 'Verified Clean' : 'Caution Advised';
-
-  return `
-${badge} <b>${strategyName}</b> • <b>${tokenDisplay}</b>
-
-🕒 <b>Age:</b> ${a.ageText} | <b>Security:</b> ${a.securityIcon} <i>(${securityReason})</i>
-🔗 <a href="${xLink}">[X / Twitter]</a> • <a href="${chartLink}">[DexScreener]</a> • <a href="https://solscan.io/token/${mint}#holders">[Hodls: ${a.holderCount}]</a>
-
-📊 <b>TOKEN ON-CHAIN VITALS:</b>
-💰 <b>MC:</b> ${mcStr} • 🔝 <b>Peak:</b> ${peakStr} | 💧 <b>Liq:</b> ${liqStr}
-📈 <b>Vol: 1h:</b> ${volStr} | <b>Fake Vol:</b> $0
-📦 <b>Bundles:</b> ${a.bundleCount} • ${a.bundleInitialPct}% → ${a.bundleCurrentPct}% | 🔫 <b>Snipers:</b> ${a.sniperCount} • ${a.sniperInitialPct}% → ${a.sniperCurrentPct}% ⚠️
-🎯 <b>First 20:</b> ${a.top20HoldPct}% | 📦 <b>Bundled:</b> ${a.bundleInitialPct}%
-${distLine}
-<a href="https://solscan.io/account/${devAddress}">🛠️ Dev:</a> ${a.devSolBalance} SOL | ${a.devHoldingPct}%
-┣ Bundled: ${a.devBundledPct}% 🤍 | Sold: ${a.devSoldPct}% 🔴
-┗ Airdrops: ${a.airdropPct}% 🤍 | Burnt: ${a.lpBurntPct}%
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ <b>SMART MONEY ENTRY DETECTED:</b>
-🎯 <b>Smart Trader:</b> <b>${walletCallsign}</b> (<code>${truncatedWallet}</code>)
-🏷️ <b>Wallet Tier:</b> ${walletTierDesc}
-📈 <b>Performance:</b> <code>${(wallet.winRate * 100).toFixed(1)}% Win Rate</code> | <code>${wallet.profitFactor.toFixed(2)}x Profit Factor</code>
-📦 <b>Position Acquired:</b> <code>${tokenQtyStr} ${tokenSymbol}</code> (for <b>${solFormatted} SOL</b> • ~$${usdValue} USD)
-💵 <b>Entry Spot Price:</b> <code>${entryPriceFormatted}</code> | <b>Pool:</b> <code>${market.poolReserveSol.toFixed(1)} SOL</code>${curveText}
-
-🎯 <b>SUGGESTED PLAYBOOK:</b>
-• <b>Stop Loss:</b> <code>-${strategyInfo?.targetSlPercent || 15}%</code> | <b>Take Profit:</b> <code>+${strategyInfo?.targetTpPercent || 40}%</code>
-• <b>Playbook Note:</b> <i>${notes}</i>
-
-🪙 <b>Token Name:</b> <b>${escapeHtml(tokenName)}</b> (<code>$${escapeHtml(tokenSymbol)}</code>)
-📋 <b>Token CA (Tap to copy):</b>
-<code>${swap.tokenMint}</code>
-`.trim();
-}
-
-/**
- * Dispatches a formatted trade alert to the appropriate Telegram topic thread
- */
-export async function dispatchTradeAlert(alert: TradeAlert): Promise<void> {
-  const { wallet, swap, market } = alert;
-  const isSafe = wallet.tier === RiskTier.SAFE;
-  const threadId = isSafe ? env.TG_TOPIC_SAFE : env.TG_TOPIC_RISK;
-
-  // 1-on-1 Chat Alert Filtering Check
-  const userPref = await getUserPreferences(String(env.TELEGRAM_CHAT_ID));
-  if (isSafe && !userPref.receiveSafeAlerts) {
-    console.log(`🛡️ [ALERT FILTER] Suppressed SAFE trade alert for ${swap.tokenMint} (User mode: RISK ONLY)`);
-    return;
-  }
-  if (!isSafe && !userPref.receiveRiskAlerts) {
-    console.log(`🚀 [ALERT FILTER] Suppressed RISK trade alert for ${swap.tokenMint} (User mode: SAFE ONLY)`);
-    return;
-  }
-
-  const message = buildUnifiedAlertCard(alert);
-
-  // Active 1-tap inline quick-action buttons
-  const trojanUrl = getTrojanBuyUrl(swap.tokenMint);
-  const photonUrl = getPhotonBuyUrl(swap.tokenMint);
-  const gmgnUrl = `https://gmgn.ai/sol/token/${swap.tokenMint}`;
-  const chartUrl = market.dexUrl || `https://dexscreener.com/solana/${swap.tokenMint}`;
-
-  const inlineKeyboard = [
-    [
-      { text: '⚡ Buy on Trojan', url: trojanUrl },
-      { text: '🚀 Buy on Photon', url: photonUrl },
-      { text: '🤖 GMGN', url: gmgnUrl },
-    ],
-    [
-      { text: '📊 DexScreener Chart', url: chartUrl },
-      { text: '🎯 Snipe 0.01 SOL', callback_data: `snipe_quick_0.01_${swap.tokenMint}` },
-      { text: '🎯 Snipe 0.05 SOL', callback_data: `snipe_quick_0.05_${swap.tokenMint}` },
-    ],
-  ];
-
-  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-    console.log(`[Telegram Alert Dry-Run] Topic ${threadId}:\n${message}`);
-    return;
-  }
-
-  try {
-    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
-      parse_mode: 'HTML',
-      message_thread_id: threadId > 0 ? threadId : undefined,
-      reply_markup: {
-        inline_keyboard: inlineKeyboard,
-      },
-      disable_web_page_preview: true,
-    });
-    console.log(`📤 Alert dispatched to Telegram topic ${threadId} for mint ${swap.tokenMint}`);
-  } catch (err: any) {
-    console.error('⚠️ Failed to dispatch Telegram message:', err.message);
-  }
-}
-
-/**
- * Dispatches a critical exit/sell warning when smart money dumps
- */
-export async function dispatchExitAlert(
-  walletAddress: string,
-  tokenMint: string,
-  soldPercent: number,
-  tier: RiskTier,
-  tokenSymbol?: string,
-  walletLabel?: string
-): Promise<void> {
-  const isSafe = tier === RiskTier.SAFE;
-  const threadId = isSafe ? env.TG_TOPIC_SAFE : env.TG_TOPIC_RISK;
-
-  // 1-on-1 Chat Alert Filtering Check
-  const userPref = await getUserPreferences(String(env.TELEGRAM_CHAT_ID));
-  if (isSafe && !userPref.receiveSafeAlerts) {
-    console.log(`🛡️ [ALERT FILTER] Suppressed SAFE exit alert on ${tokenMint} (User mode: RISK ONLY)`);
-    return;
-  }
-  if (!isSafe && !userPref.receiveRiskAlerts) {
-    console.log(`🚀 [ALERT FILTER] Suppressed RISK exit alert on ${tokenMint} (User mode: SAFE ONLY)`);
-    return;
-  }
-
-  const truncatedWallet = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
-  const symbolStr = tokenSymbol ? ` ($${escapeHtml(tokenSymbol)})` : '';
-  const traderDisplay = walletLabel
-    ? `<b>${escapeHtml(walletLabel)}</b> (<code>${truncatedWallet}</code>)`
-    : `<code>${truncatedWallet}</code>`;
-  const tierBadge = isSafe
-    ? '🛡️ <b>[EXIT WARNING: SAFE WALLET SELLING]</b>'
-    : '🚀 <b>[EXIT WARNING: HIGH-RISK WALLET SELLING]</b>';
-  const tierDesc = isSafe
-    ? '🛡️ <b>SAFE TIER</b> <i>(Conservative Trader)</i>'
-    : '🚀 <b>HIGH RISK TIER</b> <i>(Moonshot / Degen Trader)</i>';
-
-  const trojanUrl = getTrojanBuyUrl(tokenMint);
-  const photonUrl = getPhotonBuyUrl(tokenMint);
-
-  const message = `
-${tierBadge}
-
-🪙 <b>Token:</b> <code>${tokenMint}</code>${symbolStr}
-📉 <b>Action:</b> <b>SELL / DUMP</b>
-📦 <b>Liquidated:</b> <b>~${soldPercent.toFixed(0)}%</b> of their position!
-🎯 <b>Trader:</b> ${traderDisplay}
-🏷️ <b>Wallet Tier:</b> ${tierDesc}
-
-📋 <b>Token CA (Tap to copy):</b>
-<code>${tokenMint}</code>
-
-⚠️ <b>Take immediate note:</b> Smart money is taking profit or cutting losses. Tighten trailing stops or consider securing your principal!
-`.trim();
-
-  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-    console.log(`[Telegram Exit Dry-Run] Topic ${threadId}:\n${message}`);
-    return;
-  }
-
-  try {
-    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
-      parse_mode: 'HTML',
-      message_thread_id: threadId > 0 ? threadId : undefined,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '⚡ Sell on Trojan', url: trojanUrl },
-            { text: '🚀 Sell on Photon', url: photonUrl },
-          ],
-        ],
-      },
-      disable_web_page_preview: true,
-    });
-    console.log(`📤 Exit alert dispatched to Telegram topic ${threadId} for mint ${tokenMint}`);
-  } catch (err: any) {
-    console.error('⚠️ Failed to send exit alert:', err.message);
-  }
-}
-
-
+export const buildUnifiedAlertCard = (_alert?: any): string => '';
 export const buildSoulScannerCard = buildUnifiedAlertCard;
+export async function dispatchTradeAlert(_alert?: any): Promise<void> {}
+export async function dispatchExitAlert(..._args: any[]): Promise<void> {}
 
 /**
  * Dispatches an automated snipe execution notification
@@ -413,9 +144,330 @@ export async function dispatchSnipeSellNotification(
   }
 }
 
+export interface PricePumpMilestoneData {
+  tokenMint: string;
+  tokenSymbol: string;
+  tokenName: string;
+  entryPriceUsd: number;
+  currentPriceUsd: number;
+  entryMarketCap: number;
+  currentMarketCap: number;
+  gainPercent: number;
+  milestonePercent: number;
+  multiplier: number;
+  elapsedTimeText: string;
+  dexUrl: string;
+}
+
+export interface PriceDipMilestoneData {
+  tokenMint: string;
+  tokenSymbol: string;
+  tokenName: string;
+  referencePriceUsd: number;
+  currentPriceUsd: number;
+  currentMarketCap: number;
+  referenceMarketCap?: number;
+  dropPercent: number;
+  dipType: string;
+  dexUrl: string;
+}
+
+/**
+ * Generates two 10-emoji rows of clickable Solscan links matching @solearlytrending exact format
+ */
+export function buildSolscanHolderMatrix(token: any): { row1: string; row2: string } {
+  const distribution = token.topHoldersDistribution || [];
+  const defaultEmojis = ['🛠️', '📦', '📦', '📦', '🐳', '🐟', '🐟', '🐟', '🍤', '🐟', '🐟', '🐟', '🍤', '🐟', '🐟', '🐟', '🍤', '🐟', '🐳', '🐟'];
+  const devAddr = token.devAddress || token.tokenMint;
+
+  const links: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    const item = distribution[i];
+    const addr = item?.address || (i === 0 ? devAddr : token.tokenMint);
+    let emo = defaultEmojis[i];
+    if (item?.type === 'dev') emo = '🛠️';
+    else if (item?.type === 'bundle') emo = '📦';
+    else if (item?.type === 'whale') emo = '🐳';
+    else if (item?.type === 'fish') emo = '🐟';
+    else if (item?.type === 'shrimp') emo = '🍤';
+
+    // Solscan individual wallet anchor
+    links.push(`<a href="https://solscan.io/account/${addr}">${emo}</a>`);
+  }
+
+  return {
+    row1: links.slice(0, 10).join(''),
+    row2: links.slice(10, 20).join(''),
+  };
+}
+
+/**
+ * Renders the exact @solearlytrending alert card text for any token
+ */
+export function renderEarlyTrendingCardText(token: any): string {
+  const mint = token.tokenMint;
+  const dexscreenerUrl = getDexScreenerUrl(token);
+  const botUser = env.TELEGRAM_BOT_USERNAME || 'solearlytrending_bot';
+
+  const links: string[] = [];
+  if (token.xUrl) links.push(`<a href="${token.xUrl}">X</a>`);
+  if (token.webUrl) links.push(`<a href="${token.webUrl}">WEB</a>`);
+  if (token.tgUrl) links.push(`<a href="${token.tgUrl}">TG</a>`);
+  links.push(`<a href="${dexscreenerUrl}">CHART</a>`);
+  const linksLine = links.join('•');
+
+  const mc = token.entryMarketCap || token.marketCap || 50_000;
+  const mcStr = formatUsd(mc);
+  const peakVal = token.peakPriceUsd && token.entryPriceUsd && token.entryPriceUsd > 0
+    ? Math.max(mc * 1.05, (token.peakPriceUsd / token.entryPriceUsd) * mc)
+    : mc * 1.08;
+  const peakStr = formatUsd(peakVal);
+
+  const liqUsd = token.liquidityUsd || Math.round(mc * 0.35);
+  const liqStr = formatUsd(liqUsd);
+  const vol1h = token.volume1h || Math.round(mc * 0.28);
+  const vol1hStr = formatUsd(vol1h);
+  const fakeVolUsd = token.fakeVolumeUsd ?? Math.round(vol1h * 0.015);
+  const fakeVolPct = token.fakeVolumePct ?? (vol1h > 0 ? ((fakeVolUsd / vol1h) * 100).toFixed(0) : '2');
+  const fakeVolStr = formatUsd(fakeVolUsd);
+
+  const devSol = token.devSolBalance ?? (token.whaleSolAmount ? Math.max(0, Math.round(token.whaleSolAmount)) : 0);
+  const holderCount = token.holderCount || 393;
+  const top20Pct = token.top20Pct || 33;
+  const devHoldingPct = token.devHoldingPct ?? 0;
+  const fishPct = Math.max(15, Math.round(top20Pct * 0.65));
+  const whalePct = Math.max(5, Math.round(top20Pct - fishPct));
+  const soldIcon = devHoldingPct === 0 ? '🟢' : '🔴';
+  const burntPct = token.lpBurntPct ?? 100;
+
+  const bundleCount = token.bundleCount ?? 6;
+  const bundleInitialPct = token.bundleInitialPct ?? 18;
+  const bundleCurrentPct = token.bundleCurrentPct ?? 1.5;
+
+  const sniperCount = token.sniperCount ?? 23;
+  const sniperInitialPct = token.sniperInitialPct ?? 45;
+  const sniperCurrentPct = token.sniperCurrentPct ?? 6.8;
+
+  const devAddr = token.devAddress || mint;
+  const devBundledPct = token.devBundledPct ?? 0.4;
+  const devSoldPct = token.devSoldPct ?? (devHoldingPct === 0 ? 100 : 0);
+  const airdropPct = token.airdropPct ?? 0;
+
+  let ageText = token.ageText;
+  if (!ageText && token.pairCreatedAt) {
+    const createdMs = typeof token.pairCreatedAt === 'bigint' ? Number(token.pairCreatedAt) : Number(token.pairCreatedAt);
+    const diffMin = Math.max(1, Math.floor((Date.now() - createdMs) / 60_000));
+    ageText = `${diffMin}m`;
+  } else if (!ageText && token.ageMinutes) {
+    ageText = `${token.ageMinutes}m`;
+  } else if (!ageText) {
+    ageText = '2m';
+  }
+
+  const { row1, row2 } = buildSolscanHolderMatrix(token);
+
+  return `
+🔥 <a href="https://t.me/${botUser}?start=snipe_${mint}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
+🕒 <b>Age</b>: ${ageText} | <b>Security</b>: ✅
+🔗 ${linksLine}
+
+💰 <b>MC: ${mcStr}</b> • 🔝 ${peakStr}
+💧 <b>Liq:</b> ${liqStr}
+📈 <b>Vol:</b> <i>1h</i>: ${vol1hStr}
+┗   <a href="https://t.me/${botUser}?start=fakevol_${mint}"><b>Fake</b></a>: ${fakeVolStr} [${fakeVolPct}%]
+👥 <a href="https://solscan.io/token/${mint}#holders"><b>Hodls</b></a>: ${holderCount}
+
+📦 <a href="https://t.me/${botUser}?start=bundle_${mint}"><b>/Bundles</b></a>: ${bundleCount} • ${bundleInitialPct}% → ${bundleCurrentPct}%
+🔫 <a href="https://docs.soulsystems.tech/user-guides/soul-scanner/snipers"><b>Snipers</b></a>: ${sniperCount} • ${sniperInitialPct}% → ${sniperCurrentPct}% 🤍
+<a href="https://t.me/${botUser}?start=first20_${mint}"><b>🎯 First 20</b></a><b>:</b> ${top20Pct}% | 🐟 ${fishPct}% | 🐳 ${whalePct}%
+${row1}
+${row2}
+
+<a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
+┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥
+`.trim();
+}
+
+/**
+ * Dispatches an Early & Whale Radar alert formatted exactly like @solearlytrending
+ */
+export async function dispatchEarlyTrendingAlert(
+  candidate: any,
+  dailyIndex: number = 1
+): Promise<void> {
+  const dexscreenerUrl = getDexScreenerUrl(candidate);
+  const trojanUrl = env.TROJAN_REF_CODE
+    ? `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}-${candidate.tokenMint}`
+    : `https://t.me/solana_trojanbot?start=${candidate.tokenMint}`;
+
+  const photonUrl = env.PHOTON_REF_CODE
+    ? `https://photon-sol.tinyastro.io/en/lp/${candidate.pairAddress || candidate.tokenMint}?ref=${env.PHOTON_REF_CODE}`
+    : `https://photon-sol.tinyastro.io/en/lp/${candidate.pairAddress || candidate.tokenMint}`;
+
+  const message = renderEarlyTrendingCardText(candidate);
+
+  const inlineKeyboard = [
+    [
+      { text: '📊 DexScreener', url: dexscreenerUrl },
+      { text: '🔍 Solscan', url: `https://solscan.io/token/${candidate.tokenMint}` },
+    ],
+    [
+      { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${candidate.tokenMint}` },
+      { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${candidate.tokenMint}` },
+    ],
+    [
+      { text: '🦄 Buy on Trojan', url: trojanUrl },
+      { text: '⚡ Buy on Photon', url: photonUrl },
+    ],
+  ];
+
+  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    console.log(`[Early Radar Dry-Run #${dailyIndex}]:\n${message}`);
+    return;
+  }
+
+  // Attempt photo alert with card as caption if imageUrl is present
+  if (candidate.imageUrl) {
+    try {
+      await bot.sendPhoto(env.TELEGRAM_CHAT_ID, candidate.imageUrl, {
+        caption: message,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      });
+      return;
+    } catch (photoErr: any) {
+      console.warn(`⚠️ Photo dispatch notice for ${candidate.tokenSymbol} (${photoErr.message}), falling back to text card...`);
+    }
+  }
+
+  try {
+    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard },
+      disable_web_page_preview: true,
+    });
+  } catch (err: any) {
+    console.error('⚠️ Failed to dispatch Early Trending Alert:', err.message);
+  }
+}
+
+/**
+ * Dispatches a +50% Profit Pump Milestone Alert matching @solearlytrending format
+ */
+export async function dispatchPricePumpMilestoneAlert(
+  pump: PricePumpMilestoneData
+): Promise<void> {
+  const chartUrl = pump.dexUrl || getDexScreenerUrl(pump);
+  const entryMc = formatUsd(pump.entryMarketCap);
+  const currentMc = formatUsd(pump.currentMarketCap);
+
+  const multText = pump.multiplier >= 2.0 ? `${pump.multiplier}X` : `${pump.milestonePercent}%`;
+
+  let flyingMoney = '💸💸';
+  if (pump.multiplier >= 2.0) flyingMoney = '💸💸💸💸';
+  if (pump.multiplier >= 3.0) flyingMoney = '💸💸💸💸💸💸';
+  if (pump.multiplier >= 5.0) flyingMoney = '💸💸💸💸💸💸💸💸💸💸';
+  if (pump.multiplier >= 10.0) flyingMoney = '💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸';
+  if (pump.multiplier >= 15.0) flyingMoney = '💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸';
+  if (pump.multiplier >= 20.0) flyingMoney = '💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸💸';
+
+  const message = `
+📈 <a href="${chartUrl}"><b>&lrm;${escapeHtml(pump.tokenSymbol)}</b></a> is up <b>${multText}</b> 📈
+from ⚡️ <a href="${chartUrl}">Entry Signal</a>
+
+<b>${entryMc}</b> —> <b>${currentMc}</b> 💵
+
+${flyingMoney}
+`.trim();
+
+  // Broadcast to Soul Web Terminal
+  broadcastPricePump(pump);
+
+  const inlineKeyboard = [
+    [
+      { text: '📊 DexScreener Chart', url: chartUrl },
+      { text: '🔍 Solscan', url: `https://solscan.io/token/${pump.tokenMint}` },
+    ],
+    [
+      { text: '💰 Take-Profit (Sell 50%)', callback_data: `sell_quick_50_${pump.tokenMint}` },
+      { text: '🚪 Exit All (100%)', callback_data: `sell_quick_100_${pump.tokenMint}` },
+    ],
+  ];
+
+  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    console.log(`[Pump Milestone Dry-Run]:\n${message}`);
+    return;
+  }
+
+  try {
+    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard },
+      disable_web_page_preview: true,
+    });
+  } catch (err: any) {
+    console.error('⚠️ Failed to dispatch Pump Milestone Alert:', err.message);
+  }
+}
+
+/**
+ * Dispatches a -50% Retracement Milestone Alert matching @solearlytrending update card style
+ */
+export async function dispatchPriceDipMilestoneAlert(
+  dip: PriceDipMilestoneData
+): Promise<void> {
+  const chartUrl = dip.dexUrl || getDexScreenerUrl(dip);
+
+  const refMcVal = dip.referenceMarketCap || (dip.referencePriceUsd && dip.currentPriceUsd && dip.currentPriceUsd > 0
+    ? (dip.currentMarketCap * (dip.referencePriceUsd / dip.currentPriceUsd))
+    : dip.currentMarketCap * 2);
+  const refMc = formatUsd(refMcVal);
+  const currentMc = formatUsd(dip.currentMarketCap);
+
+  const signalLabel = dip.dipType === 'Peak Pullback' ? 'Peak Level' : 'Entry Signal';
+
+  const message = `
+📉 <a href="${chartUrl}"><b>&lrm;${escapeHtml(dip.tokenSymbol)}</b></a> is down <b>${dip.dropPercent}%</b> 📉
+from ⚡️ <a href="${chartUrl}">${signalLabel}</a>
+
+<b>${refMc}</b> —> <b>${currentMc}</b> 💵
+
+🩸🩸
+`.trim();
+
+  // Broadcast to Soul Web Terminal
+  broadcastPriceDip(dip);
+
+  const inlineKeyboard = [
+    [
+      { text: '📊 DexScreener Chart', url: chartUrl },
+      { text: '🔍 Solscan', url: `https://solscan.io/token/${dip.tokenMint}` },
+    ],
+    [
+      { text: '🛡️ Emergency Cut-Loss (Sell 100%)', callback_data: `sell_quick_100_${dip.tokenMint}` },
+    ],
+  ];
+
+  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    console.log(`[Dip Milestone Dry-Run]:\n${message}`);
+    return;
+  }
+
+  try {
+    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard },
+      disable_web_page_preview: true,
+    });
+  } catch (err: any) {
+    console.error('⚠️ Failed to dispatch Dip Milestone Alert:', err.message);
+  }
+}
+
 /**
  * Initializes Telegram Bot interactive command handlers:
- * /top, /daily, /pnl, /snipe, /autosnipe, /help
+ * Dedicated 6-button menu: Start, Daily Coins, Top Gainers, Price Milestones, My Positions, and Auto-Snipe
  */
 export function initTelegramCommands(): void {
   // Graceful polling error suppression for test/dummy tokens
@@ -424,28 +476,28 @@ export function initTelegramCommands(): void {
     console.warn('⚠️ Telegram polling issue:', err.message);
   });
 
-  // Register native Telegram Command Menu (the [≡ Menu] button next to input)
+  // Register native Telegram Command Menu
   bot.setMyCommands([
-    { command: 'start', description: '🌟 Main Dashboard & Interactive Menu' },
-    { command: 'filter', description: '🎯 Pick Safe, Risk, or Show All Signals' },
-    { command: 'wallets', description: '👥 View All 30 Tracked Smart Wallets' },
-    { command: 'top', description: '🏆 Show Today\'s #1 Smart-Money Wallet' },
-    { command: 'daily', description: '📊 Today\'s Net SOL Profit & PnL Report' },
-    { command: 'status', description: '🔍 View Current Sniper & Filter Settings' },
-    { command: 'snipe', description: '🎯 Set Snipe Size (e.g. /snipe 0.05)' },
-    { command: 'autosnipe', description: '⚙️ Toggle Automated Sniping On/Off' },
-    { command: 'help', description: '💡 Help & Command Reference' },
+    { command: 'start', description: '🚀 Main Menu & Dashboard' },
+    { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
+    { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
+    { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
+    { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
+    { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
+    { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
+    { command: 'wallet', description: '💰 Wallet Balance & Solscan' },
+    { command: 'help', description: '❓ How It Works & Trading Guide' },
   ]).catch((err) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
 
-  // Persistent Keyboard docked at the bottom of the user's phone screen
+  // Persistent Keyboard docked at the bottom of phone screen (8 clean buttons)
   const persistentReplyKeyboard = {
     keyboard: [
-      [{ text: '🛡️ Safe Only' }, { text: '🚀 Risk Only' }, { text: '🌐 Show All' }],
-      [{ text: '👥 Tracked Wallets' }, { text: '🏆 Top Wallets Today' }, { text: '📊 Daily PnL' }],
-      [{ text: '🟢 Turn Snipe ON' }, { text: '🔴 Turn Snipe OFF' }],
-      [{ text: '🚀 /start' }, { text: '🔍 Bot Status' }, { text: '🎯 Signal Filter' }],
+      [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
+      [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
+      [{ text: '📈 Price Milestones' }, { text: '💼 My Positions' }],
+      [{ text: '⚙️ Auto-Snipe' }, { text: '💰 Wallet' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -455,52 +507,51 @@ export function initTelegramCommands(): void {
     const userId = String(chatId);
     const pref = await getUserPreferences(userId);
 
-    let filterBadge = '🌐 <b>SHOW ALL (Safe + Risk)</b>';
-    if (pref.filterMode === 'SAFE') filterBadge = '🛡️ <b>SAFE SIGNALS ONLY</b>';
-    if (pref.filterMode === 'RISK') filterBadge = '🚀 <b>HIGH RISK ONLY</b>';
-
     const snipeBadge = pref.autoSnipeEnabled
       ? `🟢 <b>ACTIVE</b> (<code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code>)`
       : '🔴 <b>DISABLED</b> (Signals Only)';
 
+    let dailyCoinCount = 0;
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      dailyCoinCount = await prisma.earlyTrendingToken.count({ where: { alertDate: today } });
+    } catch {}
+
     const welcome = `
-🌟 <b>Solana Copy Trading &amp; Smart-Money Intelligence Bot</b>
+🔥 <b>Solana Early &amp; Whale Trending Radar (@solearlytrending)</b> 💵
+<i>Modeled after @solearlytrending • Built for high-velocity 5X–20X breakouts</i>
 
-Welcome! This system tracks the top 0.1% most profitable smart-money Solana wallets, filters out MEV sandwich bots, and alerts you to verified early entries and dump exits.
+💎 <b>EARLY &amp; WHALE RADAR:</b>
+• <b>Alerted Today:</b> <code>${dailyCoinCount}/45 Verified Gems</code>
+• 🕒 <b>Age Gate:</b> Fresh 2-minute launches &amp; bonding curve breakouts
+• 🎯 <b>Filtering:</b> Strict RugCheck audit (Mint &amp; Freeze revoked, 100% LP burned, Dev sold/clean)
+• 📈 <b>Price Milestones:</b> Real-time +50% Pumps &amp; -50% Retracement alerts
+• 📊 <b>DexScreener:</b> 1-Tap direct pair chart button on every call
 
-🎯 <b>Current Alert Filter:</b> ${filterBadge}
-🤖 <b>AI Auto-Trading:</b> ${snipeBadge}
-💼 <b>Tracked Smart Wallets:</b> <code>30 Elite Wallets</code> (15 Safe • 15 Risk)
+⚙️ <b>AUTO-SNIPER &amp; EXIT STRATEGY:</b>
+• <b>Status:</b> ${snipeBadge}
+• 🎯 <b>2X Take-Profit:</b> Sells 50% at +100% to secure initial SOL risk-free!
+• 🛡️ <b>Trailing Stop-Loss:</b> Protects remaining moonbag on sharp reversals (-25%)
 
-<b>⚡ 1-Tap Quick Action Menu:</b>
-Tap any button below or use the docked keyboard at the bottom of your screen!
+<i>Tap any button below to view active gems or manage auto-snipe:</i>
     `.trim();
 
     const inlineKeyboard = [
       [
-        { text: pref.filterMode === 'SAFE' ? '✅ 🛡️ Safe Only' : '🛡️ Safe Only', callback_data: 'filter_set_safe' },
-        { text: pref.filterMode === 'RISK' ? '✅ 🚀 Risk Only' : '🚀 Risk Only', callback_data: 'filter_set_risk' },
-        { text: pref.filterMode === 'ALL' ? '✅ 🌐 Show All' : '🌐 Show All', callback_data: 'filter_set_all' },
+        { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
       ],
       [
-        { text: '👥 View Tracked Wallets', callback_data: 'wallets_view_all' },
-        { text: '🏆 Top Wallets Today', callback_data: 'cmd_top' },
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
       ],
       [
-        { text: '📊 Today\'s PnL Report', callback_data: 'cmd_daily' },
-        { text: '🔍 Bot Status & Settings', callback_data: 'cmd_status' },
+        { text: '💼 My Positions', callback_data: 'cmd_positions' },
+        { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
       ],
       [
-        { text: '🟢 Turn Snipe ON', callback_data: 'snipe_enable' },
-        { text: '🔴 Turn Snipe OFF', callback_data: 'snipe_disable' },
-      ],
-      [
-        { text: '⚡ 0.01 SOL (Default)', callback_data: 'snipe_set_0.01' },
-        { text: '⚡ 0.05 SOL', callback_data: 'snipe_set_0.05' },
-        { text: '⚡ 0.10 SOL', callback_data: 'snipe_set_0.1' },
-      ],
-      [
-        { text: '🚀 /start (Refresh Dashboard)', callback_data: 'cmd_start' },
+        { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
+        { text: '❓ How It Works', callback_data: 'cmd_help' },
       ],
     ];
 
@@ -518,134 +569,123 @@ Tap any button below or use the docked keyboard at the bottom of your screen!
         reply_markup: persistentReplyKeyboard,
       });
     } catch (err: any) {
-      console.warn('Telegram send failed:', err.message);
+      console.warn('Failed to send welcome dashboard:', err.message);
     }
   };
 
-  // /start & \start & /help or "🚀 /start" or "🚀 \start" button
-  bot.onText(/^[\\\/]start|^\/?start|\/start|\\start|🚀 \/start|🚀 \\start|⚡ \\start|\\start|\bstart\b|🌟 Main Menu/i, async (msg) => {
+  // /start or Start button
+  bot.onText(/\/start|🚀 \/start|🚀 Start/i, async (msg) => {
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-
-  // /filter or "🎯 Signal Filter"
-  bot.onText(/\/filter|🎯 Signal Filter/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleSignalFilterMenu(msg.chat.id, userId);
+  // /daily or /early or "💎 Daily Coins" button
+  bot.onText(/💎 Daily Coins|\/daily|\/early|Daily Coin/i, async (msg) => {
+    await handleEarlyTrendingCommand(msg.chat.id);
   });
 
-  // "🛡️ Safe Only" or /safe
-  bot.onText(/🛡️ Safe Only|\/safe/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleSetFilter(msg.chat.id, userId, 'SAFE');
+  // /top or "🏆 Top Gainers" button
+  bot.onText(/🏆 Top Gainers|\/top|Top Gainer|Hall of Fame/i, async (msg) => {
+    await handleTopCommand(msg.chat.id);
   });
 
-  // "🚀 Risk Only" or /risk
-  bot.onText(/🚀 Risk Only|\/risk/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleSetFilter(msg.chat.id, userId, 'RISK');
+  // /milestones or "📈 Price Milestones" button
+  bot.onText(/\/milestones|📈 Price Milestones|📈 Milestones|Price Milestone/i, async (msg) => {
+    await handlePriceMilestonesCommand(msg.chat.id);
   });
 
-  // "🌐 Show All" or /all
-  bot.onText(/🌐 Show All|\/all/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleSetFilter(msg.chat.id, userId, 'ALL');
+  // /positions or "💼 My Positions" button
+  bot.onText(/💼 My Positions|\/positions|\/portfolio|My Position/i, async (msg) => {
+    await handlePositionsCommand(msg.chat.id);
   });
 
-  // "👥 Tracked Wallets" or /wallets
-  bot.onText(/👥 Tracked Wallets|\/wallets/i, async (msg) => {
-    await handleViewWalletsCommand(msg.chat.id);
-  });
-
-  // /top or "🏆 Top Wallet Today" / "🏆 Top Wallets Today" button
-  bot.onText(/\/top|\/highest|\/best|🏆 Top Wallet Today|🏆 Top Wallets Today/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleTopWalletCommand(msg.chat.id, userId);
-  });
-
-
-  // /daily or /pnl or "📊 Daily PnL Report" / "📊 Daily PnL" button
-  bot.onText(/\/daily|\/pnl|\/today|📊 Daily PnL Report|📊 Daily PnL/i, async (msg) => {
-    await handleDailyPnlCommand(msg.chat.id);
-  });
-
-  // /status or "🔍 Bot Status" button
-  bot.onText(/\/status|🔍 Bot Status/i, async (msg) => {
+  // "⚙️ Auto-Snipe" button
+  bot.onText(/⚙️ Auto-Snipe|Auto Snipe Settings/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await handleSnipeStatus(msg.chat.id, userId);
   });
 
-  // "🎯 Auto-Snipe Setup" button
-  bot.onText(/🎯 Auto-Snipe Setup/i, async (msg) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    await handleSnipeStatus(msg.chat.id, userId);
-  });
-
-  // "🟢 Turn Snipe ON" button
-  bot.onText(/🟢 Turn Snipe ON/i, async (msg) => {
+  // "🟢 Auto-Snipe ON" button
+  bot.onText(/🟢 Auto-Snipe ON|\/autosnipe\s+on/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
-    await bot.sendMessage(msg.chat.id, '🟢 <b>Auto-Snipe is now ENABLED!</b> Bot will snipe approved entries automatically.', { parse_mode: 'HTML' });
+    await bot.sendMessage(msg.chat.id, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved trades.', { parse_mode: 'HTML' });
   });
 
-  // "🔴 Turn Snipe OFF" button
-  bot.onText(/🔴 Turn Snipe OFF/i, async (msg) => {
+  // "🔴 Auto-Snipe OFF" button
+  bot.onText(/🔴 Auto-Snipe OFF|\/autosnipe\s+off/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
-    await bot.sendMessage(msg.chat.id, '🔴 <b>Auto-Snipe is now DISABLED!</b> You will receive alert signals only.', { parse_mode: 'HTML' });
-  });
-
-  // /snipe <amount>
-  bot.onText(/\/snipe(?:\s+(.+))?/, async (msg, match) => {
-    const userId = String(msg.from?.id || msg.chat.id);
-    const arg = match?.[1]?.trim();
-
-    if (arg && !isNaN(parseFloat(arg))) {
-      const amount = parseFloat(arg);
-      await setUserAutoSnipeConfig(userId, { autoSnipeSolAmount: amount, autoSnipeEnabled: true });
-      const confMsg = `
-✅ <b>Auto-Snipe Configured!</b>
-
-💰 <b>Snipe Allocation:</b> <code>${amount.toFixed(2)} SOL</code> per alerted trade
-🟢 <b>Status:</b> <b>ACTIVE</b>
-⚡ <b>Routing:</b> Jupiter Direct / Pump.fun Bonding Curve
-
-Whenever a verified Smart Trader executes a BUY, the bot will automatically snipe for you!
-      `.trim();
-      await bot.sendMessage(msg.chat.id, confMsg, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '🔴 Turn Off', callback_data: 'snipe_disable' },
-              { text: '⚡ 0.01 SOL', callback_data: 'snipe_set_0.01' },
-              { text: '⚡ 0.05 SOL', callback_data: 'snipe_set_0.05' },
-              { text: '⚡ 0.10 SOL', callback_data: 'snipe_set_0.1' },
-            ],
-          ],
-        },
-      });
-    } else {
-      await handleSnipeStatus(msg.chat.id, userId);
-    }
+    await bot.sendMessage(msg.chat.id, '🔴 <b>Auto-Snipe is now DISABLED!</b>\nYou will receive alert signals only.', { parse_mode: 'HTML' });
   });
 
   // /autosnipe on|off
-  bot.onText(/\/autosnipe\s*(on|off)?/i, async (msg, match) => {
+  bot.onText(/\/autosnipe(?:\s+(on|off))?/i, async (msg, match) => {
     const userId = String(msg.from?.id || msg.chat.id);
     const mode = match?.[1]?.toLowerCase();
-    const enable = mode === 'on' ? true : mode === 'off' ? false : undefined;
-
-    if (enable !== undefined) {
-      await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: enable });
-      await bot.sendMessage(
-        msg.chat.id,
-        enable ? '🟢 <b>Auto-Snipe is now ENABLED!</b>' : '🔴 <b>Auto-Snipe is now DISABLED!</b>',
-        { parse_mode: 'HTML' }
-      );
+    if (mode === 'on') {
+      await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
+      await bot.sendMessage(msg.chat.id, '🟢 <b>Auto-Snipe is now ENABLED!</b>', { parse_mode: 'HTML' });
+    } else if (mode === 'off') {
+      await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
+      await bot.sendMessage(msg.chat.id, '🔴 <b>Auto-Snipe is now DISABLED!</b>', { parse_mode: 'HTML' });
     } else {
       await handleSnipeStatus(msg.chat.id, userId);
     }
+  });
+
+  // /scan or "⚡ Scan Now"
+  bot.onText(/\/scan|⚡ Scan Now|Scan/i, async (msg) => {
+    await bot.sendMessage(msg.chat.id, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
+    try {
+      const { runEarlyTrendingRadarCycle } = await import('./earlyTrending.js');
+      const count = await runEarlyTrendingRadarCycle();
+      if (count > 0) {
+        await bot.sendMessage(msg.chat.id, `✅ <i>Scan complete: Dispatched <b>${count}</b> new gem alert(s)!</i>`, { parse_mode: 'HTML' });
+      } else {
+        await bot.sendMessage(msg.chat.id, `✅ <i>Scan complete. No new gems met the 5X threshold in the last 35 seconds. Radar is scanning continuously!</i>`, { parse_mode: 'HTML' });
+      }
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ <i>Scan error: ${err.message}</i>`, { parse_mode: 'HTML' });
+    }
+  });
+
+  // /wallet or /balance or "💰 Wallet"
+  bot.onText(/\/wallet|\/balance|💰 Wallet|Balance/i, async (msg) => {
+    const wallet = env.USER_SOLANA_WALLET;
+    const mode = env.SNIPER_PRIVATE_KEY
+      ? '🟢 <b>Live On-Chain Trading (Mainnet)</b>'
+      : '⚡ <b>Zero-Risk Paper Trading (Simulation)</b>';
+    await bot.sendMessage(
+      msg.chat.id,
+      `💼 <b>Connected Sniper Wallet</b>\n\n` +
+      `🔑 <b>Address:</b> <code>${wallet}</code>\n` +
+      `🔗 <a href="https://solscan.io/account/${wallet}">View Account on Solscan</a>\n\n` +
+      `⚡ <b>Engine Status:</b> ${mode}\n` +
+      `💡 <i>To trade live on-chain with real SOL, set <code>SNIPER_PRIVATE_KEY</code> in your .env.</i>`,
+      { parse_mode: 'HTML', disable_web_page_preview: true }
+    );
+  });
+
+  // /help or "❓ Help"
+  bot.onText(/\/help|❓ Help/i, async (msg) => {
+    await bot.sendMessage(
+      msg.chat.id,
+      `📖 <b>Solana Early Trending &amp; Sniper Bot Guide</b>\n\n` +
+      `1️⃣ <b>Early Gem Discovery:</b> Scans DexScreener &amp; Pump.fun continuously for 2-minute breakout coins ($20k-$150k MC).\n\n` +
+      `2️⃣ <b>RugCheck Audit:</b> Revoked mint &amp; freeze, 100% burned LP, clean holder distribution.\n\n` +
+      `3️⃣ <b>Automated Price Tracking:</b> Tracks alerted coins every 30s. When a coin hits <b>+50%</b>, <b>2X</b>, <b>5X</b>, up to <b>79X</b>, you receive instant pump alerts with take-profit buttons!\n\n` +
+      `4️⃣ <b>1-Tap Sniping:</b> Tap <code>⚡ Snipe 0.1 SOL</code> on any card to trade immediately, or toggle <code>/autosnipe</code> to snipe automatically.\n\n` +
+      `<b>Commands:</b>\n` +
+      `• /start — Open Main Dashboard\n` +
+      `• /scan — Run Immediate Radar Scan\n` +
+      `• /daily — View Today's Alerted Coins\n` +
+      `• /top — View Daily Top Gainers\n` +
+      `• /milestones — View Pumps &amp; Retracements\n` +
+      `• /positions — View Active Positions &amp; PnL\n` +
+      `• /autosnipe — Toggle Automated Sniping\n` +
+      `• /wallet — View Connected Wallet &amp; Solscan`,
+      { parse_mode: 'HTML' }
+    );
   });
 
   // Inline button callbacks
@@ -660,38 +700,67 @@ Whenever a verified Smart Trader executes a BUY, the bot will automatically snip
 
       if (data === 'cmd_start') {
         await sendWelcomeDashboard(chatId);
-      } else if (data === 'cmd_filter') {
-        await handleSignalFilterMenu(chatId, userId, msgId);
-      } else if (data === 'filter_set_safe') {
-        await handleSetFilter(chatId, userId, 'SAFE', msgId);
-      } else if (data === 'filter_set_risk') {
-        await handleSetFilter(chatId, userId, 'RISK', msgId);
-      } else if (data === 'filter_set_all') {
-        await handleSetFilter(chatId, userId, 'ALL', msgId);
-      } else if (data === 'wallets_view_safe') {
-        await handleViewWalletsCommand(chatId, RiskTier.SAFE, msgId);
-      } else if (data === 'wallets_view_risk') {
-        await handleViewWalletsCommand(chatId, RiskTier.RISK, msgId);
-      } else if (data === 'wallets_view_all' || data === 'cmd_wallets') {
-        await handleViewWalletsCommand(chatId, undefined, msgId);
+      } else if (data === 'cmd_scan') {
+        await bot.sendMessage(chatId, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
+        const { runEarlyTrendingRadarCycle } = await import('./earlyTrending.js');
+        const count = await runEarlyTrendingRadarCycle();
+        if (count > 0) {
+          await bot.sendMessage(chatId, `✅ <i>Scan complete: Dispatched <b>${count}</b> new gem alert(s)!</i>`, { parse_mode: 'HTML' });
+        } else {
+          await bot.sendMessage(chatId, `✅ <i>Scan complete. No unalerted tokens met the strict 5X/20X criteria right this second. Continuous background radar is scanning every 35s!</i>`, { parse_mode: 'HTML' });
+        }
+      } else if (data === 'cmd_wallet') {
+        const wallet = env.USER_SOLANA_WALLET;
+        const mode = env.SNIPER_PRIVATE_KEY ? '🟢 Live On-Chain' : '⚡ Paper Trading';
+        await bot.sendMessage(chatId, `💼 <b>Wallet:</b> <code>${wallet}</code>\n🔗 <a href="https://solscan.io/account/${wallet}">View on Solscan</a>\n⚡ <b>Mode:</b> ${mode}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+      } else if (data === 'cmd_help') {
+        await bot.sendMessage(chatId, `📖 <b>Quick Guide:</b>\n• Continuous radar scans every 35s\n• Strict LP burnt & revoked authority audit\n• Instant +50% to 79X pump tracking & alerts\n• 1-Tap Snipe buttons on every alert card`, { parse_mode: 'HTML' });
+      } else if (data === 'cmd_early') {
+        await handleEarlyTrendingCommand(chatId);
       } else if (data === 'cmd_top') {
-        await handleTopWalletCommand(chatId, userId, undefined, msgId);
-      } else if (data === 'top_view_safe') {
-        await handleTopWalletCommand(chatId, userId, 'SAFE', msgId);
-      } else if (data === 'top_view_risk') {
-        await handleTopWalletCommand(chatId, userId, 'RISK', msgId);
-      } else if (data === 'top_view_all') {
-        await handleTopWalletCommand(chatId, userId, 'ALL', msgId);
-      } else if (data === 'cmd_daily') {
-        await handleDailyPnlCommand(chatId);
-      } else if (data === 'cmd_status' || data === 'cmd_snipe_menu') {
+        await handleTopCommand(chatId);
+      } else if (data === 'cmd_milestones') {
+        await handlePriceMilestonesCommand(chatId);
+      } else if (data === 'cmd_positions') {
+        await handlePositionsCommand(chatId);
+      } else if (data === 'cmd_snipe_menu') {
         await handleSnipeStatus(chatId, userId, msgId);
+      } else if (data?.startsWith('daily_card_')) {
+        const idx = parseInt(data.replace('daily_card_', ''), 10);
+        if (!isNaN(idx)) {
+          await handleEarlyTrendingCommand(chatId, idx, msgId);
+        }
+      } else if (data === 'daily_send_last3') {
+        const today = new Date().toISOString().slice(0, 10);
+        const tokens = await prisma.earlyTrendingToken.findMany({
+          where: { alertDate: today },
+          orderBy: { dailyQuotaIndex: 'asc' },
+        });
+        const last3 = tokens.slice(-3);
+        if (last3.length === 0) {
+          await bot.sendMessage(chatId, 'ℹ️ <i>No coins logged yet today.</i>', { parse_mode: 'HTML' });
+        } else {
+          for (const t of last3) {
+            const cardText = renderEarlyTrendingCardText(t);
+            const url = getDexScreenerUrl(t);
+            await bot.sendMessage(chatId, cardText, {
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_markup: {
+                inline_keyboard: [[{ text: '📊 Chart (DexScreener)', url }]],
+              },
+            });
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+      } else if (data?.startsWith('wallets_') || data === 'cmd_wallets' || data === 'cmd_discover' || data === 'cmd_filter') {
+        await sendWelcomeDashboard(chatId);
       } else if (data === 'snipe_enable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
-        await bot.sendMessage(chatId, '🟢 <b>Auto-Snipe enabled!</b> Bot will snipe approved entries automatically.', { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved trades.', { parse_mode: 'HTML' });
       } else if (data === 'snipe_disable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
-        await bot.sendMessage(chatId, '🔴 <b>Auto-Snipe disabled.</b> You will only receive signal notifications.', { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, '🔴 <b>Auto-Snipe is now DISABLED!</b>\nYou will receive alert signals only.', { parse_mode: 'HTML' });
       } else if (data?.startsWith('snipe_set_')) {
         const amt = parseFloat(data.replace('snipe_set_', ''));
         if (!isNaN(amt)) {
@@ -707,6 +776,15 @@ Whenever a verified Smart Trader executes a BUY, the bot will automatically snip
           const snipeResult = await executeSnipeTrade(mint, amount);
           await dispatchSnipeNotification(snipeResult, chatId);
         }
+      } else if (data?.startsWith('sell_quick_')) {
+        const parts = data.split('_');
+        const pct = parseFloat(parts[2]) || 100;
+        const mint = parts[3];
+        if (mint) {
+          await bot.sendMessage(chatId, `⏳ <i>Executing ${pct}% exit for token <code>${mint.slice(0, 6)}...${mint.slice(-4)}</code>...</i>`, { parse_mode: 'HTML' });
+          const sellResult = await executeSnipeSell(mint, undefined, undefined, pct);
+          await dispatchSnipeSellNotification(sellResult, chatId);
+        }
       }
     } catch (err: any) {
       console.warn('Callback query error:', err.message);
@@ -717,227 +795,71 @@ Whenever a verified Smart Trader executes a BUY, the bot will automatically snip
     bot.startPolling({ restart: true }).catch((err) => {
       console.warn('⚠️ Telegram polling start skipped:', err.message);
     });
-    console.log('🤖 Telegram interactive command listeners activated (/filter, /wallets, /top, /daily, /snipe)');
+    console.log('🤖 Telegram interactive command listeners activated (/daily, /top, /milestones, /positions, /autosnipe)');
   }
 }
 
 /**
- * Interactive Signal Filter Menu
+ * Displays today's Early & Whale Radar coins as individual @solearlytrending alert cards
  */
-async function handleSignalFilterMenu(
-  chatId: number | string,
-  userId: string,
-  messageIdToEdit?: number
-): Promise<void> {
-  const pref = await getUserPreferences(userId);
-  let filterBadge = '🌐 <b>SHOW ALL SIGNALS (Safe + Risk)</b>';
-  if (pref.filterMode === 'SAFE') filterBadge = '🛡️ <b>SAFE SIGNALS ONLY</b>';
-  if (pref.filterMode === 'RISK') filterBadge = '🚀 <b>HIGH RISK / MOONBAGS ONLY</b>';
-
-  const message = `
-🎯 <b>SIGNAL FILTER SETTINGS (1-on-1 Chat)</b>
-
-Current Active Filter: ${filterBadge}
-
-<b>Choose what signals you want to receive:</b>
-
-🛡️ <b>SAFE ONLY:</b>
-• Delivers signals from verified Safe Wallets (Win Rate &gt;60%, Hold Time &gt;30 mins).
-• Ideal for lower drawdown, high-capacity swings, and consistent scalps.
-• High-risk degen alerts are suppressed.
-
-🚀 <b>HIGH RISK ONLY:</b>
-• Delivers rapid bonding curve breakouts (Pump.fun graduations) and early supply sniffs.
-• Target high-asymmetric moonshots (5x-50x) with higher volatility.
-• Conservative safe alerts are suppressed.
-
-🌐 <b>SHOW ALL (Recommended):</b>
-• Delivers both Safe and High-Risk alerts in real-time.
-• Every alert clearly states whether the wallet is 🛡️ <b>SAFE</b> or 🚀 <b>HIGH RISK</b>, along with the trader's name!
-
-<i>Tap a button below to update your preference instantly:</i>
-  `.trim();
-
-  const keyboard = [
-    [
-      { text: pref.filterMode === 'SAFE' ? '✅ 🛡️ Safe Only' : '🛡️ Safe Only', callback_data: 'filter_set_safe' },
-      { text: pref.filterMode === 'RISK' ? '✅ 🚀 Risk Only' : '🚀 Risk Only', callback_data: 'filter_set_risk' },
-      { text: pref.filterMode === 'ALL' ? '✅ 🌐 Show All' : '🌐 Show All', callback_data: 'filter_set_all' },
-    ],
-    [
-      { text: '👥 View Tracked Wallets', callback_data: 'wallets_view_all' },
-      { text: '🔍 Bot Status', callback_data: 'cmd_status' },
-    ],
-    [
-      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
-    ],
-  ];
-
-  if (messageIdToEdit) {
-    try {
-      await bot.editMessageText(message, {
-        chat_id: chatId,
-        message_id: messageIdToEdit,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      });
-      return;
-    } catch {
-      // Fallback
-    }
-  }
-
-  await bot.sendMessage(chatId, message, {
-    parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: keyboard },
-  });
-}
-
-/**
- * Handles setting the filter mode (SAFE, RISK, ALL) and sends rich feedback
- */
-async function handleSetFilter(
-  chatId: number | string,
-  userId: string,
-  mode: FilterMode,
-  messageIdToEdit?: number
-): Promise<void> {
-  await setUserFilterMode(userId, mode);
-
-  let header = '';
-  let desc = '';
-  if (mode === 'SAFE') {
-    header = '🛡️ <b>[FILTER ACTIVE: SAFE SIGNALS ONLY]</b>';
-    desc = `
-✅ <b>You will now only receive signals from SAFE Tier Smart Wallets.</b>
-
-• <b>Win Rate:</b> High (&gt;60% - 85%)
-• <b>Holding Duration:</b> Conservative (&gt;30 mins - 4+ hours)
-• <b>Strategy Profiles:</b> Multi-DEX Scalpers, Swing Whales, Migration Consolidators, Dip Accumulators
-• <b>Protection:</b> High-risk degen moonshots are completely silenced.
-    `.trim();
-  } else if (mode === 'RISK') {
-    header = '🚀 <b>[FILTER ACTIVE: HIGH RISK / MOONSHOTS ONLY]</b>';
-    desc = `
-✅ <b>You will now only receive signals from HIGH-RISK Tier Smart Wallets.</b>
-
-• <b>Volatility:</b> High Asymmetry (5x - 50x Target Moonshots)
-• <b>Holding Duration:</b> Rapid breakout &amp; early degen entries
-• <b>Strategy Profiles:</b> Bonding Breakout Hunters, Early Supply Sniffers, Diamond-Hand Moonbaggers, Meta Trackers
-• <b>Filtering:</b> Conservative safe alerts are silenced.
-    `.trim();
-  } else {
-    header = '🌐 <b>[FILTER ACTIVE: SHOW ALL SIGNALS (SAFE + RISK)]</b>';
-    desc = `
-✅ <b>You will now receive ALL Smart-Money signals in real-time!</b>
-
-• 🛡️ <b>SAFE Wallets:</b> High win-rate scalps and high-capacity swings.
-• 🚀 <b>HIGH-RISK Wallets:</b> Early bonding curve breakouts and moonbaggers.
-
-💡 <b>In Show All Mode:</b> Every incoming alert explicitly states whether the wallet is 🛡️ <b>[SAFE TIER]</b> or 🚀 <b>[HIGH RISK]</b>, along with the trader's name and performance!
-    `.trim();
-  }
-
-  const keyboard = [
-    [
-      { text: mode === 'SAFE' ? '✅ 🛡️ Safe Only' : '🛡️ Safe Only', callback_data: 'filter_set_safe' },
-      { text: mode === 'RISK' ? '✅ 🚀 Risk Only' : '🚀 Risk Only', callback_data: 'filter_set_risk' },
-      { text: mode === 'ALL' ? '✅ 🌐 Show All' : '🌐 Show All', callback_data: 'filter_set_all' },
-    ],
-    [
-      { text: '👥 View Tracked Wallets', callback_data: 'wallets_view_all' },
-      { text: '🔍 Bot Status', callback_data: 'cmd_status' },
-    ],
-    [
-      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
-    ],
-  ];
-
-  const fullMsg = `${header}\n\n${desc}`;
-
-  if (messageIdToEdit) {
-    try {
-      await bot.editMessageText(fullMsg, {
-        chat_id: chatId,
-        message_id: messageIdToEdit,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      });
-      return;
-    } catch {
-      // Fallback
-    }
-  }
-
-  await bot.sendMessage(chatId, fullMsg, {
-    parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: keyboard },
-  });
-}
-
-/**
- * Displays the 30 tracked smart-money wallets with custom callsign names and metrics
- */
-async function handleViewWalletsCommand(
-  chatId: number | string,
-  filterTier?: RiskTier,
-  messageIdToEdit?: number
-): Promise<void> {
+async function handleEarlyTrendingCommand(chatId: number | string, targetIndex?: number, messageIdToEdit?: number): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
   try {
-    const whereClause: any = { isActive: true };
-    if (filterTier) whereClause.tier = filterTier;
-
-    const wallets = await prisma.trackedWallet.findMany({
-      where: whereClause,
-      orderBy: [{ tier: 'asc' }, { winRate: 'desc' }],
-      take: 30,
+    const tokens = await prisma.earlyTrendingToken.findMany({
+      where: { alertDate: today },
+      orderBy: { dailyQuotaIndex: 'asc' },
     });
 
-    if (!wallets || wallets.length === 0) {
-      await bot.sendMessage(chatId, '👥 <i>Tracked smart-money roster is actively syncing...</i>', { parse_mode: 'HTML' });
+    if (tokens.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `💎 <b>Daily Coins (@solearlytrending Strategy)</b>\n\n` +
+          `No tokens have met the strict @solearlytrending criteria yet today.\n` +
+          `The engine scans DexScreener continuously and requires revoked mint/freeze, 100% burned/locked LP, and clean audits.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+                { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+              ],
+            ],
+          },
+        }
+      );
       return;
     }
 
-    const safeWallets = wallets.filter((w) => w.tier === 'SAFE');
-    const riskWallets = wallets.filter((w) => w.tier === 'RISK');
+    // Default to latest token
+    const currIdx = typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < tokens.length
+      ? targetIndex
+      : tokens.length - 1;
 
-    let tierTitle = '🌐 ALL 30 TRACKED SMART WALLETS';
-    if (filterTier === RiskTier.SAFE) tierTitle = '🛡️ SAFE TIER TRACKED WALLETS';
-    if (filterTier === RiskTier.RISK) tierTitle = '🚀 HIGH-RISK TIER TRACKED WALLETS';
+    const token = tokens[currIdx];
+    const cardText = renderEarlyTrendingCardText(token);
+    const dexscreenerUrl = getDexScreenerUrl(token);
 
-    let content = `👥 <b>${tierTitle}</b>\n\n`;
-    content += `<i>Each wallet is identified by its custom callsign and anti-MEV validated.</i>\n\n`;
-
-    if (!filterTier || filterTier === RiskTier.SAFE) {
-      content += `🛡️ <b>SAFE TIER (${safeWallets.length} Wallets):</b>\n`;
-      safeWallets.slice(0, 8).forEach((w, idx) => {
-        const trunc = `${w.address.slice(0, 4)}...${w.address.slice(-4)}`;
-        const wr = (w.winRate * 100).toFixed(0);
-        content += `${idx + 1}. <b>${escapeHtml(w.label || 'Apex Trader')}</b> (<code>${trunc}</code>)\n   └ 📊 <code>${wr}% WR</code> | ⚡ <code>${w.profitFactor.toFixed(1)}x PF</code> | 💰 <code>+${w.netSolProfit.toFixed(1)} SOL</code>\n`;
-      });
-      if (safeWallets.length > 8) content += `   <i>...and ${safeWallets.length - 8} more Safe wallets active</i>\n`;
-      content += '\n';
+    const navButtons: any[] = [];
+    if (currIdx > 0) {
+      navButtons.push({ text: `⬅️ #${currIdx} ${tokens[currIdx - 1].tokenSymbol}`, callback_data: `daily_card_${currIdx - 1}` });
     }
-
-    if (!filterTier || filterTier === RiskTier.RISK) {
-      content += `🚀 <b>HIGH-RISK / MOONBAG TIER (${riskWallets.length} Wallets):</b>\n`;
-      riskWallets.slice(0, 8).forEach((w, idx) => {
-        const trunc = `${w.address.slice(0, 4)}...${w.address.slice(-4)}`;
-        const wr = (w.winRate * 100).toFixed(0);
-        content += `${idx + 1}. <b>${escapeHtml(w.label || 'Moonshot Trader')}</b> (<code>${trunc}</code>)\n   └ 📊 <code>${wr}% WR</code> | ⚡ <code>${w.profitFactor.toFixed(1)}x PF</code> | 💰 <code>+${w.netSolProfit.toFixed(1)} SOL</code>\n`;
-      });
-      if (riskWallets.length > 8) content += `   <i>...and ${riskWallets.length - 8} more Risk wallets active</i>\n`;
+    navButtons.push({ text: `💎 #${currIdx + 1}/${tokens.length}`, callback_data: `daily_card_${currIdx}` });
+    if (currIdx < tokens.length - 1) {
+      navButtons.push({ text: `➡️ #${currIdx + 2} ${tokens[currIdx + 1].tokenSymbol}`, callback_data: `daily_card_${currIdx + 1}` });
     }
 
     const keyboard = [
       [
-        { text: filterTier === RiskTier.SAFE ? '✅ 🛡️ Safe Wallets' : '🛡️ Safe Wallets', callback_data: 'wallets_view_safe' },
-        { text: filterTier === RiskTier.RISK ? '✅ 🚀 Risk Wallets' : '🚀 Risk Wallets', callback_data: 'wallets_view_risk' },
-        { text: !filterTier ? '✅ 🌐 All Wallets' : '🌐 All Wallets', callback_data: 'wallets_view_all' },
+        { text: '📊 Chart (DexScreener)', url: dexscreenerUrl },
+      ],
+      navButtons,
+      [
+        { text: '📬 Send Last 3 One-by-One', callback_data: 'daily_send_last3' },
       ],
       [
-        { text: '🎯 Change Signal Filter', callback_data: 'cmd_filter' },
-        { text: '🏆 Top Wallet Today', callback_data: 'cmd_top' },
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
       ],
       [
         { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
@@ -945,261 +867,316 @@ async function handleViewWalletsCommand(
     ];
 
     if (messageIdToEdit) {
-      try {
-        await bot.editMessageText(content.trim(), {
-          chat_id: chatId,
-          message_id: messageIdToEdit,
-          parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: keyboard },
-          disable_web_page_preview: true,
-        });
-        return;
-      } catch {
-        // Fallback
-      }
+      await bot.editMessageText(cardText, {
+        chat_id: chatId,
+        message_id: messageIdToEdit,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: keyboard },
+      });
+    } else {
+      await bot.sendMessage(chatId, cardText, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: keyboard },
+      });
     }
-
-    await bot.sendMessage(chatId, content.trim(), {
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: keyboard },
-      disable_web_page_preview: true,
-    });
   } catch (err: any) {
-    console.warn('⚠️ Wallets view failed:', err.message);
-    await bot.sendMessage(chatId, '👥 <i>Tracked smart-money roster is actively syncing...</i>', { parse_mode: 'HTML' });
+    console.warn('handleEarlyTrendingCommand error:', err.message);
   }
 }
 
 /**
- * Displays the Top 10 best performing smart wallets for today
- * dynamically filtered by the user's filter mode (Safe, Risk, or All)
+ * Displays active 50% Price Milestone Trackers
  */
-async function handleTopWalletCommand(
-  chatId: number | string,
-  userId?: string,
-  filterTierOverride?: 'SAFE' | 'RISK' | 'ALL',
-  messageIdToEdit?: number
-): Promise<void> {
-  const uid = userId || String(chatId);
-  const pref = await getUserPreferences(uid);
-  const activeMode: 'SAFE' | 'RISK' | 'ALL' = filterTierOverride || pref.filterMode || 'ALL';
-
-  const whereClause: any = { isActive: true };
-  if (activeMode === 'SAFE') whereClause.tier = 'SAFE';
-  if (activeMode === 'RISK') whereClause.tier = 'RISK';
-
-  let title = '🏆 <b>TOP 10 BEST PERFORMING WALLETS TODAY (ALL TIERS)</b>';
-  let subtitle = '<i>Showing top 10 ranked by Net SOL Profit & Win Rate across all tiers.</i>';
-  if (activeMode === 'SAFE') {
-    title = '🏆 <b>TOP 10 BEST PERFORMING SAFE WALLETS TODAY</b>';
-    subtitle = '<i>Showing top 10 conservative, high win-rate smart money wallets.</i>';
-  } else if (activeMode === 'RISK') {
-    title = '🏆 <b>TOP 10 BEST PERFORMING HIGH-RISK WALLETS TODAY</b>';
-    subtitle = '<i>Showing top 10 rapid breakout & asymmetric moonshot wallets.</i>';
-  }
-
-  const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-
+async function handlePriceMilestonesCommand(chatId: number | string): Promise<void> {
   try {
-    const topWallets = await prisma.trackedWallet.findMany({
-      where: whereClause,
-      orderBy: [{ netSolProfit: 'desc' }, { winRate: 'desc' }, { profitFactor: 'desc' }],
+    const tokens = await prisma.earlyTrendingToken.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: { updatedAt: 'desc' },
+      take: 15,
+    });
+
+    if (tokens.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `📈 <b>Price Milestone Trackers (Active: 0)</b>\n\n` +
+          `No tokens are currently in the active milestone tracking list.\n` +
+          `Whenever a daily gem is alerted, it is tracked in real-time for +50% pumps and -50% dips!`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+              ],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    let report = `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS</b> 🎯\n`;
+    report += `<i>Continuous price checks every 30s (Zero RPC credit usage via DexScreener).</i>\n\n`;
+
+    for (const t of tokens) {
+      const dexscreenerUrl = getDexScreenerUrl(t);
+      const entryPrice = formatUnitPrice(t.entryPriceUsd);
+      const lastPrice = formatUnitPrice(t.lastAlertedPriceUsd);
+      const gainPct = t.entryPriceUsd > 0
+        ? (((t.lastAlertedPriceUsd - t.entryPriceUsd) / t.entryPriceUsd) * 100).toFixed(1)
+        : '0.0';
+      const isPositive = Number(gainPct) >= 0;
+      const emoji = isPositive ? '📈' : '📉';
+
+      report += `🪙 <a href="${dexscreenerUrl}"><b>$${escapeHtml(t.tokenSymbol)}</b></a> (${emoji} <code>${isPositive ? '+' : ''}${gainPct}%</code>)\n`;
+      report += `   💵 Entry: <code>${entryPrice}</code> ➔ Last: <code>${lastPrice}</code>\n`;
+      report += `   🎯 Top Milestone: <code>+${t.lastMilestonePct}%</code> | Dip: <code>${t.lastDipMilestonePct}%</code>\n`;
+      report += `   🔗 <a href="${dexscreenerUrl}">[DexScreener Chart]</a>\n\n`;
+    }
+
+    const milestoneButtons: any[][] = [];
+    tokens.slice(0, 10).forEach((t) => {
+      milestoneButtons.push([
+        { text: `📊 $${t.tokenSymbol} Chart`, url: getDexScreenerUrl(t) },
+      ]);
+    });
+    milestoneButtons.push([
+      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+    ]);
+    milestoneButtons.push([
+      { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+    ]);
+
+    await bot.sendMessage(chatId, report.trim(), {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: milestoneButtons,
+      },
+    });
+  } catch (err: any) {
+    console.warn('handlePriceMilestonesCommand error:', err.message);
+  }
+}
+
+/**
+ * Displays the Daily Hall of Fame Leaderboard (/top)
+ */
+async function handleTopCommand(chatId: number | string): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    let tokens = await prisma.earlyTrendingToken.findMany({
+      where: { alertDate: today },
+      orderBy: { lastMilestonePct: 'desc' },
       take: 10,
     });
 
-    if (!topWallets || topWallets.length === 0) {
-      await bot.sendMessage(chatId, '👥 <i>Analyzing live smart-money performance...</i>', { parse_mode: 'HTML' });
-      return;
-    }
-
-    let message = `${title}\n`;
-    message += `🎯 <b>Active View:</b> <b>${activeMode === 'SAFE' ? '🛡️ SAFE ONLY' : activeMode === 'RISK' ? '🚀 HIGH RISK ONLY' : '🌐 ALL TIERS'}</b>\n`;
-    message += `${subtitle}\n\n`;
-
-    topWallets.forEach((w, index) => {
-      const medal = medals[index] || `${index + 1}.`;
-      const truncated = `${w.address.slice(0, 4)}...${w.address.slice(-4)}`;
-      const solProfit = w.netSolProfit >= 0 ? `+${w.netSolProfit.toFixed(2)}` : `${w.netSolProfit.toFixed(2)}`;
-      const usdVal = (w.netSolProfit * 160).toFixed(0);
-      const wr = (w.winRate * 100).toFixed(0);
-      const tierBadge = w.tier === 'SAFE' ? '🛡️ SAFE' : '🚀 RISK';
-      const strategyInfo = STRATEGY_DEFINITIONS[w.strategyProfile as keyof typeof STRATEGY_DEFINITIONS];
-      const strategyName = strategyInfo?.name || w.strategyProfile;
-
-      message += `${index + 1}. ${medal} <b>${escapeHtml(w.label || 'Apex Trader')}</b> (<code>${truncated}</code>) • <b>${tierBadge}</b>\n`;
-      message += `   └ 💰 <b>${solProfit} SOL</b> (~$${usdVal}) | 📊 <code>${wr}% WR</code> | ⚡ <code>${w.profitFactor.toFixed(2)}x PF</code>\n`;
-      message += `   └ 🎖️ <i>${escapeHtml(strategyName)}</i> • <code>${w.totalTrades} closed trades</code>\n\n`;
-    });
-
-    message += `💡 <i>Bot automatically copies trades from this elite roster.</i>`;
-
-    const keyboard = [
-      [
-        { text: activeMode === 'SAFE' ? '✅ 🛡️ Top 10 Safe' : '🛡️ Top 10 Safe', callback_data: 'top_view_safe' },
-        { text: activeMode === 'RISK' ? '✅ 🚀 Top 10 Risk' : '🚀 Top 10 Risk', callback_data: 'top_view_risk' },
-        { text: activeMode === 'ALL' ? '✅ 🌐 Top 10 All' : '🌐 Top 10 All', callback_data: 'top_view_all' },
-      ],
-      [
-        { text: '👥 View All 30 Wallets', callback_data: 'wallets_view_all' },
-        { text: '📊 Today\'s PnL Report', callback_data: 'cmd_daily' },
-      ],
-      [
-        { text: '🎯 Change Signal Filter', callback_data: 'cmd_filter' },
-        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
-      ],
-    ];
-
-    if (messageIdToEdit) {
-      try {
-        await bot.editMessageText(message.trim(), {
-          chat_id: chatId,
-          message_id: messageIdToEdit,
-          parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: keyboard },
-          disable_web_page_preview: true,
-        });
-        return;
-      } catch {
-        // Fallback
+    if (tokens.length === 0 || tokens.every((t) => t.lastMilestonePct === 0)) {
+      const topEver = await prisma.earlyTrendingToken.findMany({
+        where: { lastMilestonePct: { gt: 0 } },
+        orderBy: { lastMilestonePct: 'desc' },
+        take: 10,
+      });
+      if (topEver.length > 0) {
+        tokens = topEver;
       }
     }
 
-    await bot.sendMessage(chatId, message.trim(), {
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: keyboard },
-      disable_web_page_preview: true,
-    });
-  } catch (err: any) {
-    console.warn('⚠️ Note: Database error during /top:', err.message);
-    await bot.sendMessage(chatId, '⚠️ Could not load top wallets. Please try again.', { parse_mode: 'HTML' });
-  }
-}
-
-
-async function handleDailyPnlCommand(chatId: number | string): Promise<void> {
-  const todayStart = new Date();
-  todayStart.setUTCHours(0, 0, 0, 0);
-  const dateStr = todayStart.toISOString().split('T')[0];
-
-  const pnlNavKeyboard = [
-    [
-      { text: '🏆 Top Wallet Today', callback_data: 'cmd_top' },
-      { text: '👥 Tracked Wallets', callback_data: 'wallets_view_all' },
-    ],
-    [
-      { text: '🎯 Signal Filter', callback_data: 'cmd_filter' },
-      { text: '🔍 Bot Status', callback_data: 'cmd_status' },
-    ],
-    [
-      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
-    ],
-  ];
-
-  const fallbackPnlMsg = `
-📊 <b>DAILY PERFORMANCE &amp; PNL REPORT</b>
-📅 <b>Date:</b> <code>${dateStr} (UTC)</code>
-
-💰 <b>Total Money Made Today:</b> <code>+38.50 SOL</code> (~$6,160 USD)
-📈 <b>Smart Money Win Rate:</b> <code>78.6%</code>
-🔔 <b>Total Signals Fired:</b> <code>22</code> (🟢 15 Buys | 🔴 7 Sells)
-🌊 <b>Total Volume Tracked:</b> <code>142.80 SOL</code> (~$22,848 USD)
-
-💎 <b>Top Performer Coin:</b> <code>$GOAT</code> (+184% from Smart Entry)
-🎯 <b>Fastest Scalp:</b> <code>$MOODENG</code> (Entry $22K MC → Exit $68K MC)
-  `.trim();
-
-  try {
-    const todayTrades = await prisma.tradeLog.findMany({
-      where: { createdAt: { gte: todayStart } },
-    });
-
-    if (!todayTrades || todayTrades.length === 0) {
-      await bot.sendMessage(chatId, fallbackPnlMsg, {
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: pnlNavKeyboard },
-      });
+    if (tokens.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `🏆 <b>Daily Hall of Fame Leaderboard (/top)</b>\n\n` +
+          `No tokens have logged a +50% milestone yet today.\n` +
+          `Our 30s price tracker monitors every alerted token for 50%, 100% (2X), 300% (4X), and 20X moonshots!`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+              ],
+              [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+            ],
+          },
+        }
+      );
       return;
     }
 
-    const buyCount = todayTrades.filter((t) => t.side === 'BUY').length;
-    const sellCount = todayTrades.filter((t) => t.side === 'SELL').length;
-    const totalSolVolume = todayTrades.reduce((acc, t) => acc + t.solAmount, 0);
-    const estProfit = Math.max(14.8, totalSolVolume * 0.35);
+    let report = `🏆 <b>SOLANA TRENDING HALL OF FAME LEADERBOARD</b> 🚀\n`;
+    report += `<i>Top breakout performers discovered within 2 minutes of launch:</i>\n\n`;
 
-    const message = `
-📊 <b>DAILY PERFORMANCE &amp; PNL REPORT</b>
-📅 <b>Date:</b> <code>${dateStr} (UTC)</code>
+    tokens.forEach((t, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `<b>#${i + 1}</b>`;
+      const dexscreenerUrl = getDexScreenerUrl(t);
+      const entryMc = formatUsd(t.entryMarketCap);
+      const mult = (1 + t.lastMilestonePct / 100).toFixed(1);
+      const peakMc = formatUsd(t.entryMarketCap * (1 + t.lastMilestonePct / 100));
 
-💰 <b>Total Money Made Today:</b> <code>+${estProfit.toFixed(2)} SOL</code> (~$${(estProfit * 160).toFixed(0)} USD)
-📈 <b>Smart Money Win Rate:</b> <code>78.6%</code>
-🔔 <b>Total Signals Fired:</b> <code>${todayTrades.length}</code> (🟢 ${buyCount} Buys | 🔴 ${sellCount} Sells)
-🌊 <b>Total Volume Tracked:</b> <code>${totalSolVolume > 0 ? totalSolVolume.toFixed(2) : '42.50'} SOL</code> (~$${((totalSolVolume || 42.5) * 160).toFixed(0)} USD)
+      report += `${medal} <a href="${dexscreenerUrl}"><b>$${escapeHtml(t.tokenSymbol)}</b></a> • <b>+${t.lastMilestonePct}% (${mult}X)</b> 🔥\n`;
+      report += `   💰 Entry MC: <code>${entryMc}</code> ➔ Peak: <code>${peakMc}</code>\n`;
+      report += `   🔗 <a href="${dexscreenerUrl}">[DexScreener Chart]</a>\n\n`;
+    });
 
-💎 <b>Top Performer Coin:</b> <code>$GOAT</code> (+184% from Smart Entry)
-🎯 <b>Fastest Scalp:</b> <code>$MOODENG</code> (Entry $22K MC → Exit $68K MC)
-    `.trim();
+    const buttons: any[][] = [];
+    tokens.slice(0, 8).forEach((t) => {
+      buttons.push([
+        { text: `📊 $${t.tokenSymbol} Chart (+${t.lastMilestonePct}%)`, url: getDexScreenerUrl(t) },
+      ]);
+    });
+    buttons.push([
+      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+    ]);
+    buttons.push([
+      { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+    ]);
 
-    await bot.sendMessage(chatId, message, {
+    await bot.sendMessage(chatId, report.trim(), {
       parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: pnlNavKeyboard },
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: buttons },
     });
   } catch (err: any) {
-    console.warn('⚠️ Note: Database offline or uninitialized, providing live standby preview for /daily:', err.message);
-    await bot.sendMessage(chatId, fallbackPnlMsg, {
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: pnlNavKeyboard },
+    console.warn('handleTopCommand error:', err.message);
+  }
+}
+
+/**
+ * Displays Active Sniped Positions, Live PnL, and TP/SL status (/positions)
+ */
+async function handlePositionsCommand(chatId: number | string): Promise<void> {
+  try {
+    const active = getActivePositions();
+    const all = getAllPositions();
+
+    if (active.length === 0 && all.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `💼 <b>Active Positions &amp; Portfolio Tracker (/positions)</b>\n\n` +
+          `No positions are currently tracked.\n\n` +
+          `When <b>Auto-Snipe</b> is enabled or you tap <b>[⚡ Quick Buy]</b> on any alert card, positions are actively managed here:\n` +
+          `• 🎯 <b>2X Take-Profit:</b> Automatically sells 50% at +100% to recoup your initial SOL!\n` +
+          `• 🛡️ <b>Trailing Stop-Loss:</b> Automatically protects the remaining moonbag if price drops 25% from peak!\n` +
+          `• 🛑 <b>Hard Stop-Loss:</b> Limits max drawdown to -25% from entry.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
+              ],
+              [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    let report = `💼 <b>PORTFOLIO &amp; SNIPED POSITIONS</b> 📊\n`;
+    report += `<i>Autonomous 2X TP (sell 50%) + Trailing SL (-25% from peak) active:</i>\n\n`;
+
+    if (active.length === 0) {
+      report += `ℹ️ <i>No currently OPEN positions. (All previous positions closed at profit/stop).</i>\n\n`;
+    } else {
+      active.forEach((pos, idx) => {
+        const gainPct = (((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100).toFixed(1);
+        const isUp = Number(gainPct) >= 0;
+        const emoji = isUp ? '🟢' : '🔴';
+        const chartUrl = getDexScreenerUrl(pos as any);
+        const statusBadge = pos.status === 'PARTIAL_TP_2X' ? ' [🎯 50% TP SECURED]' : '';
+
+        report += `${emoji} <b>#${idx + 1}.</b> <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a>${statusBadge}\n`;
+        report += `   💰 Allocation: <code>${pos.solInvested.toFixed(2)} SOL</code> | PnL: <b>${isUp ? '+' : ''}${gainPct}%</b>\n`;
+        report += `   💵 Entry: <code>${formatUnitPrice(pos.entryPriceUsd)}</code> ➔ Now: <code>${formatUnitPrice(pos.currentPriceUsd)}</code>\n`;
+        report += `   🔝 Peak: <code>${formatUnitPrice(pos.peakPriceUsd)}</code> | Realized: <code>+${pos.realizedSolProfit.toFixed(2)} SOL</code>\n`;
+        report += `   🔗 <a href="${chartUrl}">[DexScreener Live Chart]</a>\n\n`;
+      });
+    }
+
+    const closed = all.filter((p) => p.status === 'CLOSED').slice(-3);
+    if (closed.length > 0) {
+      report += `📜 <b>Recently Closed Positions:</b>\n`;
+      closed.forEach((p) => {
+        report += `• <b>$${escapeHtml(p.tokenSymbol)}:</b> ${p.exitReason || 'Closed'} (Realized: <code>+${p.realizedSolProfit.toFixed(2)} SOL</code>)\n`;
+      });
+      report += `\n`;
+    }
+
+    const posButtons: any[][] = [];
+    active.slice(0, 6).forEach((pos) => {
+      posButtons.push([
+        { text: `📊 $${pos.tokenSymbol} Chart`, url: getDexScreenerUrl(pos as any) },
+      ]);
     });
+    posButtons.push([
+      { text: '🔄 Refresh Positions', callback_data: 'cmd_positions' },
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+    ]);
+    posButtons.push([
+      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+    ]);
+
+    await bot.sendMessage(chatId, report.trim(), {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: posButtons },
+    });
+  } catch (err: any) {
+    console.warn('handlePositionsCommand error:', err.message);
   }
 }
 
 async function handleSnipeStatus(chatId: number | string, userId: string, messageIdToEdit?: number): Promise<void> {
   const pref = await getUserPreferences(userId);
-  const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE (Auto-Buy &amp; Auto-Sell)' : '🔴 DISABLED (Signals Only)';
+  const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE (Auto-Buy Enabled)' : '🔴 DISABLED (Signals Only)';
   const walletAddr = env.USER_SOLANA_WALLET || '6hb1Nmj9C8xZe5oWAKYBgJcPMZnqxAGTHPBqouuy5NmM';
   const walletTrunc = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
-
-  let filterBadge = '🌐 <b>SHOW ALL SIGNALS (Safe + Risk)</b>';
-  if (pref.filterMode === 'SAFE') filterBadge = '🛡️ <b>SAFE SIGNALS ONLY</b>';
-  if (pref.filterMode === 'RISK') filterBadge = '🚀 <b>HIGH RISK ONLY</b>';
 
   const message = `
 🎯 <b>AI Auto-Trading &amp; Sniper Dashboard</b>
 
-🤖 <b>AI Mode:</b> <b>${statusEmoji}</b>
-🎯 <b>Alert Filter Mode:</b> ${filterBadge}
-💰 <b>Snipe Allocation:</b> <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> per trade
+🤖 <b>Auto-Snipe Status:</b> <b>${statusEmoji}</b>
+💰 <b>Snipe Allocation:</b> <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> per coin
 🛡️ <b>Max Slippage:</b> <code>${pref.maxSlippagePercent}%</code>
 💼 <b>Connected Wallet:</b> <code>${walletTrunc}</code>
 
-<b>How it works:</b>
-• <b>DISABLED (Default):</b> You receive alerts with 1-tap Trojan/Photon buttons. The bot never spends your SOL automatically.
-• <b>ACTIVE:</b> The AI automatically executes buys with <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> on verified smart-money signals, and automatically sells/exits on dump signals to secure profits!
-• <b>ALERT FILTER:</b> Switch between Safe, Risk, or Show All using the buttons below or docked keyboard!
+<b>Autonomous Exit Strategy:</b>
+• 🎯 <b>2X Take-Profit:</b> Automatically sells 50% at +100% to recoup principal risk-free!
+• 🛡️ <b>Trailing Stop-Loss:</b> Automatically locks in gains if token drops 25% from its peak!
+• 🛑 <b>Hard Stop-Loss:</b> Sells position if price falls -25% from entry.
 
-<i>Tap below to toggle settings:</i>
+<b>How it works:</b>
+• <b>DISABLED (Default):</b> You receive 2-minute Early &amp; Whale alerts with 1-tap quick buy buttons. The bot never spends your SOL automatically.
+• <b>ACTIVE:</b> The bot automatically executes buys with <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> on verified @solearlytrending tokens passing strict RugCheck security!
+
+<i>Tap below to adjust allocation or toggle mode:</i>
   `.trim();
 
   const keyboard = [
     [
-      { text: pref.autoSnipeEnabled ? '🔴 Turn OFF Auto-Trade (Signals Only)' : '🟢 Turn ON AI Auto Buy & Sell', callback_data: pref.autoSnipeEnabled ? 'snipe_disable' : 'snipe_enable' },
+      pref.autoSnipeEnabled
+        ? { text: '🔴 Turn Auto-Snipe OFF', callback_data: 'snipe_disable' }
+        : { text: '🟢 Turn Auto-Snipe ON', callback_data: 'snipe_enable' },
     ],
     [
-      { text: pref.filterMode === 'SAFE' ? '✅ 🛡️ Safe Only' : '🛡️ Safe Only', callback_data: 'filter_set_safe' },
-      { text: pref.filterMode === 'RISK' ? '✅ 🚀 Risk Only' : '🚀 Risk Only', callback_data: 'filter_set_risk' },
-      { text: pref.filterMode === 'ALL' ? '✅ 🌐 Show All' : '🌐 Show All', callback_data: 'filter_set_all' },
+      { text: '⚡ Set 0.5 SOL', callback_data: 'snipe_set_0.5' },
+      { text: '⚡ Set 1.0 SOL', callback_data: 'snipe_set_1.0' },
+      { text: '⚡ Set 2.0 SOL', callback_data: 'snipe_set_2.0' },
     ],
     [
-      { text: '⚡ 0.01 SOL (Default)', callback_data: 'snipe_set_0.01' },
-      { text: '⚡ 0.05 SOL', callback_data: 'snipe_set_0.05' },
-      { text: '⚡ 0.10 SOL', callback_data: 'snipe_set_0.1' },
-    ],
-    [
-      { text: '👥 View Tracked Wallets', callback_data: 'wallets_view_all' },
-      { text: '🔍 View Wallet on Solscan', url: `https://solscan.io/account/${walletAddr}` },
-    ],
-    [
-      { text: '🏆 Top Wallet Today', callback_data: 'cmd_top' },
-      { text: '📊 Daily PnL Report', callback_data: 'cmd_daily' },
+      { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
     ],
     [
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },

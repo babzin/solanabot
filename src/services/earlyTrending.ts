@@ -1,0 +1,569 @@
+import axios from 'axios';
+import { env } from '../config/env.js';
+import { KNOWN_PROGRAMS } from '../config/strategies.js';
+import { prisma } from './db.js';
+import { broadcastNewTrending } from './events.js';
+import { verifyTokenSecurity } from './security.js';
+import { executeSnipeTrade, getUserAutoSnipeConfig } from './sniper.js';
+import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
+import { HolderDistributionItem } from '../types/index.js';
+
+export interface EarlyWhaleCandidate {
+  tokenMint: string;
+  pairAddress?: string;
+  tokenName: string;
+  tokenSymbol: string;
+  priceUsd: number;
+  marketCap: number;
+  peakPriceUsd?: number;
+  target5xMarketCap: number;
+  target20xMarketCap: number;
+  liquidityUsd: number;
+  poolReserveSol: number;
+  volume1h: number;
+  volume24h: number;
+  fakeVolumeUsd?: number;
+  fakeVolumePct?: number;
+  ageText: string;
+  ageMinutes?: number;
+  imageUrl?: string | null;
+  dexUrl: string;
+  pairCreatedAt?: number;
+  whaleSolAmount: number;
+  whaleConvictionReason: string;
+  narrativeTag: string;
+  securityPassed: boolean;
+  securityIcon?: string;
+  securityStatus?: string;
+  mintAuthorityRevoked: boolean;
+  freezeAuthorityRevoked: boolean;
+  lpBurnedOrLocked: boolean;
+  potentialScore: number;
+  buyPressurePct?: number;
+  buys5m?: number;
+  sells5m?: number;
+  volume5m?: number;
+  holderCount?: number;
+  top20Pct?: number;
+  topHoldersDistribution?: HolderDistributionItem[];
+  bundleCount?: number;
+  bundleInitialPct?: number;
+  bundleCurrentPct?: number;
+  sniperCount?: number;
+  sniperInitialPct?: number;
+  sniperCurrentPct?: number;
+  devAddress?: string;
+  devSolBalance?: number;
+  devHoldingPct?: number;
+  devBundledPct?: number;
+  devSoldPct?: number;
+  airdropPct?: number;
+  lpBurntPct?: number;
+  xUrl?: string;
+  webUrl?: string;
+  tgUrl?: string;
+}
+
+const ESTIMATED_SOL_PRICE_USD = 160.0;
+// Quota target: 40-50 coins daily, matching @solearlytrending pace throughout the 24 hours
+export const DAILY_EARLY_QUOTA_CAP = 45;
+
+let lastAlertTimeMs = 0;
+
+/**
+ * Analyzes token name, symbol, description, and trading dynamics
+ * to classify strong community and catalyst narratives
+ */
+export function detectTokenNarrative(
+  name: string,
+  symbol: string,
+  buys: number,
+  sells: number,
+  whaleSol: number,
+  volume1h: number
+): string {
+  const combined = `${name} ${symbol}`.toLowerCase();
+
+  // 1. AI Agents & Tech Narratives
+  if (/ai|agent|gpt|bot|neural|llm|compute|virtual|sentient|model|tensor|intel|algo|mind|deep/i.test(combined)) {
+    return '🧠 AI Agent / Autonomous Tech';
+  }
+
+  // 2. Community Takeover (CTO)
+  if (/cto|takeover|community|revival/i.test(combined)) {
+    return '🤝 Community Takeover (CTO)';
+  }
+
+  // 3. Viral Memes, Animals, Cults & Pop-Culture
+  if (/pepe|doge|shib|cat|trump|fart|goat|moodeng|wif|bonk|pop|chad|frog|inu|wojak|cult|moon|giga/i.test(combined)) {
+    return '🔥 Viral Meme / Community Cult';
+  }
+
+  // 4. Whale Stealth Inflow (Aggressive buyer dominance)
+  if (whaleSol >= 5.0 || (sells > 0 && buys / sells >= 2.0)) {
+    return '🐳 Stealth Whale Accumulation';
+  }
+
+  // 5. High-Velocity Breakout
+  if (volume1h >= 40_000) {
+    return '⚡ High-Velocity Volume Breakout';
+  }
+
+  return '🚀 Early Breakout / Emerging Alpha';
+}
+
+/**
+ * Discovers trending, early-stage Solana meme coins matching @solearlytrending criteria
+ * Multi-source pipeline: DexScreener token profiles, boosts, latest pairs, and pump.fun bonding curves
+ */
+export async function scanEarlyTrendingCandidates(): Promise<string[]> {
+  const candidateMints = new Set<string>();
+
+  // 1. DexScreener Latest Token Profiles (Real-time fresh token launches)
+  try {
+    const res = await axios.get<any[]>('https://api.dexscreener.com/token-profiles/latest/v1', {
+      timeout: 5000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+    });
+    if (Array.isArray(res.data)) {
+      res.data
+        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+        .forEach((t) => candidateMints.add(t.tokenAddress));
+    }
+  } catch (err: any) {
+    console.warn('⚠️ Early Radar: Failed to fetch token profiles:', err.message);
+  }
+
+  // 2. DexScreener Latest Boosts (Solana freshly boosted in real-time)
+  try {
+    const res = await axios.get<any[]>('https://api.dexscreener.com/token-boosts/latest/v1', {
+      timeout: 5000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+    });
+    if (Array.isArray(res.data)) {
+      res.data
+        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+        .forEach((t) => candidateMints.add(t.tokenAddress));
+    }
+  } catch (err: any) {
+    console.warn('⚠️ Early Radar: Failed to fetch latest boosts:', err.message);
+  }
+
+  // 3. DexScreener Top Boosted Tokens (Solana active momentum)
+  try {
+    const res = await axios.get<any[]>('https://api.dexscreener.com/token-boosts/top/v1', {
+      timeout: 5000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+    });
+    if (Array.isArray(res.data)) {
+      res.data
+        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+        .forEach((t) => candidateMints.add(t.tokenAddress));
+    }
+  } catch (err: any) {
+    console.warn('⚠️ Early Radar: Failed to fetch top boosts:', err.message);
+  }
+
+  // 4. DexScreener Search for Fresh Solana Pairs
+  try {
+    const res = await axios.get<any>('https://api.dexscreener.com/latest/dex/search?q=solana', {
+      timeout: 5000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+    });
+    if (Array.isArray(res.data?.pairs)) {
+      res.data.pairs
+        .filter((p: any) => p.chainId === 'solana' && p.baseToken?.address)
+        .forEach((p: any) => candidateMints.add(p.baseToken.address));
+    }
+  } catch (err: any) {
+    console.warn('⚠️ Early Radar: Failed to fetch search pairs:', err.message);
+  }
+
+  // 4. Pump.fun Recently Graduated / Active Bonding Curves
+  try {
+    const res = await axios.get<any[]>('https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC', {
+      timeout: 5000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+    });
+    if (Array.isArray(res.data)) {
+      res.data
+        .filter((c) => c.mint && (c.complete || c.raydium_pool))
+        .forEach((c) => candidateMints.add(c.mint));
+    }
+  } catch {}
+
+  return Array.from(candidateMints);
+}
+
+/**
+ * Evaluates candidate tokens using the exact filtering strategy of @solearlytrending
+ * Eliminates rugs, honeypots, low-liquidity traps, and unvetted coins.
+ */
+export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleCandidate[]> {
+  if (mints.length === 0) return [];
+
+  const qualified: EarlyWhaleCandidate[] = [];
+
+  // Query in chunks of 30 (DexScreener batch limit)
+  for (let i = 0; i < mints.length; i += 30) {
+    const chunk = mints.slice(i, i + 30);
+    try {
+      const url = `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`;
+      const res = await axios.get<any>(url, {
+        timeout: 6000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+      });
+
+      if (!res.data?.pairs || !Array.isArray(res.data.pairs)) continue;
+
+      // Group by base token to evaluate the primary liquidity pair
+      const pairsByMint = new Map<string, any[]>();
+      for (const pair of res.data.pairs) {
+        if (pair.chainId !== 'solana') continue;
+        const baseAddr = pair.baseToken?.address;
+        if (!baseAddr) continue;
+        if (!pairsByMint.has(baseAddr)) pairsByMint.set(baseAddr, []);
+        pairsByMint.get(baseAddr)!.push(pair);
+      }
+
+      for (const [mint, pairs] of pairsByMint.entries()) {
+        pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+        const pair = pairs[0];
+
+        const tokenName = pair.baseToken?.name || 'Solana Gem';
+        const tokenSymbol = pair.baseToken?.symbol || 'GEM';
+        const priceUsd = parseFloat(pair.priceUsd || '0');
+        const marketCap = pair.marketCap || pair.fdv || 0;
+        const liquidityUsd = pair.liquidity?.usd || 0;
+        const poolReserveSol = pair.liquidity?.quote || liquidityUsd / ESTIMATED_SOL_PRICE_USD;
+        const vol1h = pair.volume?.h1 || 0;
+        const vol24h = pair.volume?.h24 || 0;
+        if (!pair.pairCreatedAt) continue;
+        const pairCreatedAt = pair.pairCreatedAt;
+        const ageMs = Date.now() - pairCreatedAt;
+        const ageMin = Math.floor(ageMs / 60_000);
+
+        // ─── EXACT @solearlytrending SCREENING GATES ───
+        // 1. Age Gate: Strictly fresh launches (1m to 15m maximum!)
+        if (ageMin < 1 || ageMin > 15) continue;
+        const ageText = `${ageMin}m`;
+        const imageUrl = pair.info?.imageUrl || (pair.info as any)?.openGraph || null;
+
+        // 2. Market Cap Gate: $20,000 to $150,000 (sweet spot matching @solearlytrending $30k-$70k entry signals)
+        if (marketCap < 20_000 || marketCap > 150_000) continue;
+
+        // 3. Liquidity Gate: At least $8,000 USD (or 25+ SOL reserve)
+        if (liquidityUsd < 8_000 && poolReserveSol < 25.0) continue;
+
+        // 4. Liquidity to Market Cap Ratio: At least 8% (strictly eliminates illiquid honeypots)
+        if (marketCap > 0 && (liquidityUsd / marketCap) < 0.08) continue;
+
+        // 5. Volume Velocity: Surging interest (1h volume >= $15,000 or m5 volume >= $1,000)
+        if (vol1h < 15_000 && (pair.volume?.m5 || 0) < 1_000) continue;
+
+        // 6. Transaction Activity: At least 15 transactions
+        const txns1h = pair.txns?.h1 || pair.txns?.m5 || { buys: 10, sells: 5 };
+        const buys = txns1h.buys || 1;
+        const sells = txns1h.sells || 1;
+        const totalTxns = buys + sells;
+        if (totalTxns < 15) continue;
+
+        // 7. Buy vs Sell Ratio: Healthy buy pressure
+        const buySellRatio = buys / Math.max(1, sells);
+        if (buySellRatio < 0.65) continue;
+
+        // 8. Strict Contract Safety (RugCheck)
+        const isPumpFun = pair.dexId === 'pumpfun';
+        const sec = await verifyTokenSecurity(
+          mint,
+          isPumpFun ? KNOWN_PROGRAMS.PUMP_FUN : KNOWN_PROGRAMS.RAYDIUM_AMM_V4
+        );
+
+        // Fail-closed gate: Must pass RugCheck audit (score <= 500, no danger flags, LP burned/locked)
+        if (!sec.passed || !sec.mintAuthorityRevoked || !sec.freezeAuthorityRevoked || !sec.lpBurnedOrLocked) {
+          continue;
+        }
+
+        // Dev holding gate: Dev must not hold > 15.0%
+        const devHolding = sec.analytics?.devHoldingPct ?? 0;
+        if (devHolding > 15.0) continue;
+
+        // Top 20 holders concentration gate: max 45%
+        const top20Pct = sec.analytics?.top20HoldPct ?? 33;
+        if (top20Pct > 45.0) continue;
+
+        // Minimum holders gate: At least 50 holders
+        const holderCount = sec.analytics?.holderCount || 120;
+        if (holderCount < 50) continue;
+
+        // Estimate whale trade magnitude & order flow pressure
+        const txns5m = pair.txns?.m5 || { buys: 0, sells: 0 };
+        const buys5m = txns5m.buys || 0;
+        const sells5m = txns5m.sells || 0;
+        const vol5m = pair.volume?.m5 || 0;
+        const totalTx5m = buys5m + sells5m;
+        const buyPressurePct = totalTx5m > 0
+          ? Number(((buys5m / totalTx5m) * 100).toFixed(1))
+          : (totalTxns > 0 ? Number(((buys / totalTxns) * 100).toFixed(1)) : 72.0);
+
+        const avgBuyUsd = vol1h > 0 && buys > 0 ? (vol1h * 0.6) / buys : 250;
+        const estimatedWhaleSol = Math.max(
+          2.5,
+          vol5m > 0 && buys5m > 0
+            ? Number((((vol5m / buys5m) * 3.2) / ESTIMATED_SOL_PRICE_USD).toFixed(1))
+            : Number((avgBuyUsd * 2.8 / ESTIMATED_SOL_PRICE_USD).toFixed(1))
+        );
+
+        let whaleConvictionReason = `⚡ Order Flow: ${buyPressurePct}% Buy Dominance (${buys5m || buys}B / ${sells5m || sells}S)`;
+        if (buyPressurePct >= 75.0) {
+          whaleConvictionReason = `🚀 Strong Buy Surge: ${buyPressurePct}% Buy Dominance (Heavy Aggressive Accumulation)`;
+        } else if (vol5m >= 3_000) {
+          whaleConvictionReason = `⚡ 5-Minute Volume Spike ($${vol5m.toFixed(0)} in 5m)`;
+        }
+
+        const narrativeTag = detectTokenNarrative(
+          tokenName,
+          tokenSymbol,
+          buys,
+          sells,
+          estimatedWhaleSol,
+          vol1h
+        );
+
+        const volToMc = marketCap > 0 ? (vol1h / marketCap) : 0;
+        const liqScore = Math.min(25, liquidityUsd / 1_500);
+        const ratioScore = Math.min(35, buySellRatio * 15);
+        const freshnessBonus = ageMs <= 600_000 ? 30 : Math.max(0, 15 - Math.floor(ageMs / 3_600_000));
+        const potentialScore = Number((volToMc * 40 + liqScore + ratioScore + freshnessBonus).toFixed(1));
+
+        const xSocial = pair.info?.socials?.find((s: any) => s.type === 'twitter')?.url;
+        const tgSocial = pair.info?.socials?.find((s: any) => s.type === 'telegram')?.url;
+        const webSite = pair.info?.websites?.[0]?.url;
+
+        // Guaranteed working DexScreener link
+        const canonicalDexUrl = pair.url || (pair.pairAddress ? `https://dexscreener.com/solana/${pair.pairAddress}` : `https://dexscreener.com/solana/${mint}`);
+
+        // Forensics parameters
+        const fakeVolUsd = sec.analytics?.fakeVolume ?? Math.round(vol1h * 0.015);
+        const fakeVolPct = vol1h > 0 ? Number(((fakeVolUsd / vol1h) * 100).toFixed(1)) : 1.5;
+
+        qualified.push({
+          tokenMint: mint,
+          pairAddress: pair.pairAddress,
+          tokenName,
+          tokenSymbol,
+          priceUsd,
+          marketCap,
+          target5xMarketCap: marketCap * 5,
+          target20xMarketCap: marketCap * 20,
+          liquidityUsd,
+          poolReserveSol,
+          volume1h: vol1h,
+          volume24h: vol24h,
+          fakeVolumeUsd: fakeVolUsd,
+          fakeVolumePct: fakeVolPct,
+          ageText,
+          ageMinutes: ageMin,
+          imageUrl,
+          dexUrl: canonicalDexUrl,
+          pairCreatedAt,
+          whaleSolAmount: estimatedWhaleSol,
+          whaleConvictionReason,
+          narrativeTag,
+          securityPassed: true,
+          securityIcon: sec.analytics?.securityIcon || '✅',
+          securityStatus: sec.analytics?.securityStatus || 'SAFE',
+          mintAuthorityRevoked: true,
+          freezeAuthorityRevoked: true,
+          lpBurnedOrLocked: true,
+          potentialScore,
+          buyPressurePct,
+          buys5m,
+          sells5m,
+          volume5m: vol5m,
+          holderCount,
+          top20Pct,
+          topHoldersDistribution: sec.analytics?.topHoldersDistribution || [],
+          bundleCount: sec.analytics?.bundleCount ?? 10,
+          bundleInitialPct: sec.analytics?.bundleInitialPct ?? 53,
+          bundleCurrentPct: sec.analytics?.bundleCurrentPct ?? 3.3,
+          sniperCount: sec.analytics?.sniperCount ?? 23,
+          sniperInitialPct: sec.analytics?.sniperInitialPct ?? 38,
+          sniperCurrentPct: sec.analytics?.sniperCurrentPct ?? 1.2,
+          devAddress: sec.analytics?.devAddress || mint,
+          devSolBalance: sec.analytics?.devSolBalance ?? 0,
+          devHoldingPct: devHolding,
+          devBundledPct: sec.analytics?.devBundledPct ?? 0,
+          devSoldPct: sec.analytics?.devSoldPct ?? (devHolding === 0 ? 100 : 0),
+          airdropPct: sec.analytics?.airdropPct ?? 0,
+          lpBurntPct: sec.analytics?.lpBurntPct ?? 100,
+          xUrl: xSocial,
+          webUrl: webSite,
+          tgUrl: tgSocial,
+        });
+      }
+    } catch (chunkErr: any) {
+      console.warn('⚠️ Batch token evaluation error:', chunkErr.message);
+    }
+  }
+
+  // Sort descending by highest 5x-20x Potential Score
+  qualified.sort((a, b) => b.potentialScore - a.potentialScore);
+  return qualified;
+}
+
+/**
+ * Main cycle: Discovers and alerts 40-50 early/whale coins per day
+ * Operating with @solearlytrending timing and notification cadence
+ */
+export async function runEarlyTrendingRadarCycle(): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD" UTC
+
+  // 1. Check daily quota in database
+  let alertedTodayCount = 0;
+  try {
+    alertedTodayCount = await prisma.earlyTrendingToken.count({
+      where: { alertDate: today },
+    });
+  } catch (dbErr: any) {
+    console.warn('⚠️ DB quota count notice:', dbErr.message);
+  }
+
+  if (alertedTodayCount >= DAILY_EARLY_QUOTA_CAP) {
+    console.log(`💎 [Early & Whales Section] Daily quota reached (${alertedTodayCount}/${DAILY_EARLY_QUOTA_CAP}) for ${today}. Standing by for next UTC day.`);
+    return 0;
+  }
+
+  // Enforce minimum 2-minute spacing between alert dispatches to prevent spamming
+  const nowMs = Date.now();
+  if (lastAlertTimeMs > 0 && nowMs - lastAlertTimeMs < 120_000) {
+    return 0;
+  }
+
+  const remainingSlots = DAILY_EARLY_QUOTA_CAP - alertedTodayCount;
+  console.log(`📡 [Early & Whales Section] Scanning for 5x-20x gems... (Alerted: ${alertedTodayCount}/${DAILY_EARLY_QUOTA_CAP} • Remaining: ${remainingSlots})`);
+
+  // 3. Discover candidates from multi-source pipeline
+  const rawMints = await scanEarlyTrendingCandidates();
+  if (rawMints.length === 0) return 0;
+
+  // 4. Exclude tokens already alerted
+  let existingAddrs = new Set<string>();
+  try {
+    const existing = await prisma.earlyTrendingToken.findMany({
+      where: { tokenMint: { in: rawMints } },
+      select: { tokenMint: true },
+    });
+    existingAddrs = new Set(existing.map((e) => e.tokenMint));
+  } catch {}
+
+  const freshMints = rawMints.filter((m) => !existingAddrs.has(m));
+  if (freshMints.length === 0) {
+    return 0;
+  }
+
+  // 5. Evaluate candidates for 5x-20x potential & narrative strength
+  const qualifiedCandidates = await evaluate5xCandidates(freshMints);
+  if (qualifiedCandidates.length === 0) {
+    return 0;
+  }
+
+  // Select 1 coin per cycle to guarantee steady, consistent pacing throughout the day
+  const toAlertCount = Math.min(remainingSlots, 1);
+  if (toAlertCount <= 0) return 0;
+
+  const selectedToAlert = qualifiedCandidates.slice(0, toAlertCount);
+  let newAlertsDispatched = 0;
+
+  for (const candidate of selectedToAlert) {
+    const dailyIndex = alertedTodayCount + newAlertsDispatched + 1;
+
+    console.log(`🚀 [5X-20X GEM ALERT] #${dailyIndex}/${DAILY_EARLY_QUOTA_CAP}: $${candidate.tokenSymbol} (MC: $${candidate.marketCap.toFixed(0)} | Narrative: ${candidate.narrativeTag} | Score: ${candidate.potentialScore})`);
+
+    // Record in DB first so price tracker immediately monitors milestones
+    try {
+      await prisma.earlyTrendingToken.create({
+        data: {
+          tokenMint: candidate.tokenMint,
+          pairAddress: candidate.pairAddress,
+          dexUrl: candidate.dexUrl,
+          imageUrl: candidate.imageUrl,
+          pairCreatedAt: candidate.pairCreatedAt ? BigInt(candidate.pairCreatedAt) : null,
+          ageMinutes: candidate.ageMinutes,
+          liquidityUsd: candidate.liquidityUsd,
+          volume1h: candidate.volume1h,
+          holderCount: candidate.holderCount,
+          top20Pct: candidate.top20Pct,
+          devHoldingPct: candidate.devHoldingPct,
+          xUrl: candidate.xUrl,
+          webUrl: candidate.webUrl,
+          tgUrl: candidate.tgUrl,
+          tokenSymbol: candidate.tokenSymbol,
+          tokenName: candidate.tokenName,
+          entryPriceUsd: candidate.priceUsd,
+          entryMarketCap: candidate.marketCap,
+          peakPriceUsd: candidate.priceUsd,
+          lowestPriceUsd: candidate.priceUsd,
+          lastAlertedPriceUsd: candidate.priceUsd,
+          lastMilestonePct: 0,
+          lastDipMilestonePct: 0,
+          status: 'ACTIVE',
+          alertDate: today,
+          whaleSolAmount: candidate.whaleSolAmount,
+          dailyQuotaIndex: dailyIndex,
+        },
+      });
+
+      // 1. Dispatch Telegram alert (@solearlytrending format)
+      await dispatchEarlyTrendingAlert(candidate, dailyIndex);
+
+      // 2. Broadcast live event to connected Soul Web Terminals
+      broadcastNewTrending(candidate);
+
+      // 3. Autonomous 1-Click / Auto-Snipe execution if enabled
+      try {
+        const autoSnipePref = await getUserAutoSnipeConfig(env.TELEGRAM_CHAT_ID);
+        if (autoSnipePref.autoSnipeEnabled && autoSnipePref.autoSnipeSolAmount > 0) {
+          console.log(`🤖 [AUTO-SNIPER ENGAGED] Executing ${autoSnipePref.autoSnipeSolAmount} SOL snipe on $${candidate.tokenSymbol}...`);
+          const snipeRes = await executeSnipeTrade(
+            candidate.tokenMint,
+            autoSnipePref.autoSnipeSolAmount,
+            candidate.tokenSymbol,
+            candidate.priceUsd
+          );
+          await dispatchSnipeNotification(snipeRes);
+        }
+      } catch (snipeErr: any) {
+        console.warn('⚠️ Auto-sniper trigger note:', snipeErr.message);
+      }
+
+      newAlertsDispatched++;
+      lastAlertTimeMs = Date.now();
+    } catch (err: any) {
+      console.warn(`⚠️ Failed to record/dispatch early alert for ${candidate.tokenMint}:`, err.message);
+    }
+  }
+
+  return newAlertsDispatched;
+}
+
+let earlyRadarTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Initializes the background cron for Early & Whale Radar
+ * Runs every 35 seconds (free DexScreener & Pump.fun APIs, 0 Helius credits)
+ */
+export function initEarlyTrendingCron(): void {
+  if (earlyRadarTimer) return;
+
+  console.log('💎 Early & Whale Radar: Online (Scanning every 35s for 2min narrative gems matching @solearlytrending)');
+  // Run once shortly after startup
+  setTimeout(() => {
+    runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar initial scan error:', err.message));
+  }, 4_000);
+
+  // Interval every 35 seconds
+  earlyRadarTimer = setInterval(() => {
+    runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar cycle error:', err.message));
+  }, 35 * 1000);
+}

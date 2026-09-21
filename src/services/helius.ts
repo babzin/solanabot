@@ -43,26 +43,61 @@ export async function updateHeliusWebhookAddresses(
 }
 
 /**
+ * Updates the Helius Webhook destination URL
+ */
+export async function updateHeliusWebhookUrl(
+  webhookId: string,
+  newWebhookUrl: string
+): Promise<boolean> {
+  if (!env.HELIUS_API_KEY || !webhookId || env.HELIUS_API_KEY.includes('dummy')) {
+    return false;
+  }
+
+  try {
+    const url = `https://api.helius.xyz/v0/webhooks/${webhookId}?api-key=${env.HELIUS_API_KEY}`;
+    const getRes = await axios.get(url);
+    const existingConfig = getRes.data;
+
+    await axios.put(url, {
+      webhookURL: newWebhookUrl,
+      transactionTypes: existingConfig.transactionTypes || ['SWAP'],
+      accountAddresses: existingConfig.accountAddresses || [],
+      webhookType: existingConfig.webhookType || 'enhanced',
+      authHeader: existingConfig.authHeader || env.WEBHOOK_AUTH_TOKEN,
+    });
+
+    console.log(`✅ Updated Helius Webhook [${webhookId}] destination to: ${newWebhookUrl}`);
+    return true;
+  } catch (err: any) {
+    console.error('⚠️ Failed to update Helius Webhook URL:', err.response?.data || err.message);
+    return false;
+  }
+}
+
+/**
  * Extracts and normalizes swap events from Helius parsed transactions
  * Supports native SOL, Wrapped SOL (WSOL), and calculates accurate sell percentages
  */
 export async function parseHeliusSwapTransaction(
-  tx: HeliusParsedTransaction
+  tx: HeliusParsedTransaction,
+  knownWallet?: string
 ): Promise<SwapEvent | null> {
   // 1. Identify which tracked wallet was involved
-  let matchingWallet: string | null = null;
+  let matchingWallet: string | null = knownWallet || null;
 
-  // Check fee payer
-  if (await isWalletTracked(tx.feePayer)) {
-    matchingWallet = tx.feePayer;
-  }
+  if (!matchingWallet) {
+    // Check fee payer
+    if (await isWalletTracked(tx.feePayer)) {
+      matchingWallet = tx.feePayer;
+    }
 
-  // Check accountData if feePayer wasn't in tracked set (e.g. bot relayer / telegram bot)
-  if (!matchingWallet && tx.accountData) {
-    for (const acc of tx.accountData) {
-      if (await isWalletTracked(acc.account)) {
-        matchingWallet = acc.account;
-        break;
+    // Check accountData if feePayer wasn't in tracked set (e.g. bot relayer / telegram bot)
+    if (!matchingWallet && tx.accountData) {
+      for (const acc of tx.accountData) {
+        if (await isWalletTracked(acc.account)) {
+          matchingWallet = acc.account;
+          break;
+        }
       }
     }
   }
@@ -115,7 +150,7 @@ export async function parseHeliusSwapTransaction(
       }
     }
 
-    if (tokenMint && solAmount >= 0.05) {
+    if (tokenMint && solAmount >= 0.005) {
       return {
         signature: tx.signature,
         walletAddress: matchingWallet,
@@ -189,8 +224,12 @@ export async function parseHeliusSwapTransaction(
   const side: 'BUY' | 'SELL' = totalSolDelta < 0 ? 'BUY' : 'SELL';
   const solAmount = Math.abs(totalSolDelta);
 
-  // Filter out tiny dust / airdrops / micro-fees (< 0.05 SOL)
-  if (!tokenMint || solAmount < 0.05) {
+  // Filter out tiny dust / airdrops / micro-fees (< 0.005 SOL) and stablecoin swaps (USDC/USDT)
+  const isStable =
+    tokenMint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' ||
+    tokenMint === 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+
+  if (!tokenMint || solAmount < 0.005 || isStable) {
     return null;
   }
 

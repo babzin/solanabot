@@ -19,6 +19,64 @@ export interface SnipeResult {
   error?: string;
 }
 
+export interface SnipedPosition {
+  id: string;
+  tokenMint: string;
+  tokenSymbol: string;
+  entryPriceUsd: number;
+  currentPriceUsd: number;
+  peakPriceUsd: number;
+  solInvested: number;
+  initialTokens: number;
+  remainingTokens: number;
+  status: 'OPEN' | 'PARTIAL_TP_2X' | 'CLOSED';
+  createdAt: number;
+  closedAt?: number;
+  realizedSolProfit: number;
+  exitReason?: string;
+  isSimulated: boolean;
+}
+
+// In-memory active positions registry (persists across trades during bot uptime)
+const activePositions = new Map<string, SnipedPosition>();
+
+export function recordSnipedPosition(
+  tokenMint: string,
+  tokenSymbol: string,
+  entryPriceUsd: number,
+  solInvested: number,
+  initialTokens: number,
+  isSimulated: boolean = true
+): SnipedPosition {
+  const position: SnipedPosition = {
+    id: `pos_${Date.now()}_${tokenMint.slice(0, 4)}`,
+    tokenMint,
+    tokenSymbol: tokenSymbol || 'TOKEN',
+    entryPriceUsd: Math.max(0.0000001, entryPriceUsd),
+    currentPriceUsd: Math.max(0.0000001, entryPriceUsd),
+    peakPriceUsd: Math.max(0.0000001, entryPriceUsd),
+    solInvested,
+    initialTokens,
+    remainingTokens: initialTokens,
+    status: 'OPEN',
+    createdAt: Date.now(),
+    realizedSolProfit: 0,
+    isSimulated,
+  };
+
+  activePositions.set(tokenMint, position);
+  console.log(`💼 [POSITION OPENED] Tracking ${tokenSymbol} at $${entryPriceUsd.toFixed(6)} (${solInvested} SOL invested)`);
+  return position;
+}
+
+export function getActivePositions(): SnipedPosition[] {
+  return Array.from(activePositions.values()).filter((p) => p.status !== 'CLOSED');
+}
+
+export function getAllPositions(): SnipedPosition[] {
+  return Array.from(activePositions.values());
+}
+
 /**
  * Retrieves Keypair from configured SNIPER_PRIVATE_KEY
  * Supports base58 or JSON array format
@@ -93,6 +151,8 @@ export async function executeSnipeTrade(
 
       console.log(`🚀 [SNIPER LIVE EXECUTION] Tx Broadcast: https://solscan.io/tx/${signature}`);
 
+      recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, false);
+
       return {
         success: true,
         simulated: false,
@@ -109,6 +169,8 @@ export async function executeSnipeTrade(
     // 3. Simulation / Paper-Trading Mode (Instant, Risk-Free, 0 SOL spent)
     const simulatedSignature = `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     console.log(`⚡ [SNIPER SIMULATION] Paper-traded ${solAmount} SOL for ~${estimatedTokens.toFixed(0)} ${tokenSymbol || 'Tokens'}`);
+
+    recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
 
     return {
       success: true,
@@ -128,6 +190,8 @@ export async function executeSnipeTrade(
     const estimatedTokens = priceUsd && priceUsd > 0 ? (solAmount * 160) / priceUsd : solAmount * 50_000_000;
     const simulatedSignature = `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
+    recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
+
     return {
       success: true,
       simulated: true,
@@ -144,14 +208,16 @@ export async function executeSnipeTrade(
 
 /**
  * Executes an automated sell / take-profit exit trade via Jupiter or Paper-Trading Simulation
+ * Supports partial scaling (e.g. sellPercent = 50 for 2X take-profit)
  */
 export async function executeSnipeSell(
   tokenMint: string,
   tokenSymbol?: string,
-  priceUsd?: number
+  priceUsd?: number,
+  sellPercent: number = 100
 ): Promise<SnipeResult> {
   const keypair = getSniperKeypair();
-  console.log(`🎯 [SNIPER ENGINE] Executing automated SELL on token ${tokenMint}...`);
+  console.log(`🎯 [SNIPER ENGINE] Executing automated SELL (${sellPercent}%) on token ${tokenMint}...`);
 
   try {
     if (keypair && env.HELIUS_RPC_URL) {
@@ -168,9 +234,10 @@ export async function executeSnipeSell(
         });
 
         const accounts = balRes.data?.result?.value || [];
-        const tokenAmountRaw = accounts[0]?.account?.data?.parsed?.info?.tokenAmount?.amount;
+        const fullTokenAmountRaw = accounts[0]?.account?.data?.parsed?.info?.tokenAmount?.amount;
 
-        if (tokenAmountRaw && Number(tokenAmountRaw) > 0) {
+        if (fullTokenAmountRaw && Number(fullTokenAmountRaw) > 0) {
+          const tokenAmountRaw = Math.floor(Number(fullTokenAmountRaw) * (sellPercent / 100));
           const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenMint}&outputMint=${WSOL_MINT}&amount=${tokenAmountRaw}&slippageBps=2000`;
           const quoteRes = await axios.get(quoteUrl, { timeout: 3500 });
           const quoteData = quoteRes.data;
@@ -199,7 +266,7 @@ export async function executeSnipeSell(
 
           const signature = txRes.data?.result || `live_sell_${Date.now()}`;
           const solReceived = Number(quoteData.outAmount || 0) / 1e9;
-          console.log(`🚀 [SNIPER LIVE SELL] Sold on-chain for ${solReceived.toFixed(3)} SOL! Tx: https://solscan.io/tx/${signature}`);
+          console.log(`🚀 [SNIPER LIVE SELL] Sold ${sellPercent}% on-chain for ${solReceived.toFixed(3)} SOL! Tx: https://solscan.io/tx/${signature}`);
 
           return {
             success: true,
@@ -220,22 +287,30 @@ export async function executeSnipeSell(
 
     // Simulation / Paper-Trading Mode
     const simulatedSignature = `sim_sell_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const pos = activePositions.get(tokenMint);
+    const estimatedSol = pos
+      ? (pos.solInvested * (sellPercent / 100) * ((priceUsd || pos.entryPriceUsd) / pos.entryPriceUsd))
+      : 0.1 * (sellPercent / 100);
+
+    console.log(`⚡ [SNIPER SIMULATION] Sold ${sellPercent}% of ${tokenSymbol || 'Tokens'} for ~${estimatedSol.toFixed(3)} SOL`);
+
     return {
       success: true,
       simulated: true,
       signature: simulatedSignature,
-      solAmount: 0.15,
-      tokenAmount: 100_000,
+      solAmount: Number(estimatedSol.toFixed(3)),
+      tokenAmount: pos ? pos.remainingTokens * (sellPercent / 100) : 100_000,
       tokenMint,
       tokenSymbol,
       priceUsd,
-      routePlan: 'Jupiter Instant Take-Profit Exit',
+      routePlan: 'Jupiter Route Simulation',
     };
   } catch (err: any) {
+    console.warn(`⚠️ Snipe sell error on ${tokenMint}:`, err.message);
     return {
       success: false,
       simulated: true,
-      signature: '',
+      signature: `err_${Date.now()}`,
       solAmount: 0,
       tokenAmount: 0,
       tokenMint,
@@ -244,6 +319,115 @@ export async function executeSnipeSell(
     };
   }
 }
+
+export interface TpSlActionTriggered {
+  position: SnipedPosition;
+  action: 'TAKE_PROFIT_2X' | 'TRAILING_STOP' | 'HARD_STOP';
+  gainPercent: number;
+  solAmount: number;
+  message: string;
+}
+
+/**
+ * Autonomous Take-Profit & Stop-Loss Engine
+ * 1. At +100% (2X): Sells 50% to return original principal risk-free.
+ * 2. On Moonbag: Trailing stop-loss if price drops 25% from peak.
+ * 3. Capital Protection: Hard stop-loss at -25% from entry.
+ */
+export async function checkActivePositionsTpSl(
+  tokenMint: string,
+  currentPriceUsd: number
+): Promise<TpSlActionTriggered | null> {
+  const pos = activePositions.get(tokenMint);
+  if (!pos || pos.status === 'CLOSED') return null;
+
+  pos.currentPriceUsd = currentPriceUsd;
+  pos.peakPriceUsd = Math.max(pos.peakPriceUsd, currentPriceUsd);
+
+  const gainFromEntryPct = ((currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+  const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
+
+  // 1. Take Profit at +100% (2X) - Sell 50% of tokens to secure original SOL!
+  if (pos.status === 'OPEN' && gainFromEntryPct >= 100.0) {
+    console.log(`🎯 [AUTONOMOUS 2X TAKE-PROFIT] $${pos.tokenSymbol} reached +${gainFromEntryPct.toFixed(1)}%! Selling 50% to secure initial SOL...`);
+
+    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 50);
+    const solSecured = sellRes.solAmount || pos.solInvested;
+
+    pos.status = 'PARTIAL_TP_2X';
+    pos.remainingTokens = pos.initialTokens * 0.5;
+    pos.realizedSolProfit += solSecured;
+
+    return {
+      position: pos,
+      action: 'TAKE_PROFIT_2X',
+      gainPercent: gainFromEntryPct,
+      solAmount: solSecured,
+      message: `🎯 <b>[AUTONOMOUS 2X TAKE-PROFIT HIT]</b> 🚀\n\n` +
+        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
+        `📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (2.0X Multiplier)</b>\n` +
+        `💰 Action: <b>Sold 50% of position</b>\n` +
+        `💵 SOL Secured: <code>+${solSecured.toFixed(3)} SOL</code> (Original principal returned!)\n` +
+        `🌙 Moonbag: <b>Remaining 50% riding risk-free</b> with a trailing stop-loss!`,
+    };
+  }
+
+  // 2. Trailing Stop-Loss on remaining Moonbag: If price falls 25% from peak
+  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= 25.0) {
+    console.log(`🛑 [TRAILING STOP-LOSS] $${pos.tokenSymbol} retraced -${dropFromPeakPct.toFixed(1)}% from peak. Liquidating remaining 50% moonbag...`);
+
+    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
+    const moonbagSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd) * 0.5);
+
+    pos.status = 'CLOSED';
+    pos.closedAt = Date.now();
+    pos.remainingTokens = 0;
+    pos.realizedSolProfit += moonbagSol;
+    pos.exitReason = 'TRAILING_STOP';
+
+    return {
+      position: pos,
+      action: 'TRAILING_STOP',
+      gainPercent: gainFromEntryPct,
+      solAmount: moonbagSol,
+      message: `🛑 <b>[TRAILING STOP-LOSS EXECUTED]</b> 📉\n\n` +
+        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
+        `📉 Retraced: <b>-${dropFromPeakPct.toFixed(1)}% from peak</b>\n` +
+        `💰 Action: <b>Sold remaining moonbag</b>\n` +
+        `💵 SOL Harvested: <code>+${moonbagSol.toFixed(3)} SOL</code>\n` +
+        `🏆 Total Net Realized Profit: <code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>!`,
+    };
+  }
+
+  // 3. Capital Protection Stop-Loss: If un-profited token drops -25% from entry
+  if (pos.status === 'OPEN' && gainFromEntryPct <= -25.0) {
+    console.log(`🛡️ [CAPITAL PROTECTION SL] $${pos.tokenSymbol} dropped -25% from entry. Exiting immediately to prevent loss...`);
+
+    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
+    const solRecovered = sellRes.solAmount || (pos.solInvested * 0.75);
+
+    pos.status = 'CLOSED';
+    pos.closedAt = Date.now();
+    pos.remainingTokens = 0;
+    pos.realizedSolProfit += solRecovered;
+    pos.exitReason = 'HARD_STOP_25';
+
+    return {
+      position: pos,
+      action: 'HARD_STOP',
+      gainPercent: gainFromEntryPct,
+      solAmount: solRecovered,
+      message: `🛡️ <b>[CAPITAL PROTECTION STOP-LOSS]</b> ⚠️\n\n` +
+        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
+        `📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry</b>\n` +
+        `💰 Action: <b>Emergency cut-loss execution</b>\n` +
+        `💵 SOL Preserved: <code>${solRecovered.toFixed(3)} SOL</code> (Protected ~75% of capital).`,
+    };
+  }
+
+  return null;
+}
+
 
 export type FilterMode = 'ALL' | 'SAFE' | 'RISK';
 
