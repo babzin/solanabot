@@ -194,3 +194,37 @@ export interface HeliusParsedTransaction {
     };
   };
 }
+
+export interface AiNarrativeScore {
+  convictionScore: number; // 0 to 100
+  metaCategory: string; // e.g. "AI Agent", "Cat / Animal Meta", "Cult Meme", "Utility / Infra", "Generic Copycat"
+  rugRisk: 'LOW' | 'MEDIUM' | 'HIGH';
+  thesis: string; // 1-2 sentence crisp takeaway
+  signals: {
+    memeVirality: number; // 0-100
+    socialLegitimacy: number; // 0-100
+    devSafety: number; // 0-100
+  };
+  providerUsed: 'gemini' | 'groq' | 'heuristic-slm';
+}
+
+export interface AiAuditResult {
+  mint: string;
+  symbol: string;
+  name: string;
+  score: AiNarrativeScore;
+  onChainMetrics: {
+    marketCapUsd: number;
+    priceUsd: number;
+    ageMinutes: number;
+    liquidityUsd: number;
+    snipersCount: number;
+    devHoldingPct: number;
+    mintAuthorityRevoked: boolean;
+    freezeAuthorityRevoked: boolean;
+    liquidityBurntPct: number;
+  };
+  recommendation: 'STRONG_BUY' | 'SPECULATIVE_SNIPE' | 'WAIT_AND_WATCH' | 'AVOID_RUG';
+  summary: string;
+}
+

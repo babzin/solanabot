@@ -9,6 +9,7 @@ import { initEarlyTrendingCron } from './services/earlyTrending.js';
 import { initPriceMilestoneTracker } from './services/priceTracker.js';
 import { redis } from './services/redis.js';
 import { bot, initTelegramCommands } from './services/telegram.js';
+import { initWeeklyReportCron } from './services/weeklyCron.js';
 
 const server = Fastify({
   logger: {
@@ -36,6 +37,9 @@ async function main() {
 
   // 4. Initialize Price Milestone Tracker (+50% to 79X pumps & -50% retracements)
   initPriceMilestoneTracker();
+
+  // 5. Initialize Weekly Performance Recap Scheduler (Sunday 23:55 UTC)
+  initWeeklyReportCron();
 
   // 5. Initialize Telegram Command Handlers & Polling
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {

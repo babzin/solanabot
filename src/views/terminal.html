@@ -264,6 +264,55 @@
       transform: translateY(-2px);
     }
 
+    .radar-card.flop {
+      border-color: rgba(255, 68, 68, 0.35);
+      background: rgba(255, 68, 68, 0.03);
+    }
+
+    .radar-card.flop:hover, .radar-card.flop.active {
+      border-color: #ff4444;
+      box-shadow: 0 0 16px rgba(255, 68, 68, 0.25);
+    }
+
+    .filter-tab {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .filter-tab:hover {
+      color: #fff;
+      border-color: var(--cyan);
+    }
+
+    .filter-tab.active {
+      background: rgba(0, 240, 255, 0.15);
+      color: var(--cyan);
+      border-color: var(--cyan);
+    }
+
+    .filter-tab.flops.active {
+      background: rgba(255, 68, 68, 0.2);
+      color: #ff4444;
+      border-color: #ff4444;
+    }
+
+    .badge-flop {
+      background: rgba(255, 68, 68, 0.15);
+      color: #ff4444;
+      border: 1px solid rgba(255, 68, 68, 0.4);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
     .radar-card-top {
       display: flex;
       align-items: center;
@@ -726,8 +775,12 @@
     <!-- LEFT PANEL: Early Trending Radar Feed -->
     <section class="panel left-panel">
       <div class="panel-header">
-        <span class="panel-title">📡 Early Trending Radar</span>
-        <span class="age-badge" id="radar-count">LIVE</span>
+        <span class="panel-title">📡 Early Radar <span id="radar-date-badge" style="font-size:11px; color:var(--text-muted); font-weight:600; text-transform:none; margin-left:4px;"></span></span>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <button id="filter-all-btn" class="filter-tab active" onclick="setRadarFilter('all')">💎 All</button>
+          <button id="filter-flops-btn" class="filter-tab flops" onclick="setRadarFilter('flops')">📉 Flops</button>
+          <span class="age-badge" id="radar-count">LIVE</span>
+        </div>
       </div>
       <div class="panel-body" id="radar-feed">
         <!-- Live Candidate Cards injected here -->
@@ -745,7 +798,9 @@
           <div class="token-avatar" id="token-avatar">🪙</div>
           <div>
             <div style="display:flex; align-items:center; gap:8px;">
-              <span class="token-header-name" id="token-name">Select a Gem</span>
+              <a id="token-name-link" href="https://dexscreener.com" target="_blank" title="Open on DexScreener" style="text-decoration:none; color:inherit;">
+                <span class="token-header-name" id="token-name">Select a Gem</span>
+              </a>
               <span class="age-badge" id="token-age">--</span>
             </div>
             <div class="token-address-row">
@@ -954,6 +1009,8 @@
       // DexScreener Chart
       const chartUrl = token.dexUrl || `https://dexscreener.com/solana/${token.tokenMint}`;
       document.getElementById('link-chart').href = chartUrl;
+      const nameLink = document.getElementById('token-name-link');
+      if (nameLink) nameLink.href = chartUrl;
       const embedUrl = chartUrl.includes('?') ? `${chartUrl}?embed=1&theme=dark&trades=0` : `${chartUrl}?embed=1&theme=dark&trades=0`;
       document.getElementById('dex-chart-iframe').src = embedUrl;
 
@@ -1011,45 +1068,88 @@
       }
     }
 
+    let currentRadarFilter = 'all';
+    let allTrendingTokens = [];
+    let floppedTokens = [];
+    let trendingTotalMultiplier = 0;
+    let flopsTotalDrawdownMultiplier = 0;
+    let flopsTotalDrawdownPercent = 0;
+
+    function setRadarFilter(filter) {
+      currentRadarFilter = filter;
+      const allBtn = document.getElementById('filter-all-btn');
+      const flopsBtn = document.getElementById('filter-flops-btn');
+      if (allBtn) allBtn.classList.toggle('active', filter === 'all');
+      if (flopsBtn) flopsBtn.classList.toggle('active', filter === 'flops');
+
+      if (filter === 'flops') {
+        loadFlops();
+      } else {
+        renderRadarFeed(allTrendingTokens, false);
+        const multSuffix = trendingTotalMultiplier > 0 ? ` (+${trendingTotalMultiplier}X)` : '';
+        const radarBadge = document.getElementById('radar-count');
+        if (radarBadge) {
+          radarBadge.innerText = `${allTrendingTokens.length} LIVE${multSuffix}`;
+          radarBadge.title = `All coins make a total of ${trendingTotalMultiplier}X`;
+        }
+      }
+    }
+
     // Render left radar list
-    function renderRadarFeed(tokens) {
+    function renderRadarFeed(tokens, isFlopView = false) {
       const container = document.getElementById('radar-feed');
       if (!tokens || tokens.length === 0) {
-        container.innerHTML = `<div style="text-align:center; padding: 40px 10px; color: var(--text-dim);">No early trending gems detected yet. Scanning...</div>`;
+        const emptyMsg = isFlopView
+          ? 'No flopped coins detected today! All alerted gems are holding strong.'
+          : 'No early trending gems detected yet. Scanning...';
+        container.innerHTML = `<div style="text-align:center; padding: 40px 10px; color: var(--text-dim);">${emptyMsg}</div>`;
         return;
       }
       container.innerHTML = '';
       tokens.forEach((t, idx) => {
         const card = document.createElement('div');
-        card.className = 'radar-card';
+        card.className = isFlopView ? 'radar-card flop' : 'radar-card';
         card.dataset.mint = t.tokenMint;
         if (activeToken && activeToken.tokenMint === t.tokenMint) card.classList.add('active');
+
+        const cardChartUrl = t.dexUrl || `https://dexscreener.com/solana/${t.tokenMint}`;
+        const topBadge = isFlopView
+          ? `<span class="badge-flop">${t.dropFromEntryPct || -50}%</span>`
+          : `<span class="age-badge">${t.ageText || '2m'}</span>`;
+
+        const footerTag = isFlopView
+          ? `<span style="color:#ff6666; font-size:11px; font-weight:700;">🩸 Flopped Coin</span>`
+          : `<span class="safety-tag">✅ Mint/LP Safe</span>`;
 
         card.innerHTML = `
           <div class="radar-card-top">
             <div class="token-id">
-              <span class="token-symbol">$${t.tokenSymbol}</span>
-              <span class="token-name">${t.tokenName || ''}</span>
+              <a href="${cardChartUrl}" target="_blank" title="Open DexScreener Chart" style="text-decoration:none; color:inherit;" onclick="event.stopPropagation();">
+                <span class="token-symbol" style="cursor:pointer; text-decoration:underline dotted;">$${t.tokenSymbol}</span>
+              </a>
+              <a href="${cardChartUrl}" target="_blank" title="Open DexScreener Chart" style="text-decoration:none; color:inherit;" onclick="event.stopPropagation();">
+                <span class="token-name" style="cursor:pointer; text-decoration:underline dotted;">${t.tokenName || ''}</span>
+              </a>
             </div>
-            <span class="age-badge">${t.ageText || '2m'}</span>
+            ${topBadge}
           </div>
           <div class="radar-stats">
             <div class="r-stat">
-              <span class="r-stat-label">MC</span>
-              <span class="r-stat-val" style="color:var(--cyan);">${formatUsd(t.marketCap || t.entryMarketCap)}</span>
+              <span class="r-stat-label">${isFlopView ? 'Current MC' : 'MC'}</span>
+              <span class="r-stat-val" style="color:${isFlopView ? '#ff6666' : 'var(--cyan)'};">${formatUsd(t.currentMarketCap || t.marketCap || t.entryMarketCap)}</span>
+            </div>
+            <div class="r-stat">
+              <span class="r-stat-label">Entry MC</span>
+              <span class="r-stat-val">${formatUsd(t.entryMarketCap || t.marketCap)}</span>
             </div>
             <div class="r-stat">
               <span class="r-stat-label">Liq</span>
               <span class="r-stat-val">${formatUsd(t.liquidityUsd)}</span>
             </div>
-            <div class="r-stat">
-              <span class="r-stat-label">1h Vol</span>
-              <span class="r-stat-val">${formatUsd(t.volume1h)}</span>
-            </div>
           </div>
           <div class="radar-card-footer">
-            <span class="safety-tag">✅ Mint/LP Safe</span>
-            <span style="font-family:'JetBrains Mono'; font-size:10px; color:var(--text-muted);">Score: ${t.potentialScore || 85}</span>
+            ${footerTag}
+            <span style="font-family:'JetBrains Mono'; font-size:10px; color:var(--text-muted);">${isFlopView ? (t.dropFromPeakPct ? `${t.dropFromPeakPct}% from peak` : 'Dipped') : `Score: ${t.potentialScore || 85}`}</span>
           </div>
         `;
 
@@ -1068,11 +1168,60 @@
         const res = await fetch('/api/trending');
         const data = await res.json();
         if (data.tokens) {
-          renderRadarFeed(data.tokens);
-          document.getElementById('radar-count').innerText = `${data.tokens.length} LIVE`;
+          allTrendingTokens = data.tokens;
+          trendingTotalMultiplier = data.totalMultiplier || 0;
+          if (data.date) {
+            const dateBadge = document.getElementById('radar-date-badge');
+            if (dateBadge) dateBadge.innerText = `(${data.date})`;
+          }
+          if (currentRadarFilter === 'all') {
+            renderRadarFeed(allTrendingTokens, false);
+            const multSuffix = trendingTotalMultiplier > 0 ? ` (+${trendingTotalMultiplier}X)` : '';
+            const radarBadge = document.getElementById('radar-count');
+            if (radarBadge) {
+              radarBadge.innerText = `${allTrendingTokens.length} LIVE${multSuffix}`;
+              radarBadge.title = `All coins make a total of ${trendingTotalMultiplier}X`;
+            }
+          }
+          if (trendingTotalMultiplier > 0) {
+            const marquee = document.getElementById('ticker-marquee');
+            if (marquee && !document.getElementById('ticker-total-mult')) {
+              const span = document.createElement('span');
+              span.id = 'ticker-total-mult';
+              span.className = 'ticker-item';
+              span.innerHTML = `🚀 <b>TOTAL TOP GAINERS:</b> <span class="badge-win">+${trendingTotalMultiplier}X</span> <i>(all coins make a total of ${trendingTotalMultiplier}X)</i>`;
+              marquee.prepend(span);
+            }
+          }
         }
       } catch (err) {
         console.error('Failed to load trending tokens:', err);
+      }
+    }
+
+    // Fetch list of flopped coins
+    async function loadFlops() {
+      try {
+        const res = await fetch('/api/flops');
+        const data = await res.json();
+        floppedTokens = data.tokens || [];
+        flopsTotalDrawdownMultiplier = data.totalDrawdownMultiplier || 0;
+        flopsTotalDrawdownPercent = data.totalDrawdownPercent || 0;
+        if (data.date) {
+          const dateBadge = document.getElementById('radar-date-badge');
+          if (dateBadge) dateBadge.innerText = `(${data.date})`;
+        }
+        if (currentRadarFilter === 'flops') {
+          renderRadarFeed(floppedTokens, true);
+          const flopSuffix = flopsTotalDrawdownMultiplier > 0 ? ` (-${flopsTotalDrawdownMultiplier}X)` : '';
+          const radarBadge = document.getElementById('radar-count');
+          if (radarBadge) {
+            radarBadge.innerText = `${floppedTokens.length} FLOPS${flopSuffix}`;
+            radarBadge.title = `All flop coins make a total drawdown of -${flopsTotalDrawdownMultiplier}X (-${flopsTotalDrawdownPercent}%)`;
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load flopped tokens:', err);
       }
     }
 

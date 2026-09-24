@@ -39,6 +39,12 @@ const envSchema = z.object({
   MIN_POOL_RESERVE_SOL: z.coerce.number().default(25.0),
   DISCOVERY_INTERVAL_HOURS: z.coerce.number().default(24),
   ENABLE_TUNNEL: z.coerce.boolean().default(true),
+
+  // --- AI INTELLIGENCE & SLM CO-PILOT ---
+  GEMINI_API_KEY: z.string().optional(),
+  GROQ_API_KEY: z.string().optional(),
+  AI_PROVIDER: z.enum(['auto', 'gemini', 'groq', 'heuristic']).default('auto'),
+  AI_MIN_CONVICTION_ALERT: z.coerce.number().default(0),
 });
 
 const parsed = envSchema.safeParse(process.env);

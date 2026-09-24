@@ -31,36 +31,42 @@ export async function checkPriceMilestones(): Promise<number> {
   const mints = activeTokens.map((t) => t.tokenMint);
   let alertsDispatched = 0;
 
-  // 2. Query DexScreener in chunks of 30
+  // 2. Query DexScreener in parallel chunks of 30
+  const chunkArrays: string[][] = [];
   for (let i = 0; i < mints.length; i += 30) {
-    const chunk = mints.slice(i, i + 30);
-    try {
-      const url = `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`;
-      const res = await axios.get<any>(url, {
-        timeout: 5000,
+    chunkArrays.push(mints.slice(i, i + 30));
+  }
+
+  const chunkResponses = await Promise.allSettled(
+    chunkArrays.map((chunk) =>
+      axios.get<any>(`https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`, {
+        timeout: 4000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SolanaCopyBot/1.0)' },
-      });
+      })
+    )
+  );
 
-      if (!res.data?.pairs || !Array.isArray(res.data.pairs)) continue;
+  // Map mint -> best Solana pair
+  const bestPairs = new Map<string, any>();
+  for (const res of chunkResponses) {
+    if (res.status !== 'fulfilled' || !res.value.data?.pairs || !Array.isArray(res.value.data.pairs)) continue;
+    for (const pair of res.value.data.pairs) {
+      if (pair.chainId !== 'solana') continue;
+      const baseAddr = pair.baseToken?.address;
+      if (!baseAddr) continue;
 
-      // Map mint -> best Solana pair
-      const bestPairs = new Map<string, any>();
-      for (const pair of res.data.pairs) {
-        if (pair.chainId !== 'solana') continue;
-        const baseAddr = pair.baseToken?.address;
-        if (!baseAddr) continue;
-
-        const currentBest = bestPairs.get(baseAddr);
-        if (!currentBest || (pair.liquidity?.usd || 0) > (currentBest.liquidity?.usd || 0)) {
-          bestPairs.set(baseAddr, pair);
-        }
+      const currentBest = bestPairs.get(baseAddr);
+      if (!currentBest || (pair.liquidity?.usd || 0) > (currentBest.liquidity?.usd || 0)) {
+        bestPairs.set(baseAddr, pair);
       }
+    }
+  }
 
-      // 3. Compare with entry prices and previous milestones
-      for (const token of activeTokens) {
-        if (!chunk.includes(token.tokenMint)) continue;
-        const pair = bestPairs.get(token.tokenMint);
-        if (!pair) continue;
+  // 3. Compare with entry prices and previous milestones
+  for (const token of activeTokens) {
+    try {
+      const pair = bestPairs.get(token.tokenMint);
+      if (!pair) continue;
 
         const currentPriceUsd = parseFloat(pair.priceUsd || '0');
         if (currentPriceUsd <= 0 || token.entryPriceUsd <= 0) continue;
@@ -196,31 +202,30 @@ export async function checkPriceMilestones(): Promise<number> {
             });
           }
         }
+      } catch (tokenErr: any) {
+        console.warn(`⚠️ Token price comparison error for ${token.tokenSymbol}:`, tokenErr.message);
       }
-    } catch (batchErr: any) {
-      console.warn('⚠️ Batch price tracking error:', batchErr.message);
     }
-  }
 
   return alertsDispatched;
 }
 
 /**
  * Initializes the background price milestone checker
- * Runs every 60 seconds (completely free DexScreener batch endpoint, 0 Helius credits)
+ * Runs every 12 seconds for instant pump/dip notifications (completely free DexScreener batch endpoint, 0 Helius credits)
  */
 export function initPriceMilestoneTracker(): void {
   if (priceTrackerTimer) return;
 
-  console.log('📈 Price Milestone Tracker: Online (Checking +50% Pumps and -50% Dips every 30s)');
+  console.log('📈 Price Milestone Tracker: Online (High-Speed Engine checking every 12s)');
 
-  // Run initial check after 10 seconds
+  // Run initial check after 2 seconds
   setTimeout(() => {
     checkPriceMilestones().catch((err) => console.warn('⚠️ Price milestone initial check error:', err.message));
-  }, 10_000);
+  }, 2_000);
 
-  // Interval every 30 seconds
+  // Interval every 12 seconds
   priceTrackerTimer = setInterval(() => {
     checkPriceMilestones().catch((err) => console.warn('⚠️ Price milestone cycle error:', err.message));
-  }, 30 * 1000);
+  }, 12 * 1000);
 }

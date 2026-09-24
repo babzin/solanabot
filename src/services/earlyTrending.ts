@@ -6,7 +6,8 @@ import { broadcastNewTrending } from './events.js';
 import { verifyTokenSecurity } from './security.js';
 import { executeSnipeTrade, getUserAutoSnipeConfig } from './sniper.js';
 import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
-import { HolderDistributionItem } from '../types/index.js';
+import { analyzeTokenNarrative } from './aiIntelligence.js';
+import { HolderDistributionItem, AiNarrativeScore } from '../types/index.js';
 
 export interface EarlyWhaleCandidate {
   tokenMint: string;
@@ -62,6 +63,7 @@ export interface EarlyWhaleCandidate {
   xUrl?: string;
   webUrl?: string;
   tgUrl?: string;
+  aiScore?: AiNarrativeScore;
 }
 
 const ESTIMATED_SOL_PRICE_USD = 160.0;
@@ -115,299 +117,385 @@ export function detectTokenNarrative(
 /**
  * Discovers trending, early-stage Solana meme coins matching @solearlytrending criteria
  * Multi-source pipeline: DexScreener token profiles, boosts, latest pairs, and pump.fun bonding curves
+ * Fully parallelized for sub-second retrieval.
  */
 export async function scanEarlyTrendingCandidates(): Promise<string[]> {
   const candidateMints = new Set<string>();
 
-  // 1. DexScreener Latest Token Profiles (Real-time fresh token launches)
-  try {
-    const res = await axios.get<any[]>('https://api.dexscreener.com/token-profiles/latest/v1', {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
-    });
-    if (Array.isArray(res.data)) {
-      res.data
-        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
-        .forEach((t) => candidateMints.add(t.tokenAddress));
-    }
-  } catch (err: any) {
-    console.warn('⚠️ Early Radar: Failed to fetch token profiles:', err.message);
-  }
+  const tasks = [
+    // 1. DexScreener Latest Token Profiles (Real-time fresh token launches)
+    axios
+      .get<any[]>('https://api.dexscreener.com/token-profiles/latest/v1', {
+        timeout: 3000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data
+            .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+            .forEach((t) => candidateMints.add(t.tokenAddress));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: profiles fetch notice:', err.message)),
 
-  // 2. DexScreener Latest Boosts (Solana freshly boosted in real-time)
-  try {
-    const res = await axios.get<any[]>('https://api.dexscreener.com/token-boosts/latest/v1', {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
-    });
-    if (Array.isArray(res.data)) {
-      res.data
-        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
-        .forEach((t) => candidateMints.add(t.tokenAddress));
-    }
-  } catch (err: any) {
-    console.warn('⚠️ Early Radar: Failed to fetch latest boosts:', err.message);
-  }
+    // 2. DexScreener Latest Boosts (Solana freshly boosted in real-time)
+    axios
+      .get<any[]>('https://api.dexscreener.com/token-boosts/latest/v1', {
+        timeout: 3000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data
+            .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+            .forEach((t) => candidateMints.add(t.tokenAddress));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: latest boosts notice:', err.message)),
 
-  // 3. DexScreener Top Boosted Tokens (Solana active momentum)
-  try {
-    const res = await axios.get<any[]>('https://api.dexscreener.com/token-boosts/top/v1', {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
-    });
-    if (Array.isArray(res.data)) {
-      res.data
-        .filter((t) => t.chainId === 'solana' && t.tokenAddress)
-        .forEach((t) => candidateMints.add(t.tokenAddress));
-    }
-  } catch (err: any) {
-    console.warn('⚠️ Early Radar: Failed to fetch top boosts:', err.message);
-  }
+    // 3. DexScreener Top Boosted Tokens (Solana active momentum)
+    axios
+      .get<any[]>('https://api.dexscreener.com/token-boosts/top/v1', {
+        timeout: 3000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data
+            .filter((t) => t.chainId === 'solana' && t.tokenAddress)
+            .forEach((t) => candidateMints.add(t.tokenAddress));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: top boosts notice:', err.message)),
 
-  // 4. DexScreener Search for Fresh Solana Pairs
-  try {
-    const res = await axios.get<any>('https://api.dexscreener.com/latest/dex/search?q=solana', {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
-    });
-    if (Array.isArray(res.data?.pairs)) {
-      res.data.pairs
-        .filter((p: any) => p.chainId === 'solana' && p.baseToken?.address)
-        .forEach((p: any) => candidateMints.add(p.baseToken.address));
-    }
-  } catch (err: any) {
-    console.warn('⚠️ Early Radar: Failed to fetch search pairs:', err.message);
-  }
+    // 4. DexScreener Search for Fresh Solana Pairs
+    axios
+      .get<any>('https://api.dexscreener.com/latest/dex/search?q=solana', {
+        timeout: 3000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data?.pairs)) {
+          res.data.pairs
+            .filter((p: any) => p.chainId === 'solana' && p.baseToken?.address)
+            .forEach((p: any) => candidateMints.add(p.baseToken.address));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: search pairs notice:', err.message)),
 
-  // 4. Pump.fun Recently Graduated / Active Bonding Curves
-  try {
-    const res = await axios.get<any[]>('https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC', {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-    });
-    if (Array.isArray(res.data)) {
-      res.data
-        .filter((c) => c.mint && (c.complete || c.raydium_pool))
-        .forEach((c) => candidateMints.add(c.mint));
-    }
-  } catch {}
+    // 5. Pump.fun Recently Graduated / Active Bonding Curves
+    axios
+      .get<any[]>('https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC', {
+        timeout: 3000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data
+            .filter((c) => c.mint && (c.complete || c.raydium_pool))
+            .forEach((c) => candidateMints.add(c.mint));
+        }
+      })
+      .catch(() => {}),
+  ];
 
+  await Promise.allSettled(tasks);
   return Array.from(candidateMints);
 }
 
 /**
  * Evaluates candidate tokens using the exact filtering strategy of @solearlytrending
  * Eliminates rugs, honeypots, low-liquidity traps, and unvetted coins.
+ * High-speed parallelized evaluation with concurrent security audits.
  */
 export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleCandidate[]> {
   if (mints.length === 0) return [];
 
   const qualified: EarlyWhaleCandidate[] = [];
 
-  // Query in chunks of 30 (DexScreener batch limit)
+  // 1. Build batch chunks of 30 (DexScreener limit)
+  const chunkArrays: string[][] = [];
   for (let i = 0; i < mints.length; i += 30) {
-    const chunk = mints.slice(i, i + 30);
-    try {
-      const url = `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`;
-      const res = await axios.get<any>(url, {
-        timeout: 6000,
+    chunkArrays.push(mints.slice(i, i + 30));
+  }
+
+  // 2. Query DexScreener concurrently across all chunks in parallel
+  const chunkResponses = await Promise.allSettled(
+    chunkArrays.map((chunk) =>
+      axios.get<any>(`https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`, {
+        timeout: 4000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
-      });
+      })
+    )
+  );
 
-      if (!res.data?.pairs || !Array.isArray(res.data.pairs)) continue;
-
-      // Group by base token to evaluate the primary liquidity pair
-      const pairsByMint = new Map<string, any[]>();
-      for (const pair of res.data.pairs) {
-        if (pair.chainId !== 'solana') continue;
-        const baseAddr = pair.baseToken?.address;
-        if (!baseAddr) continue;
-        if (!pairsByMint.has(baseAddr)) pairsByMint.set(baseAddr, []);
-        pairsByMint.get(baseAddr)!.push(pair);
-      }
-
-      for (const [mint, pairs] of pairsByMint.entries()) {
-        pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
-        const pair = pairs[0];
-
-        const tokenName = pair.baseToken?.name || 'Solana Gem';
-        const tokenSymbol = pair.baseToken?.symbol || 'GEM';
-        const priceUsd = parseFloat(pair.priceUsd || '0');
-        const marketCap = pair.marketCap || pair.fdv || 0;
-        const liquidityUsd = pair.liquidity?.usd || 0;
-        const poolReserveSol = pair.liquidity?.quote || liquidityUsd / ESTIMATED_SOL_PRICE_USD;
-        const vol1h = pair.volume?.h1 || 0;
-        const vol24h = pair.volume?.h24 || 0;
-        if (!pair.pairCreatedAt) continue;
-        const pairCreatedAt = pair.pairCreatedAt;
-        const ageMs = Date.now() - pairCreatedAt;
-        const ageMin = Math.floor(ageMs / 60_000);
-
-        // ─── EXACT @solearlytrending SCREENING GATES ───
-        // 1. Age Gate: Strictly fresh launches (1m to 15m maximum!)
-        if (ageMin < 1 || ageMin > 15) continue;
-        const ageText = `${ageMin}m`;
-        const imageUrl = pair.info?.imageUrl || (pair.info as any)?.openGraph || null;
-
-        // 2. Market Cap Gate: $20,000 to $150,000 (sweet spot matching @solearlytrending $30k-$70k entry signals)
-        if (marketCap < 20_000 || marketCap > 150_000) continue;
-
-        // 3. Liquidity Gate: At least $8,000 USD (or 25+ SOL reserve)
-        if (liquidityUsd < 8_000 && poolReserveSol < 25.0) continue;
-
-        // 4. Liquidity to Market Cap Ratio: At least 8% (strictly eliminates illiquid honeypots)
-        if (marketCap > 0 && (liquidityUsd / marketCap) < 0.08) continue;
-
-        // 5. Volume Velocity: Surging interest (1h volume >= $15,000 or m5 volume >= $1,000)
-        if (vol1h < 15_000 && (pair.volume?.m5 || 0) < 1_000) continue;
-
-        // 6. Transaction Activity: At least 15 transactions
-        const txns1h = pair.txns?.h1 || pair.txns?.m5 || { buys: 10, sells: 5 };
-        const buys = txns1h.buys || 1;
-        const sells = txns1h.sells || 1;
-        const totalTxns = buys + sells;
-        if (totalTxns < 15) continue;
-
-        // 7. Buy vs Sell Ratio: Healthy buy pressure
-        const buySellRatio = buys / Math.max(1, sells);
-        if (buySellRatio < 0.65) continue;
-
-        // 8. Strict Contract Safety (RugCheck)
-        const isPumpFun = pair.dexId === 'pumpfun';
-        const sec = await verifyTokenSecurity(
-          mint,
-          isPumpFun ? KNOWN_PROGRAMS.PUMP_FUN : KNOWN_PROGRAMS.RAYDIUM_AMM_V4
-        );
-
-        // Fail-closed gate: Must pass RugCheck audit (score <= 500, no danger flags, LP burned/locked)
-        if (!sec.passed || !sec.mintAuthorityRevoked || !sec.freezeAuthorityRevoked || !sec.lpBurnedOrLocked) {
-          continue;
-        }
-
-        // Dev holding gate: Dev must not hold > 15.0%
-        const devHolding = sec.analytics?.devHoldingPct ?? 0;
-        if (devHolding > 15.0) continue;
-
-        // Top 20 holders concentration gate: max 45%
-        const top20Pct = sec.analytics?.top20HoldPct ?? 33;
-        if (top20Pct > 45.0) continue;
-
-        // Minimum holders gate: At least 50 holders
-        const holderCount = sec.analytics?.holderCount || 120;
-        if (holderCount < 50) continue;
-
-        // Estimate whale trade magnitude & order flow pressure
-        const txns5m = pair.txns?.m5 || { buys: 0, sells: 0 };
-        const buys5m = txns5m.buys || 0;
-        const sells5m = txns5m.sells || 0;
-        const vol5m = pair.volume?.m5 || 0;
-        const totalTx5m = buys5m + sells5m;
-        const buyPressurePct = totalTx5m > 0
-          ? Number(((buys5m / totalTx5m) * 100).toFixed(1))
-          : (totalTxns > 0 ? Number(((buys / totalTxns) * 100).toFixed(1)) : 72.0);
-
-        const avgBuyUsd = vol1h > 0 && buys > 0 ? (vol1h * 0.6) / buys : 250;
-        const estimatedWhaleSol = Math.max(
-          2.5,
-          vol5m > 0 && buys5m > 0
-            ? Number((((vol5m / buys5m) * 3.2) / ESTIMATED_SOL_PRICE_USD).toFixed(1))
-            : Number((avgBuyUsd * 2.8 / ESTIMATED_SOL_PRICE_USD).toFixed(1))
-        );
-
-        let whaleConvictionReason = `⚡ Order Flow: ${buyPressurePct}% Buy Dominance (${buys5m || buys}B / ${sells5m || sells}S)`;
-        if (buyPressurePct >= 75.0) {
-          whaleConvictionReason = `🚀 Strong Buy Surge: ${buyPressurePct}% Buy Dominance (Heavy Aggressive Accumulation)`;
-        } else if (vol5m >= 3_000) {
-          whaleConvictionReason = `⚡ 5-Minute Volume Spike ($${vol5m.toFixed(0)} in 5m)`;
-        }
-
-        const narrativeTag = detectTokenNarrative(
-          tokenName,
-          tokenSymbol,
-          buys,
-          sells,
-          estimatedWhaleSol,
-          vol1h
-        );
-
-        const volToMc = marketCap > 0 ? (vol1h / marketCap) : 0;
-        const liqScore = Math.min(25, liquidityUsd / 1_500);
-        const ratioScore = Math.min(35, buySellRatio * 15);
-        const freshnessBonus = ageMs <= 600_000 ? 30 : Math.max(0, 15 - Math.floor(ageMs / 3_600_000));
-        const potentialScore = Number((volToMc * 40 + liqScore + ratioScore + freshnessBonus).toFixed(1));
-
-        const xSocial = pair.info?.socials?.find((s: any) => s.type === 'twitter')?.url;
-        const tgSocial = pair.info?.socials?.find((s: any) => s.type === 'telegram')?.url;
-        const webSite = pair.info?.websites?.[0]?.url;
-
-        // Guaranteed working DexScreener link
-        const canonicalDexUrl = pair.url || (pair.pairAddress ? `https://dexscreener.com/solana/${pair.pairAddress}` : `https://dexscreener.com/solana/${mint}`);
-
-        // Forensics parameters
-        const fakeVolUsd = sec.analytics?.fakeVolume ?? Math.round(vol1h * 0.015);
-        const fakeVolPct = vol1h > 0 ? Number(((fakeVolUsd / vol1h) * 100).toFixed(1)) : 1.5;
-
-        qualified.push({
-          tokenMint: mint,
-          pairAddress: pair.pairAddress,
-          tokenName,
-          tokenSymbol,
-          priceUsd,
-          marketCap,
-          target5xMarketCap: marketCap * 5,
-          target20xMarketCap: marketCap * 20,
-          liquidityUsd,
-          poolReserveSol,
-          volume1h: vol1h,
-          volume24h: vol24h,
-          fakeVolumeUsd: fakeVolUsd,
-          fakeVolumePct: fakeVolPct,
-          ageText,
-          ageMinutes: ageMin,
-          imageUrl,
-          dexUrl: canonicalDexUrl,
-          pairCreatedAt,
-          whaleSolAmount: estimatedWhaleSol,
-          whaleConvictionReason,
-          narrativeTag,
-          securityPassed: true,
-          securityIcon: sec.analytics?.securityIcon || '✅',
-          securityStatus: sec.analytics?.securityStatus || 'SAFE',
-          mintAuthorityRevoked: true,
-          freezeAuthorityRevoked: true,
-          lpBurnedOrLocked: true,
-          potentialScore,
-          buyPressurePct,
-          buys5m,
-          sells5m,
-          volume5m: vol5m,
-          holderCount,
-          top20Pct,
-          topHoldersDistribution: sec.analytics?.topHoldersDistribution || [],
-          bundleCount: sec.analytics?.bundleCount ?? 10,
-          bundleInitialPct: sec.analytics?.bundleInitialPct ?? 53,
-          bundleCurrentPct: sec.analytics?.bundleCurrentPct ?? 3.3,
-          sniperCount: sec.analytics?.sniperCount ?? 23,
-          sniperInitialPct: sec.analytics?.sniperInitialPct ?? 38,
-          sniperCurrentPct: sec.analytics?.sniperCurrentPct ?? 1.2,
-          devAddress: sec.analytics?.devAddress || mint,
-          devSolBalance: sec.analytics?.devSolBalance ?? 0,
-          devHoldingPct: devHolding,
-          devBundledPct: sec.analytics?.devBundledPct ?? 0,
-          devSoldPct: sec.analytics?.devSoldPct ?? (devHolding === 0 ? 100 : 0),
-          airdropPct: sec.analytics?.airdropPct ?? 0,
-          lpBurntPct: sec.analytics?.lpBurntPct ?? 100,
-          xUrl: xSocial,
-          webUrl: webSite,
-          tgUrl: tgSocial,
-        });
-      }
-    } catch (chunkErr: any) {
-      console.warn('⚠️ Batch token evaluation error:', chunkErr.message);
+  // Group by base token to pick the best liquidity pair per token
+  const pairsByMint = new Map<string, any[]>();
+  for (const res of chunkResponses) {
+    if (res.status !== 'fulfilled' || !res.value.data?.pairs || !Array.isArray(res.value.data.pairs)) continue;
+    for (const pair of res.value.data.pairs) {
+      if (pair.chainId !== 'solana') continue;
+      const baseAddr = pair.baseToken?.address;
+      if (!baseAddr) continue;
+      if (!pairsByMint.has(baseAddr)) pairsByMint.set(baseAddr, []);
+      pairsByMint.get(baseAddr)!.push(pair);
     }
   }
 
-  // Sort descending by highest 5x-20x Potential Score
+  // 3. Fast In-Memory Pre-Filtering (0ms CPU checks before hitting any security APIs)
+  const preQualified: Array<{
+    mint: string;
+    pair: any;
+    ageMin: number;
+    ageMs: number;
+    ageText: string;
+    tokenName: string;
+    tokenSymbol: string;
+    priceUsd: number;
+    marketCap: number;
+    liquidityUsd: number;
+    poolReserveSol: number;
+    vol1h: number;
+    vol24h: number;
+    buys: number;
+    sells: number;
+    totalTxns: number;
+    buySellRatio: number;
+    imageUrl: string | null;
+  }> = [];
+
+  for (const [mint, pairs] of pairsByMint.entries()) {
+    pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+    const pair = pairs[0];
+
+    if (!pair.pairCreatedAt) continue;
+    const pairCreatedAt = pair.pairCreatedAt;
+    const ageMs = Date.now() - pairCreatedAt;
+    const ageMin = Math.floor(ageMs / 60_000);
+
+    // Gate 1: Strictly fresh launches (1m to 15m maximum!)
+    if (ageMin < 1 || ageMin > 15) continue;
+    const ageText = `${ageMin}m`;
+
+    const tokenName = pair.baseToken?.name || 'Solana Gem';
+    const tokenSymbol = pair.baseToken?.symbol || 'GEM';
+    const priceUsd = parseFloat(pair.priceUsd || '0');
+    const marketCap = pair.marketCap || pair.fdv || 0;
+    const liquidityUsd = pair.liquidity?.usd || 0;
+    const poolReserveSol = pair.liquidity?.quote || liquidityUsd / ESTIMATED_SOL_PRICE_USD;
+    const vol1h = pair.volume?.h1 || 0;
+    const vol24h = pair.volume?.h24 || 0;
+    const imageUrl = pair.info?.imageUrl || (pair.info as any)?.openGraph || null;
+
+    // Gate 2: Market Cap Gate ($20k to $150k)
+    if (marketCap < 20_000 || marketCap > 150_000) continue;
+
+    // Gate 3: Liquidity Gate (>= $8k or 25+ SOL)
+    if (liquidityUsd < 8_000 && poolReserveSol < 25.0) continue;
+
+    // Gate 4: Liquidity / Market Cap Ratio (>= 8%)
+    if (marketCap > 0 && liquidityUsd / marketCap < 0.08) continue;
+
+    // Gate 5: Volume Velocity
+    if (vol1h < 15_000 && (pair.volume?.m5 || 0) < 1_000) continue;
+
+    // Gate 6: Transaction Activity (>= 15 txns)
+    const txns1h = pair.txns?.h1 || pair.txns?.m5 || { buys: 10, sells: 5 };
+    const buys = txns1h.buys || 1;
+    const sells = txns1h.sells || 1;
+    const totalTxns = buys + sells;
+    if (totalTxns < 15) continue;
+
+    // Gate 7: Buy vs Sell Ratio (>= 0.65)
+    const buySellRatio = buys / Math.max(1, sells);
+    if (buySellRatio < 0.65) continue;
+
+    preQualified.push({
+      mint,
+      pair,
+      ageMin,
+      ageMs,
+      ageText,
+      tokenName,
+      tokenSymbol,
+      priceUsd,
+      marketCap,
+      liquidityUsd,
+      poolReserveSol,
+      vol1h,
+      vol24h,
+      buys,
+      sells,
+      totalTxns,
+      buySellRatio,
+      imageUrl,
+    });
+  }
+
+  if (preQualified.length === 0) return [];
+
+  // 4. Run Security Checks in Parallel (concurrently across all pre-qualified items)
+  const securityAudits = await Promise.all(
+    preQualified.map(async (item) => {
+      try {
+        const isPumpFun = item.pair.dexId === 'pumpfun';
+        const sec = await verifyTokenSecurity(
+          item.mint,
+          isPumpFun ? KNOWN_PROGRAMS.PUMP_FUN : KNOWN_PROGRAMS.RAYDIUM_AMM_V4
+        );
+        return { item, sec };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  // 5. Apply Security Gates & Build Final Qualified Candidates
+  for (const audit of securityAudits) {
+    if (!audit || !audit.sec) continue;
+    const { item, sec } = audit;
+    const {
+      mint,
+      pair,
+      ageMin,
+      ageMs,
+      ageText,
+      tokenName,
+      tokenSymbol,
+      priceUsd,
+      marketCap,
+      liquidityUsd,
+      poolReserveSol,
+      vol1h,
+      vol24h,
+      buys,
+      sells,
+      totalTxns,
+      buySellRatio,
+      imageUrl,
+    } = item;
+
+    // Strict Contract Safety Gate
+    if (!sec.passed || !sec.mintAuthorityRevoked || !sec.freezeAuthorityRevoked || !sec.lpBurnedOrLocked) {
+      continue;
+    }
+
+    // Dev holding gate: Dev must not hold > 15.0%
+    const devHolding = sec.analytics?.devHoldingPct ?? 0;
+    if (devHolding > 15.0) continue;
+
+    // Top 20 holders concentration gate: max 45%
+    const top20Pct = sec.analytics?.top20HoldPct ?? 33;
+    if (top20Pct > 45.0) continue;
+
+    // Minimum holders gate: At least 50 holders
+    const holderCount = sec.analytics?.holderCount || 120;
+    if (holderCount < 50) continue;
+
+    // Order flow & whale conviction
+    const txns5m = pair.txns?.m5 || { buys: 0, sells: 0 };
+    const buys5m = txns5m.buys || 0;
+    const sells5m = txns5m.sells || 0;
+    const vol5m = pair.volume?.m5 || 0;
+    const totalTx5m = buys5m + sells5m;
+    const buyPressurePct = totalTx5m > 0
+      ? Number(((buys5m / totalTx5m) * 100).toFixed(1))
+      : (totalTxns > 0 ? Number(((buys / totalTxns) * 100).toFixed(1)) : 72.0);
+
+    const avgBuyUsd = vol1h > 0 && buys > 0 ? (vol1h * 0.6) / buys : 250;
+    const estimatedWhaleSol = Math.max(
+      2.5,
+      vol5m > 0 && buys5m > 0
+        ? Number((((vol5m / buys5m) * 3.2) / ESTIMATED_SOL_PRICE_USD).toFixed(1))
+        : Number(((avgBuyUsd * 2.8) / ESTIMATED_SOL_PRICE_USD).toFixed(1))
+    );
+
+    let whaleConvictionReason = `⚡ Order Flow: ${buyPressurePct}% Buy Dominance (${buys5m || buys}B / ${sells5m || sells}S)`;
+    if (buyPressurePct >= 75.0) {
+      whaleConvictionReason = `🚀 Strong Buy Surge: ${buyPressurePct}% Buy Dominance (Heavy Aggressive Accumulation)`;
+    } else if (vol5m >= 3_000) {
+      whaleConvictionReason = `⚡ 5-Minute Volume Spike ($${vol5m.toFixed(0)} in 5m)`;
+    }
+
+    const narrativeTag = detectTokenNarrative(
+      tokenName,
+      tokenSymbol,
+      buys,
+      sells,
+      estimatedWhaleSol,
+      vol1h
+    );
+
+    const volToMc = marketCap > 0 ? vol1h / marketCap : 0;
+    const liqScore = Math.min(25, liquidityUsd / 1_500);
+    const ratioScore = Math.min(35, buySellRatio * 15);
+    const freshnessBonus = ageMs <= 600_000 ? 30 : Math.max(0, 15 - Math.floor(ageMs / 3_600_000));
+    const potentialScore = Number((volToMc * 40 + liqScore + ratioScore + freshnessBonus).toFixed(1));
+
+    const xSocial = pair.info?.socials?.find((s: any) => s.type === 'twitter')?.url;
+    const tgSocial = pair.info?.socials?.find((s: any) => s.type === 'telegram')?.url;
+    const webSite = pair.info?.websites?.[0]?.url;
+
+    const canonicalDexUrl = pair.url || (pair.pairAddress ? `https://dexscreener.com/solana/${pair.pairAddress}` : `https://dexscreener.com/solana/${mint}`);
+    const fakeVolUsd = sec.analytics?.fakeVolume ?? Math.round(vol1h * 0.015);
+    const fakeVolPct = vol1h > 0 ? Number(((fakeVolUsd / vol1h) * 100).toFixed(1)) : 1.5;
+
+    qualified.push({
+      tokenMint: mint,
+      pairAddress: pair.pairAddress,
+      tokenName,
+      tokenSymbol,
+      priceUsd,
+      marketCap,
+      target5xMarketCap: marketCap * 5,
+      target20xMarketCap: marketCap * 20,
+      liquidityUsd,
+      poolReserveSol,
+      volume1h: vol1h,
+      volume24h: vol24h,
+      fakeVolumeUsd: fakeVolUsd,
+      fakeVolumePct: fakeVolPct,
+      ageText,
+      ageMinutes: ageMin,
+      imageUrl,
+      dexUrl: canonicalDexUrl,
+      pairCreatedAt: pair.pairCreatedAt,
+      whaleSolAmount: estimatedWhaleSol,
+      whaleConvictionReason,
+      narrativeTag,
+      securityPassed: true,
+      securityIcon: sec.analytics?.securityIcon || '✅',
+      securityStatus: sec.analytics?.securityStatus || 'SAFE',
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      lpBurnedOrLocked: true,
+      potentialScore,
+      buyPressurePct,
+      buys5m,
+      sells5m,
+      volume5m: vol5m,
+      holderCount,
+      top20Pct,
+      topHoldersDistribution: sec.analytics?.topHoldersDistribution || [],
+      bundleCount: sec.analytics?.bundleCount ?? 10,
+      bundleInitialPct: sec.analytics?.bundleInitialPct ?? 53,
+      bundleCurrentPct: sec.analytics?.bundleCurrentPct ?? 3.3,
+      sniperCount: sec.analytics?.sniperCount ?? 23,
+      sniperInitialPct: sec.analytics?.sniperInitialPct ?? 38,
+      sniperCurrentPct: sec.analytics?.sniperCurrentPct ?? 1.2,
+      devAddress: sec.analytics?.devAddress || mint,
+      devSolBalance: sec.analytics?.devSolBalance ?? 0,
+      devHoldingPct: devHolding,
+      devBundledPct: sec.analytics?.devBundledPct ?? 0,
+      devSoldPct: sec.analytics?.devSoldPct ?? (devHolding === 0 ? 100 : 0),
+      airdropPct: sec.analytics?.airdropPct ?? 0,
+      lpBurntPct: sec.analytics?.lpBurntPct ?? 100,
+      xUrl: xSocial,
+      webUrl: webSite,
+      tgUrl: tgSocial,
+    });
+  }
+
   qualified.sort((a, b) => b.potentialScore - a.potentialScore);
   return qualified;
 }
@@ -434,9 +522,9 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
     return 0;
   }
 
-  // Enforce minimum 2-minute spacing between alert dispatches to prevent spamming
+  // Enforce minimum 30-second spacing between alert dispatches to prevent spamming
   const nowMs = Date.now();
-  if (lastAlertTimeMs > 0 && nowMs - lastAlertTimeMs < 120_000) {
+  if (lastAlertTimeMs > 0 && nowMs - lastAlertTimeMs < 30_000) {
     return 0;
   }
 
@@ -514,6 +602,32 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
         },
       });
 
+      // 0. AI SLM Narrative & Rug Risk Evaluation (Asynchronous / Fast)
+      try {
+        const aiScore = await analyzeTokenNarrative({
+          name: candidate.tokenName,
+          symbol: candidate.tokenSymbol,
+          mint: candidate.tokenMint,
+          ageMinutes: candidate.ageMinutes,
+          entryMarketCap: candidate.marketCap,
+          snipersCount: candidate.sniperCount,
+          devHoldingPct: candidate.devHoldingPct,
+          devSoldPct: candidate.devSoldPct,
+          twitterUrl: candidate.xUrl,
+          telegramUrl: candidate.tgUrl,
+          websiteUrl: candidate.webUrl,
+        });
+        candidate.aiScore = aiScore;
+
+        // Check if user set AI_MIN_CONVICTION_ALERT threshold
+        if (env.AI_MIN_CONVICTION_ALERT > 0 && aiScore.convictionScore < env.AI_MIN_CONVICTION_ALERT) {
+          console.log(`🛡️ [AI Gatekeeper] Silenced alert for $${candidate.tokenSymbol}: Score ${aiScore.convictionScore} < ${env.AI_MIN_CONVICTION_ALERT} (${aiScore.thesis})`);
+          continue;
+        }
+      } catch (aiErr: any) {
+        console.warn(`[AI Evaluator Notice]: ${aiErr.message}`);
+      }
+
       // 1. Dispatch Telegram alert (@solearlytrending format)
       await dispatchEarlyTrendingAlert(candidate, dailyIndex);
 
@@ -551,19 +665,19 @@ let earlyRadarTimer: NodeJS.Timeout | null = null;
 
 /**
  * Initializes the background cron for Early & Whale Radar
- * Runs every 35 seconds (free DexScreener & Pump.fun APIs, 0 Helius credits)
+ * Runs every 12 seconds for real-time gem detection (free DexScreener & Pump.fun APIs)
  */
 export function initEarlyTrendingCron(): void {
   if (earlyRadarTimer) return;
 
-  console.log('💎 Early & Whale Radar: Online (Scanning every 35s for 2min narrative gems matching @solearlytrending)');
+  console.log('💎 Early & Whale Radar: Online (High-Speed Engine scanning every 12s)');
   // Run once shortly after startup
   setTimeout(() => {
     runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar initial scan error:', err.message));
-  }, 4_000);
+  }, 2_000);
 
-  // Interval every 35 seconds
+  // Interval every 12 seconds
   earlyRadarTimer = setInterval(() => {
     runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar cycle error:', err.message));
-  }, 35 * 1000);
+  }, 12 * 1000);
 }

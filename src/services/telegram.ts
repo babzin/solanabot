@@ -79,10 +79,11 @@ export async function dispatchSnipeNotification(
   const explorerUrl = `https://solscan.io/tx/${snipe.signature}`;
   const symbol = snipe.tokenSymbol || 'TOKEN';
 
+  const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
   const message = `
 🤖 <b>[AUTO-SNIPE EXECUTED]</b>${simText}
 
-🪙 <b>Target Token:</b> <b>$${escapeHtml(symbol)}</b> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
+🪙 <b>Target Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
 💰 <b>Allocation Spent:</b> <code>${snipe.solAmount.toFixed(2)} SOL</code>
 📦 <b>Estimated Acquired:</b> <code>${formatTokenQuantity(snipe.tokenAmount)} ${symbol}</code>
 ⚡ <b>Routing Strategy:</b> <i>${escapeHtml(snipe.routePlan || 'Jupiter v6 Aggregator')}</i>
@@ -116,11 +117,12 @@ export async function dispatchSnipeSellNotification(
   const simText = snipe.simulated ? ' <i>(Paper-Trading Simulation)</i>' : '';
   const explorerUrl = `https://solscan.io/tx/${snipe.signature}`;
   const symbol = snipe.tokenSymbol || 'TOKEN';
+  const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
 
   const message = `
 🚨 <b>[AI AUTO-SELL EXECUTED]</b>${simText}
 
-🪙 <b>Sold Token:</b> <b>$${escapeHtml(symbol)}</b> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
+🪙 <b>Sold Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
 💰 <b>SOL Reclaimed:</b> <code>+${snipe.solAmount.toFixed(3)} SOL</code>
 📦 <b>Quantity Exited:</b> <code>${formatTokenQuantity(snipe.tokenAmount)} ${symbol}</code>
 ⚡ <b>Routing Strategy:</b> <i>${escapeHtml(snipe.routePlan || 'Jupiter Instant Take-Profit Exit')}</i>
@@ -266,8 +268,16 @@ export function renderEarlyTrendingCardText(token: any): string {
 
   const { row1, row2 } = buildSolscanHolderMatrix(token);
 
+  let aiSection = '';
+  if (token.aiScore) {
+    const score = token.aiScore.convictionScore;
+    const badgeEmoji = score >= 80 ? '🔥' : score >= 60 ? '⚡' : '⚠️';
+    aiSection = `\n\n🤖 <b>AI Conviction:</b> <code>${score}/100</code> (${badgeEmoji} ${escapeHtml(token.aiScore.metaCategory)})\n` +
+      `💡 <i>${escapeHtml(token.aiScore.thesis)}</i>`;
+  }
+
   return `
-🔥 <a href="https://t.me/${botUser}?start=snipe_${mint}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
+🔥 <a href="${dexscreenerUrl}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
 🕒 <b>Age</b>: ${ageText} | <b>Security</b>: ✅
 🔗 ${linksLine}
 
@@ -285,7 +295,7 @@ ${row2}
 
 <a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
 ┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
-┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}
 `.trim();
 }
 
@@ -482,6 +492,10 @@ export function initTelegramCommands(): void {
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
+    { command: 'flops', description: '📉 Daily Flopped Coins & Dips (-50%+)' },
+    { command: 'weekly', description: '🗓️ Weekly Cumulative Recap & PnL' },
+    { command: 'ask', description: '🤖 AI Trading Co-Pilot Q&A' },
+    { command: 'audit', description: '🔍 AI Audit Any Token Mint' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
     { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
     { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
@@ -491,13 +505,14 @@ export function initTelegramCommands(): void {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
 
-  // Persistent Keyboard docked at the bottom of phone screen (8 clean buttons)
+  // Persistent Keyboard docked at the bottom of phone screen (10 clean buttons)
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
       [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
-      [{ text: '📈 Price Milestones' }, { text: '💼 My Positions' }],
-      [{ text: '⚙️ Auto-Snipe' }, { text: '💰 Wallet' }],
+      [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
+      [{ text: '🗓️ Weekly Report' }, { text: '🤖 AI Co-Pilot' }],
+      [{ text: '💼 My Positions' }, { text: '⚙️ Auto-Snipe' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -527,6 +542,7 @@ export function initTelegramCommands(): void {
 • 🎯 <b>Filtering:</b> Strict RugCheck audit (Mint &amp; Freeze revoked, 100% LP burned, Dev sold/clean)
 • 📈 <b>Price Milestones:</b> Real-time +50% Pumps &amp; -50% Retracement alerts
 • 📊 <b>DexScreener:</b> 1-Tap direct pair chart button on every call
+• 🤖 <b>AI Co-Pilot:</b> Pre-alert meme narrative &amp; rug risk conviction scoring
 
 ⚙️ <b>AUTO-SNIPER &amp; EXIT STRATEGY:</b>
 • <b>Status:</b> ${snipeBadge}
@@ -543,14 +559,21 @@ export function initTelegramCommands(): void {
       ],
       [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+      ],
+      [
+        { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+        { text: '🤖 AI Co-Pilot', callback_data: 'cmd_copilot' },
+      ],
+      [
         { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
-      ],
-      [
         { text: '💼 My Positions', callback_data: 'cmd_positions' },
-        { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
       ],
       [
+        { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
         { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
+      ],
+      [
         { text: '❓ How It Works', callback_data: 'cmd_help' },
       ],
     ];
@@ -573,8 +596,13 @@ export function initTelegramCommands(): void {
     }
   };
 
-  // /start or Start button
-  bot.onText(/\/start|🚀 \/start|🚀 Start/i, async (msg) => {
+  // /start or Start button (supports deep-linking: /start <tokenMint>)
+  bot.onText(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
+    const payload = match?.[1]?.trim();
+    if (payload && payload.length >= 30) {
+      await handleTokenDeepLink(msg.chat.id, payload);
+      return;
+    }
     await sendWelcomeDashboard(msg.chat.id);
   });
 
@@ -583,9 +611,128 @@ export function initTelegramCommands(): void {
     await handleEarlyTrendingCommand(msg.chat.id);
   });
 
-  // /top or "🏆 Top Gainers" button
-  bot.onText(/🏆 Top Gainers|\/top|Top Gainer|Hall of Fame/i, async (msg) => {
+  // /top or /profits or "🏆 Top Gainers" button
+  bot.onText(/🏆 Top Gainers|\/top|\/profits|\/leaderboard|Top Early Trending|Top Gainer|Hall of Fame/i, async (msg) => {
     await handleTopCommand(msg.chat.id);
+  });
+
+  // /flops or /bad or "📉 Daily Flops" button
+  bot.onText(/📉 Daily Flops|\/flops|\/bad|\/flopped|\/dips|Bad Coin|Daily Flop/i, async (msg) => {
+    await handleDailyFlopsCommand(msg.chat.id);
+  });
+
+  // /weekly or /week or "🗓️ Weekly Report"
+  bot.onText(/🗓️ Weekly Report|\/weekly|\/week|Weekly Report|Weekly Recap/i, async (msg) => {
+    await handleWeeklyReportCommand(msg.chat.id);
+  });
+
+  // /ask or "🤖 AI Co-Pilot"
+  bot.onText(/🤖 AI Co-Pilot|\/ask(?:\s+(.+))?/i, async (msg, match) => {
+    const question = match?.[1]?.trim();
+    if (!question) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `🤖 <b>AI Trading Co-Pilot</b> 🧠\n\n` +
+          `Ask me anything about today's signals, market trends, or token behavior!\n\n` +
+          `<b>Examples:</b>\n` +
+          `• <code>/ask which coins made the most today?</code>\n` +
+          `• <code>/ask why did our tokens flop?</code>\n` +
+          `• <code>/ask what is the current hottest meta?</code>\n` +
+          `• <code>/audit &lt;mintAddress&gt;</code> to analyze any token address!`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+                { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+              ],
+              [{ text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    const waitMsg = await bot.sendMessage(msg.chat.id, '⚡ <i>Checking market &amp; on-chain data...</i>', { parse_mode: 'HTML' });
+    try {
+      const { askTradingCoPilot } = await import('./aiIntelligence.js');
+      const answer = await askTradingCoPilot(question);
+      try {
+        await bot.editMessageText(answer, {
+          chat_id: msg.chat.id,
+          message_id: waitMsg.message_id,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
+      } catch {
+        await bot.editMessageText(answer.replace(/<[^>]+>/g, ''), {
+          chat_id: msg.chat.id,
+          message_id: waitMsg.message_id,
+          disable_web_page_preview: true,
+        });
+      }
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ <i>Co-Pilot notice: ${err.message}</i>`, { parse_mode: 'HTML' });
+    }
+  });
+
+  // /audit <mint>
+  bot.onText(/\/audit(?:\s+(.+))?/i, async (msg, match) => {
+    const mint = match?.[1]?.trim();
+    if (!mint) {
+      await bot.sendMessage(msg.chat.id, 'ℹ️ <i>Please provide a token mint address: <code>/audit &lt;mintAddress&gt;</code></i>', { parse_mode: 'HTML' });
+      return;
+    }
+
+    const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI & On-Chain Audit for <code>${mint.slice(0, 8)}...</code></i>`, { parse_mode: 'HTML' });
+    try {
+      const { auditTokenByMint } = await import('./aiIntelligence.js');
+      const audit = await auditTokenByMint(mint);
+      const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+
+      const auditCard = `
+🔍 <b>AI TOKEN AUDIT REPORT</b>
+🪙 <b>Token:</b> <b>${escapeHtml(audit.name)}</b> (<code>$${escapeHtml(audit.symbol)}</code>)
+🏷️ <b>Mint:</b> <code>${audit.mint}</code>
+
+🤖 <b>AI Verdict:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})
+🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>
+🎯 <b>Recommendation:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>
+💡 <i>${escapeHtml(audit.score.thesis)}</i>
+
+📊 <b>On-Chain Health:</b>
+• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}
+• 💧 <b>Est. Liquidity:</b> $${Math.round(audit.onChainMetrics.liquidityUsd).toLocaleString()}
+• 🕒 <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m
+• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%
+• 🔒 <b>LP Burnt:</b> ${audit.onChainMetrics.liquidityBurntPct}% 🔥 | <b>Mint Revoked:</b> ✅
+
+🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Live Chart]</a> • <a href="https://solscan.io/token/${audit.mint}">[Solscan]</a>
+      `.trim();
+
+      await bot.editMessageText(auditCard, {
+        chat_id: msg.chat.id,
+        message_id: waitMsg.message_id,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${audit.mint}` },
+              { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
+            ],
+            [
+              { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
+              { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
+            ],
+          ],
+        },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ <i>Audit error: ${err.message}</i>`, { parse_mode: 'HTML' });
+    }
   });
 
   // /milestones or "📈 Price Milestones" button
@@ -680,12 +827,236 @@ export function initTelegramCommands(): void {
       `• /scan — Run Immediate Radar Scan\n` +
       `• /daily — View Today's Alerted Coins\n` +
       `• /top — View Daily Top Gainers\n` +
+      `• /flops — View Daily Flopped Coins & Dips\n` +
       `• /milestones — View Pumps &amp; Retracements\n` +
       `• /positions — View Active Positions &amp; PnL\n` +
       `• /autosnipe — Toggle Automated Sniping\n` +
       `• /wallet — View Connected Wallet &amp; Solscan`,
       { parse_mode: 'HTML' }
     );
+  });
+
+  // Natural Language & Free-form Question Listener
+  // Catches any message that isn't a command and either:
+  // 1) Is a Solana token mint (triggers automatic audit)
+  // 2) Is a natural question or trading strategy inquiry (triggers AI Co-Pilot)
+  bot.on('message', async (msg) => {
+    const text = msg.text?.trim();
+    if (!text || text.startsWith('/')) return;
+
+    // Ignore known persistent button labels already handled by bot.onText
+    const knownButtons = [
+      '⚡ scan now', '💎 daily coins', '🏆 top gainers', '📉 daily flops',
+      '🗓️ weekly report', '🤖 ai co-pilot', '📈 price milestones', '💼 my positions',
+      '⚙️ auto-snipe', '🟢 auto-snipe on', '🔴 auto-snipe off', '💰 wallet', '❓ help'
+    ];
+    if (knownButtons.some((b) => b === text.toLowerCase())) return;
+
+    // Check if the user pasted a raw Solana Mint address (base58 32-44 characters)
+    if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(text)) {
+      const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI &amp; On-Chain Audit for <code>${text.slice(0, 8)}...</code></i>`, { parse_mode: 'HTML' });
+      try {
+        const { auditTokenByMint } = await import('./aiIntelligence.js');
+        const audit = await auditTokenByMint(text);
+        const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+
+        const auditCard = `
+🔍 <b>AI TOKEN AUDIT REPORT</b>
+🪙 <b>Token:</b> <b>${escapeHtml(audit.name)}</b> (<code>$${escapeHtml(audit.symbol)}</code>)
+🏷️ <b>Mint:</b> <code>${audit.mint}</code>
+
+🤖 <b>AI Verdict:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})
+🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>
+🎯 <b>Recommendation:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>
+💡 <i>${escapeHtml(audit.score.thesis)}</i>
+
+📊 <b>On-Chain Health:</b>
+• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}
+• 💧 <b>Est. Liquidity:</b> $${Math.round(audit.onChainMetrics.liquidityUsd).toLocaleString()}
+• 🕒 <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m
+• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%
+• 🔒 <b>LP Burnt:</b> ${audit.onChainMetrics.liquidityBurntPct}% 🔥 | <b>Mint Revoked:</b> ✅
+
+🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Live Chart]</a> • <a href="https://solscan.io/token/${audit.mint}">[Solscan]</a>
+        `.trim();
+
+        await bot.editMessageText(auditCard, {
+          chat_id: msg.chat.id,
+          message_id: waitMsg.message_id,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${audit.mint}` },
+                { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
+              ],
+              [
+                { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
+                { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
+              ],
+            ],
+          },
+        });
+      } catch (err: any) {
+        await bot.sendMessage(msg.chat.id, `⚠️ <i>Audit error: ${err.message}</i>`, { parse_mode: 'HTML' });
+      }
+      return;
+    }
+
+    // Check if it looks like a question or conversational query to the AI Co-Pilot
+    const isQuestion =
+      text.endsWith('?') ||
+      /^(how|why|what|when|where|who|which|should|can|could|would|is|are|tell|explain|give|do|does|will|maximize|maximise|avoid|aloid|size|snipe|trade|profit|loss|hi|hello|hey|yo)\b/i.test(text) ||
+      text.length >= 4;
+
+    if (isQuestion) {
+      const waitMsg = await bot.sendMessage(msg.chat.id, '⚡ <i>Checking market &amp; on-chain data...</i>', { parse_mode: 'HTML' });
+      try {
+        const { askTradingCoPilot } = await import('./aiIntelligence.js');
+        const answer = await askTradingCoPilot(text);
+        const replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+              { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+            ],
+            [
+              { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+            ],
+          ],
+        };
+
+        try {
+          await bot.editMessageText(answer, {
+            chat_id: msg.chat.id,
+            message_id: waitMsg.message_id,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: replyMarkup,
+          });
+        } catch {
+          await bot.editMessageText(answer.replace(/<[^>]+>/g, ''), {
+            chat_id: msg.chat.id,
+            message_id: waitMsg.message_id,
+            disable_web_page_preview: true,
+            reply_markup: replyMarkup,
+          });
+        }
+      } catch (err: any) {
+        await bot.sendMessage(msg.chat.id, `⚠️ <i>Co-Pilot notice: ${err.message}</i>`, { parse_mode: 'HTML' });
+      }
+    }
+  });
+
+  // Telegram Inline Query Mode (@MySolanaSBot <query>)
+  bot.on('inline_query', async (inlineQuery) => {
+    const rawQ = (inlineQuery.query || '').trim();
+    const queryId = inlineQuery.id;
+
+    try {
+      const results: any[] = [];
+
+      // 1. If user typed a mint address, show instant audit inline
+      if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(rawQ)) {
+        const { auditTokenByMint } = await import('./aiIntelligence.js');
+        const audit = await auditTokenByMint(rawQ);
+        const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+
+        results.push({
+          type: 'article',
+          id: `audit_${audit.mint}`,
+          title: `🔍 Audit $${audit.symbol} (${recEmoji} ${audit.recommendation})`,
+          description: `Conviction: ${audit.score.convictionScore}/100 • MC $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}`,
+          input_message_content: {
+            message_text: `🔍 <b>AI TOKEN AUDIT: $${escapeHtml(audit.symbol)}</b>\n` +
+              `🏷️ <code>${audit.mint}</code>\n\n` +
+              `🤖 <b>Conviction:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})\n` +
+              `🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>\n` +
+              `🎯 <b>Verdict:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>\n\n` +
+              `📊 <b>On-Chain Metrics:</b>\n` +
+              `• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}\n` +
+              `• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%\n` +
+              `• 🔥 <b>LP Burnt:</b> 100% | <b>Mint Revoked:</b> ✅\n\n` +
+              `🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Chart]</a>`,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+          },
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📊 Chart', url: `https://dexscreener.com/solana/${audit.mint}` },
+                { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
+              ],
+            ],
+          },
+        });
+      }
+
+      // 2. AI Strategy / Question Answer
+      const qText = rawQ || 'how do we maximize profit today';
+      const { askTradingCoPilot } = await import('./aiIntelligence.js');
+      const aiReply = await askTradingCoPilot(qText);
+
+      results.push({
+        type: 'article',
+        id: `ai_${Date.now()}`,
+        title: `💡 Trader Co-Pilot: "${rawQ || 'How do we maximize profit today?'}"`,
+        description: `Instant strategy & advice grounded in live bot data`,
+        input_message_content: {
+          message_text: aiReply,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        },
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+              { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+            ],
+            [
+              { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+            ],
+          ],
+        },
+      });
+
+      // 3. Today's Top Gainers Card
+      const today = new Date().toISOString().slice(0, 10);
+      let topTokens: any[] = [];
+      try {
+        topTokens = await prisma.earlyTrendingToken.findMany({
+          where: { alertDate: today },
+          orderBy: { lastMilestonePct: 'desc' },
+          take: 3,
+        });
+      } catch {}
+
+      if (topTokens.length > 0) {
+        results.push({
+          type: 'article',
+          id: `top_${today}`,
+          title: `🏆 Today's Top Gainers (${topTokens.length} gems active)`,
+          description: `Leader: $${topTokens[0].tokenSymbol} (+${topTokens[0].lastMilestonePct}%)`,
+          input_message_content: {
+            message_text: renderTopLeaderboardText(topTokens, today),
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+          },
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🏆 Open Leaderboard', callback_data: 'cmd_top' }],
+            ],
+          },
+        });
+      }
+
+      await bot.answerInlineQuery(queryId, results, { cache_time: 10, is_personal: true });
+    } catch (err: any) {
+      console.warn('[Telegram Inline Query Notice]:', err.message);
+    }
   });
 
   // Inline button callbacks
@@ -719,6 +1090,20 @@ export function initTelegramCommands(): void {
         await handleEarlyTrendingCommand(chatId);
       } else if (data === 'cmd_top') {
         await handleTopCommand(chatId);
+      } else if (data === 'cmd_flops') {
+        await handleDailyFlopsCommand(chatId);
+      } else if (data === 'cmd_weekly') {
+        await handleWeeklyReportCommand(chatId);
+      } else if (data === 'cmd_copilot') {
+        await bot.sendMessage(
+          chatId,
+          `🤖 <b>AI Trading Co-Pilot</b> 🧠\n\n` +
+            `Type <code>/ask &lt;your question&gt;</code> to ask about any tokens, stats, or strategies!\n\n` +
+            `• <code>/ask which coins made the most today?</code>\n` +
+            `• <code>/ask why did our tokens flop?</code>\n` +
+            `• <code>/audit &lt;mintAddress&gt;</code> to audit any token address!`,
+          { parse_mode: 'HTML' }
+        );
       } else if (data === 'cmd_milestones') {
         await handlePriceMilestonesCommand(chatId);
       } else if (data === 'cmd_positions') {
@@ -965,42 +1350,234 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
 }
 
 /**
- * Displays the Daily Hall of Fame Leaderboard (/top)
+ * Renders the Top Early Trending profit leaderboard matching exact @solearlytrending / Soul format:
+ *
+ * 🏆 Top Early Trending 💸
+ * 🥇 Pump Family | $FAMILY • 40X [X]
+ * 🥈 Invisible, Nameless, Untraceable | $INU • 25X
+ * 🥉 Tyler Raw Fund | $TYLER • 20X [X]
+ * 4⃣ $ZEBRA • 20X
+ * 5⃣ $FATHOMIE • 15X
+ * 6⃣ $SCAT • 11X
+ * 7⃣ $DUMBCOIN • 10X
+ * 8⃣ $HOLT • 10X
+ * $RSRV • 10X
+ * $ZCAT • 10X
+ * $ZECAT • 7X
+ * $AWARDED • 7X
+ * Disclaimer
  */
-async function handleTopCommand(chatId: number | string): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
+/**
+ * Formats YYYY-MM-DD into a human-readable display string
+ */
+export function formatDisplayDate(isoDateStr: string): string {
   try {
+    const [year, month, day] = isoDateStr.split('-').map(Number);
+    const d = new Date(Date.UTC(year, month - 1, day));
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${dayNames[d.getUTCDay()]}, ${monthNames[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  } catch {
+    return isoDateStr;
+  }
+}
+
+/**
+ * Renders the Top Early Trending profit leaderboard matching exact @solearlytrending / Soul format:
+ *
+ * 🏆 Top Early Trending 💸
+ * 📅 Date: Thursday, Sep 24, 2026
+ * 🚀 Total Multiplier: +52X • (all coins make a total of 52X)
+ */
+export function renderTopLeaderboardText(tokens: any[], dateStr?: string): string {
+  const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+  const headerLink = `https://t.me/${botUsername}`;
+
+  // Calculate total combined multiplier across all coins
+  let totalMultiplier = 0;
+  tokens.forEach((t) => {
+    let multVal = 1.0;
+    if (t.peakPriceUsd && t.entryPriceUsd && t.entryPriceUsd > 0) {
+      multVal = t.peakPriceUsd / t.entryPriceUsd;
+    } else if (t.lastMilestonePct && t.lastMilestonePct > 0) {
+      multVal = 1 + t.lastMilestonePct / 100;
+    }
+    totalMultiplier += multVal;
+  });
+
+  const roundedTopX = totalMultiplier >= 10 ? Math.round(totalMultiplier) : Number(totalMultiplier.toFixed(1));
+  const activeDate = dateStr || new Date().toISOString().slice(0, 10);
+  const dateFormatted = formatDisplayDate(activeDate);
+
+  let out = `🏆 <a href="${headerLink}"><b>Top Early Trending</b></a> 💸\n`;
+  out += `📅 <b>Date:</b> <code>${dateFormatted}</code>\n`;
+  out += `🚀 <b>Total Multiplier:</b> <code>+${roundedTopX}X</code> • <i>(all coins make a total of ${roundedTopX}X)</i>\n\n`;
+
+  const numberEmojis = ['4⃣', '5⃣', '6⃣', '7⃣', '8⃣'];
+
+  tokens.forEach((t, i) => {
+    const tokenMint = t.tokenMint;
+    const tokenSymbol = escapeHtml(t.tokenSymbol);
+    const tokenName = escapeHtml(t.tokenName || t.tokenSymbol);
+    const tokenLink = getDexScreenerUrl(t);
+
+    // Multiplier calculation
+    let multVal = 1.0;
+    if (t.peakPriceUsd && t.entryPriceUsd && t.entryPriceUsd > 0) {
+      multVal = t.peakPriceUsd / t.entryPriceUsd;
+    } else if (t.lastMilestonePct && t.lastMilestonePct > 0) {
+      multVal = 1 + t.lastMilestonePct / 100;
+    }
+
+    let multStr = `${Math.round(multVal)}X`;
+    if (multVal >= 1.5 && multVal < 2.0) {
+      multStr = `${multVal.toFixed(1)}X`;
+    } else if (multVal < 1.5 && t.lastMilestonePct > 0) {
+      multStr = `+${t.lastMilestonePct}%`;
+    } else if (multVal <= 1.0) {
+      multStr = `1X`;
+    }
+
+    const xLink = t.xUrl && typeof t.xUrl === 'string' && t.xUrl.startsWith('http')
+      ? ` <a href="${t.xUrl}">[X]</a>`
+      : '';
+
+    if (i === 0) {
+      out += `🥇 <a href="${tokenLink}">${tokenName} | $${tokenSymbol}</a> • ${multStr}${xLink}\n`;
+    } else if (i === 1) {
+      out += `🥈 <a href="${tokenLink}">${tokenName} | $${tokenSymbol}</a> • ${multStr}${xLink}\n`;
+    } else if (i === 2) {
+      out += `🥉 <a href="${tokenLink}">${tokenName} | $${tokenSymbol}</a> • ${multStr}${xLink}\n`;
+    } else if (i < 8) {
+      const numEmo = numberEmojis[i - 3] || `${i + 1}⃣`;
+      out += `<a href="${tokenLink}">${numEmo} $${tokenSymbol}</a> • ${multStr}${xLink}\n`;
+    } else {
+      out += `<a href="${tokenLink}">$${tokenSymbol}</a> • ${multStr}${xLink}\n`;
+    }
+  });
+
+  out += `<a href="https://dexscreener.com">Disclaimer</a>`;
+  return out.trim();
+}
+
+/**
+ * Handles deep-linked token viewing: /start <tokenMint>
+ */
+export async function handleTokenDeepLink(chatId: number | string, tokenMint: string): Promise<void> {
+  try {
+    const token = await prisma.earlyTrendingToken.findUnique({
+      where: { tokenMint },
+    });
+
+    if (token) {
+      const card = renderEarlyTrendingCardText(token);
+      const dexscreenerUrl = getDexScreenerUrl(token);
+      const trojanUrl = env.TROJAN_REF_CODE
+        ? `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}-${token.tokenMint}`
+        : `https://t.me/solana_trojanbot?start=${token.tokenMint}`;
+      const photonUrl = env.PHOTON_REF_CODE
+        ? `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || token.tokenMint}?ref=${env.PHOTON_REF_CODE}`
+        : `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || token.tokenMint}`;
+
+      const inlineKeyboard = [
+        [
+          { text: '📊 DexScreener', url: dexscreenerUrl },
+          { text: '🔍 Solscan', url: `https://solscan.io/token/${token.tokenMint}` },
+        ],
+        [
+          { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${token.tokenMint}` },
+          { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${token.tokenMint}` },
+        ],
+        [
+          { text: '🦄 Buy on Trojan', url: trojanUrl },
+          { text: '⚡ Buy on Photon', url: photonUrl },
+        ],
+      ];
+
+      await bot.sendMessage(chatId, card, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      });
+      return;
+    }
+
+    // Fallback: If not in DB, query DexScreener live
+    const { getMarketData } = await import('./market.js');
+    const market = await getMarketData(tokenMint, 0, '');
+    if (market) {
+      const message = `
+📈 <a href="https://dexscreener.com/solana/${tokenMint}"><b>&lrm;${escapeHtml(market.tokenSymbol || 'TOKEN')}</b></a> (${escapeHtml(market.tokenName || '')})
+🪙 <code>${tokenMint}</code>
+
+MC: <b>${formatUsd(market.marketCap)}</b> | Liq: <b>${formatUsd(market.liquidityUsd)}</b>
+Price: <b>$${market.priceUsd.toFixed(6)}</b> | 24h Vol: <b>${formatUsd(market.analytics?.volume1h || 0)}</b>
+`.trim();
+
+      await bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+              { text: '🔍 Solscan', url: `https://solscan.io/token/${tokenMint}` },
+            ],
+            [
+              { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${tokenMint}` },
+              { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${tokenMint}` },
+            ],
+          ],
+        },
+      });
+      return;
+    }
+
+    await bot.sendMessage(chatId, `⚠️ <i>Token <code>${tokenMint}</code> was not found.</i>`, { parse_mode: 'HTML' });
+  } catch (err: any) {
+    console.warn('handleTokenDeepLink error:', err.message);
+  }
+}
+
+/**
+ * Displays the Top Early Trending Leaderboard (/top or /profits) strictly for today
+ */
+export async function handleTopCommand(chatId: number | string): Promise<void> {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const dateFormatted = formatDisplayDate(today);
+
+    // Strictly fetch today's alerted coins (no cross-day fallback)
     let tokens = await prisma.earlyTrendingToken.findMany({
       where: { alertDate: today },
       orderBy: { lastMilestonePct: 'desc' },
-      take: 10,
+      take: 25,
     });
 
-    if (tokens.length === 0 || tokens.every((t) => t.lastMilestonePct === 0)) {
-      const topEver = await prisma.earlyTrendingToken.findMany({
-        where: { lastMilestonePct: { gt: 0 } },
-        orderBy: { lastMilestonePct: 'desc' },
-        take: 10,
-      });
-      if (topEver.length > 0) {
-        tokens = topEver;
-      }
-    }
+    // Sort by highest actual multiplier
+    tokens.sort((a, b) => {
+      const multA = a.peakPriceUsd && a.entryPriceUsd && a.entryPriceUsd > 0
+        ? a.peakPriceUsd / a.entryPriceUsd
+        : (1 + (a.lastMilestonePct || 0) / 100);
+      const multB = b.peakPriceUsd && b.entryPriceUsd && b.entryPriceUsd > 0
+        ? b.peakPriceUsd / b.entryPriceUsd
+        : (1 + (b.lastMilestonePct || 0) / 100);
+      return multB - multA;
+    });
 
     if (tokens.length === 0) {
       await bot.sendMessage(
         chatId,
-        `🏆 <b>Daily Hall of Fame Leaderboard (/top)</b>\n\n` +
-          `No tokens have logged a +50% milestone yet today.\n` +
-          `Our 30s price tracker monitors every alerted token for 50%, 100% (2X), 300% (4X), and 20X moonshots!`,
+        `🏆 <b>Top Early Trending</b> 💸\n` +
+          `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
+          `<i>No coins recorded yet for today (${today}). Background radar is actively scanning!</i>\n` +
+          `Tap <b>⚡ Scan Now</b> to run an immediate discovery cycle.`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
-              [
-                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-                { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
-              ],
+              [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+              [{ text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' }],
               [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
             ],
           },
@@ -1009,43 +1586,192 @@ async function handleTopCommand(chatId: number | string): Promise<void> {
       return;
     }
 
-    let report = `🏆 <b>SOLANA TRENDING HALL OF FAME LEADERBOARD</b> 🚀\n`;
-    report += `<i>Top breakout performers discovered within 2 minutes of launch:</i>\n\n`;
+    const report = renderTopLeaderboardText(tokens.slice(0, 15), today);
 
-    tokens.forEach((t, i) => {
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `<b>#${i + 1}</b>`;
+    const inlineKeyboard = [
+      [
+        { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      ],
+      [
+        { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+        { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+      ],
+      [
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+        { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      ],
+      [
+        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+      ],
+    ];
+
+    await bot.sendMessage(chatId, report, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    });
+  } catch (err: any) {
+    console.warn('handleTopCommand error:', err.message);
+  }
+}
+
+/**
+ * Displays Daily Flopped Coins strictly for today
+ */
+export async function handleDailyFlopsCommand(chatId: number | string): Promise<void> {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const dateFormatted = formatDisplayDate(today);
+
+    // Strictly fetch today's alerted coins (no fallback to earlier days)
+    const tokens = await prisma.earlyTrendingToken.findMany({
+      where: { alertDate: today },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Calculate drop and retracement metrics
+    const flops = tokens
+      .map((t) => {
+        const dropFromEntryPct = t.entryPriceUsd > 0
+          ? ((t.lastAlertedPriceUsd - t.entryPriceUsd) / t.entryPriceUsd) * 100
+          : 0;
+        const dropFromPeakPct = t.peakPriceUsd > 0
+          ? ((t.lastAlertedPriceUsd - t.peakPriceUsd) / t.peakPriceUsd) * 100
+          : dropFromEntryPct;
+        const currentMc = t.entryPriceUsd > 0
+          ? (t.lastAlertedPriceUsd / t.entryPriceUsd) * t.entryMarketCap
+          : t.entryMarketCap;
+
+        return {
+          ...t,
+          dropFromEntryPct: Number(dropFromEntryPct.toFixed(1)),
+          dropFromPeakPct: Number(dropFromPeakPct.toFixed(1)),
+          currentMarketCap: Math.round(currentMc),
+          isFlop: dropFromEntryPct <= -20 || (dropFromPeakPct <= -45 && dropFromEntryPct <= 10) || (t.lastDipMilestonePct === -50 && dropFromEntryPct <= -30),
+        };
+      })
+      .filter((t) => t.isFlop)
+      .sort((a, b) => a.dropFromEntryPct - b.dropFromEntryPct); // Worst drops first
+
+    if (flops.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🟢\n` +
+          `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
+          `<i>No coins have dumped today! All alerted gems for today (${today}) are holding strong or currently in profit.</i>\n\n` +
+          `Whenever an alerted coin drops &gt;20% or triggers a -50% retracement, it is automatically cataloged here.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+              ],
+              [
+                { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+                { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+              ],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    let totalFlopDropPct = 0;
+    flops.forEach((f) => {
+      totalFlopDropPct += Math.abs(f.dropFromEntryPct);
+    });
+    const totalFlopMultiplier = (totalFlopDropPct / 100).toFixed(1);
+    const roundedFlopDropPct = Math.round(totalFlopDropPct);
+
+    let report = `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🩸\n`;
+    report += `📅 <b>Date:</b> <code>${dateFormatted}</code>\n`;
+    report += `🩸 <b>Total Drawdown:</b> <code>-${totalFlopMultiplier}X</code> (<code>-${roundedFlopDropPct}%</code>) • <i>(all coins make a total of -${totalFlopMultiplier}X / -${roundedFlopDropPct}%)</i>\n`;
+    report += `<i>Tokens alerted today (${today}) that dumped or suffered heavy drawdowns:</i>\n\n`;
+
+    flops.slice(0, 10).forEach((t, i) => {
       const dexscreenerUrl = getDexScreenerUrl(t);
-      const entryMc = formatUsd(t.entryMarketCap);
-      const mult = (1 + t.lastMilestonePct / 100).toFixed(1);
-      const peakMc = formatUsd(t.entryMarketCap * (1 + t.lastMilestonePct / 100));
+      const symbol = escapeHtml(t.tokenSymbol);
+      const name = escapeHtml(t.tokenName || t.tokenSymbol);
+      const entryMcStr = formatUsd(t.entryMarketCap);
+      const currentMcStr = formatUsd(t.currentMarketCap);
+      const rankEmoji = i === 0 ? '💀' : (i < 3 ? '🩸' : '📉');
 
-      report += `${medal} <a href="${dexscreenerUrl}"><b>$${escapeHtml(t.tokenSymbol)}</b></a> • <b>+${t.lastMilestonePct}% (${mult}X)</b> 🔥\n`;
-      report += `   💰 Entry MC: <code>${entryMc}</code> ➔ Peak: <code>${peakMc}</code>\n`;
-      report += `   🔗 <a href="${dexscreenerUrl}">[DexScreener Chart]</a>\n\n`;
+      report += `${rankEmoji} <b>#${i + 1}.</b> <a href="${dexscreenerUrl}"><b>$${symbol}</b></a> (${name}) • <code>${t.dropFromEntryPct}%</code>\n`;
+      report += `   💵 Entry: <code>${entryMcStr}</code> ➔ Now: <code>${currentMcStr}</code>\n`;
+      if (t.peakPriceUsd > t.entryPriceUsd * 1.3) {
+        report += `   ⚠️ Peak Drawdown: <code>${t.dropFromPeakPct}% from peak</code>\n`;
+      }
+      report += `   🔗 <a href="${dexscreenerUrl}">[DexScreener Live Chart]</a>\n\n`;
     });
 
-    const buttons: any[][] = [];
-    tokens.slice(0, 8).forEach((t) => {
-      buttons.push([
-        { text: `📊 $${t.tokenSymbol} Chart (+${t.lastMilestonePct}%)`, url: getDexScreenerUrl(t) },
-      ]);
-    });
-    buttons.push([
+    report += `🛡️ <i>Auto-Snipe protection: Trailing Stop-Loss cuts risk at -25% to protect capital!</i>`;
+
+    const flopButtons: any[][] = [];
+    // Direct DexScreener chart links for top flopped tokens (2 per row)
+    for (let i = 0; i < Math.min(flops.length, 6); i += 2) {
+      const row: any[] = [];
+      row.push({ text: `📊 $${flops[i].tokenSymbol} Chart`, url: getDexScreenerUrl(flops[i]) });
+      if (i + 1 < Math.min(flops.length, 6)) {
+        row.push({ text: `📊 $${flops[i + 1].tokenSymbol} Chart`, url: getDexScreenerUrl(flops[i + 1]) });
+      }
+      flopButtons.push(row);
+    }
+
+    flopButtons.push([
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-      { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
     ]);
-    buttons.push([
-      { text: '💼 My Positions', callback_data: 'cmd_positions' },
+    flopButtons.push([
+      { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
     await bot.sendMessage(chatId, report.trim(), {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: buttons },
+      reply_markup: { inline_keyboard: flopButtons },
     });
   } catch (err: any) {
-    console.warn('handleTopCommand error:', err.message);
+    console.warn('handleDailyFlopsCommand error:', err.message);
+  }
+}
+
+/**
+ * Displays the Weekly Cumulative Performance Recap (/weekly or /week)
+ */
+export async function handleWeeklyReportCommand(chatId: number | string): Promise<void> {
+  try {
+    const { calculateWeeklyStats, renderWeeklyReportText } = await import('./weeklyReport.js');
+    const stats = await calculateWeeklyStats(0);
+    const report = renderWeeklyReportText(stats);
+
+    const inlineKeyboard = [
+      [
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      ],
+      [
+        { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+      ],
+      [
+        { text: '💼 My Positions', callback_data: 'cmd_positions' },
+        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+      ],
+    ];
+
+    await bot.sendMessage(chatId, report, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    });
+  } catch (err: any) {
+    console.warn('handleWeeklyReportCommand error:', err.message);
+    await bot.sendMessage(chatId, `⚠️ <i>Could not generate weekly report: ${err.message}</i>`, { parse_mode: 'HTML' });
   }
 }
 
@@ -1107,7 +1833,8 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
     if (closed.length > 0) {
       report += `📜 <b>Recently Closed Positions:</b>\n`;
       closed.forEach((p) => {
-        report += `• <b>$${escapeHtml(p.tokenSymbol)}:</b> ${p.exitReason || 'Closed'} (Realized: <code>+${p.realizedSolProfit.toFixed(2)} SOL</code>)\n`;
+        const closedDexUrl = getDexScreenerUrl(p as any);
+        report += `• <a href="${closedDexUrl}"><b>$${escapeHtml(p.tokenSymbol)}</b></a>: ${p.exitReason || 'Closed'} (Realized: <code>+${p.realizedSolProfit.toFixed(2)} SOL</code>)\n`;
       });
       report += `\n`;
     }

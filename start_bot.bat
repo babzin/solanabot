@@ -1,22 +1,19 @@
 @echo off
-title Soul Terminal & Solana Early Trending Bot
+title Soul Terminal & Solana Early Trending Bot (Turbo Engine)
 cd /d "%~dp0"
 echo ============================================================
-echo   SOUL TERMINAL & SOLANA EARLY TRENDING BOT (@solearlytrending)
+echo   ⚡ SOUL TERMINAL & SOLANA EARLY TRENDING BOT (@solearlytrending)
+echo   High-Performance Real-Time Engine (Sub-Second Latency)
 echo ============================================================
-echo [1/3] Ensuring port 3001 is clear...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3001 ^| findstr LISTENING') do (
-    echo Freeing port 3001 from previous instance (PID %%a)...
-    taskkill /F /PID %%a >nul 2>&1
-)
+echo [1/2] Ensuring port 3001 is ready...
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
 
-echo [2/3] Verifying dependencies...
 if not exist node_modules (
     echo Installing dependencies...
     call npm install
 )
 
-echo [3/3] Launching Bot Runner, Webhook Gateway & Daily Discovery...
+echo [2/2] Launching Bot Runner & High-Speed Radar Engine...
 echo.
-call npm start
+call npx tsx --dns-result-order=ipv4first src/index.ts
 pause

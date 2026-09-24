@@ -41,21 +41,44 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   /**
    * Active Early Trending Tokens API
    */
-  fastify.get('/api/trending', async (_request: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/api/trending', async (request: FastifyRequest<{ Querystring: { date?: string } }>, reply: FastifyReply) => {
     try {
-      const tokens = await prisma.earlyTrendingToken.findMany({
-        where: { status: 'ACTIVE' },
+      const today = new Date().toISOString().slice(0, 10);
+      const targetDate = request.query?.date || today;
+
+      let tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: targetDate },
         orderBy: { createdAt: 'desc' },
-        take: 50,
       });
 
-      // Format BigInt fields safely for JSON serialization
-      const serialized = tokens.map((t) => ({
-        ...t,
-        pairCreatedAt: t.pairCreatedAt ? Number(t.pairCreatedAt) : null,
-      }));
+      // If queried today and it's a fresh day with 0 tokens, fallback to active tokens
+      if (tokens.length === 0 && !request.query?.date) {
+        tokens = await prisma.earlyTrendingToken.findMany({
+          where: { status: 'ACTIVE' },
+          orderBy: { createdAt: 'desc' },
+          take: 30,
+        });
+      }
 
-      return reply.send({ count: serialized.length, tokens: serialized });
+      // Format BigInt fields safely for JSON serialization
+      let totalMultiplier = 0;
+      const serialized = tokens.map((t) => {
+        const mult = t.peakPriceUsd && t.entryPriceUsd > 0
+          ? t.peakPriceUsd / t.entryPriceUsd
+          : (1 + (t.lastMilestonePct || 0) / 100);
+        totalMultiplier += mult;
+        return {
+          ...t,
+          pairCreatedAt: t.pairCreatedAt ? Number(t.pairCreatedAt) : null,
+        };
+      });
+
+      return reply.send({
+        date: targetDate,
+        count: serialized.length,
+        totalMultiplier: Math.round(totalMultiplier),
+        tokens: serialized,
+      });
     } catch (err: any) {
       return reply.code(500).send({ error: 'Failed to retrieve trending tokens', details: err.message });
     }
@@ -81,6 +104,63 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       });
     } catch (err: any) {
       return reply.code(500).send({ error: 'Failed to retrieve token details', details: err.message });
+    }
+  });
+
+  /**
+   * Daily Flopped Coins API (the coins that dumped or had heavy retracements strictly today)
+   */
+  fastify.get('/api/flops', async (request: FastifyRequest<{ Querystring: { date?: string } }>, reply: FastifyReply) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const targetDate = request.query?.date || today;
+
+      // Strictly query the requested day (no fallback to earlier days)
+      const tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: targetDate },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const flopped = tokens
+        .map((t) => {
+          const dropFromEntryPct = t.entryPriceUsd > 0
+            ? ((t.lastAlertedPriceUsd - t.entryPriceUsd) / t.entryPriceUsd) * 100
+            : 0;
+          const dropFromPeakPct = t.peakPriceUsd > 0
+            ? ((t.lastAlertedPriceUsd - t.peakPriceUsd) / t.peakPriceUsd) * 100
+            : dropFromEntryPct;
+          const currentMc = t.entryPriceUsd > 0
+            ? (t.lastAlertedPriceUsd / t.entryPriceUsd) * t.entryMarketCap
+            : t.entryMarketCap;
+
+          return {
+            ...t,
+            pairCreatedAt: t.pairCreatedAt ? Number(t.pairCreatedAt) : null,
+            dropFromEntryPct: Number(dropFromEntryPct.toFixed(1)),
+            dropFromPeakPct: Number(dropFromPeakPct.toFixed(1)),
+            currentMarketCap: Math.round(currentMc),
+            isFlop: dropFromEntryPct <= -20 || (dropFromPeakPct <= -45 && dropFromEntryPct <= 10) || (t.lastDipMilestonePct === -50 && dropFromEntryPct <= -30),
+          };
+        })
+        .filter((t) => t.isFlop)
+        .sort((a, b) => a.dropFromEntryPct - b.dropFromEntryPct);
+
+      let totalFlopDropPct = 0;
+      flopped.forEach((f) => {
+        totalFlopDropPct += Math.abs(f.dropFromEntryPct);
+      });
+      const totalDrawdownMultiplier = Number((totalFlopDropPct / 100).toFixed(1));
+      const totalDrawdownPercent = Math.round(totalFlopDropPct);
+
+      return reply.send({
+        date: targetDate,
+        count: flopped.length,
+        totalDrawdownMultiplier,
+        totalDrawdownPercent,
+        tokens: flopped,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ error: 'Failed to retrieve flopped tokens', details: err.message });
     }
   });
 
@@ -149,6 +229,21 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       });
     } catch (err: any) {
       return reply.code(500).send({ error: 'Failed to calculate stats', details: err.message });
+    }
+  });
+
+  /**
+   * Weekly Cumulative Performance & PnL API
+   */
+  fastify.get('/api/stats/weekly', async (request: FastifyRequest<{ Querystring: { offset?: string; tradeSol?: string } }>, reply: FastifyReply) => {
+    try {
+      const offset = parseInt(request.query?.offset || '0', 10) || 0;
+      const tradeSol = parseFloat(request.query?.tradeSol || '0.1') || 0.1;
+      const { calculateWeeklyStats } = await import('../services/weeklyReport.js');
+      const stats = await calculateWeeklyStats(offset, tradeSol);
+      return reply.send(stats);
+    } catch (err: any) {
+      return reply.code(500).send({ error: 'Failed to calculate weekly stats', details: err.message });
     }
   });
 

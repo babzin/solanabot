@@ -49,6 +49,9 @@ interface RugCheckReport {
   }>;
 }
 
+// 0ms In-Memory cache for lightning-fast repeated checks across radar cycles
+const inMemorySecurityCache = new Map<string, { result: SecurityCheckResult; expiresAt: number }>();
+
 /**
  * Runs contract safety checks via RugCheck with Pump.fun bypass & Redis caching
  * Extracts rich holder distribution, snipers, bundles, and dev wallet analytics
@@ -59,18 +62,25 @@ export async function verifyTokenSecurity(
 ): Promise<SecurityCheckResult> {
   const isPumpFun = programId === KNOWN_PROGRAMS.PUMP_FUN;
 
-  // 1. Check Redis cache
+  // 1. Check in-memory fast cache (0ms)
+  const memCached = inMemorySecurityCache.get(tokenMint);
+  if (memCached && memCached.expiresAt > Date.now()) {
+    return memCached.result;
+  }
+
+  // 2. Check Redis cache
   const cacheKey = REDIS_KEYS.SECURITY_CACHE(tokenMint);
   const cached = await getCached<SecurityCheckResult>(cacheKey);
   if (cached) {
+    inMemorySecurityCache.set(tokenMint, { result: cached, expiresAt: Date.now() + 600_000 });
     return cached;
   }
 
-  // 2. Query RugCheck API for genuine on-chain security report
+  // 3. Query RugCheck API with strict 2000ms timeout for ultra-fast throughput
   try {
     const url = `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`;
     const response = await axios.get<RugCheckReport>(url, {
-      timeout: 4500,
+      timeout: 2000,
       headers: { 'User-Agent': 'SolanaCopyTradingBot/1.0' },
     });
 
@@ -203,7 +213,8 @@ export async function verifyTokenSecurity(
       },
     };
 
-    // Cache security report in Redis for 10 minutes
+    // Cache security report in memory and Redis for 10 minutes
+    inMemorySecurityCache.set(tokenMint, { result, expiresAt: Date.now() + 600_000 });
     await setCached(cacheKey, result, 600);
     return result;
   } catch (err: any) {
@@ -212,6 +223,7 @@ export async function verifyTokenSecurity(
     // Layer 2: Direct Solana RPC Fallback (Zero dropped gems on API lag)
     try {
       const onChainResult = await verifyOnChainMintSecurity(tokenMint, isPumpFun);
+      inMemorySecurityCache.set(tokenMint, { result: onChainResult, expiresAt: Date.now() + 600_000 });
       await setCached(cacheKey, onChainResult, 600);
       return onChainResult;
     } catch (rpcErr: any) {
