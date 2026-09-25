@@ -495,7 +495,7 @@ export function initTelegramCommands(): void {
     { command: 'flops', description: '📉 Daily Flopped Coins & Dips (-50%+)' },
     { command: 'weekly', description: '🗓️ Weekly Cumulative Recap & PnL' },
     { command: 'ask', description: '🤖 AI Trading Co-Pilot Q&A' },
-    { command: 'audit', description: '🔍 AI Audit Any Token Mint' },
+    { command: 'audit', description: '🔍 AI Audit Any Token Mint or Ticker' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
     { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
     { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
@@ -678,39 +678,36 @@ export function initTelegramCommands(): void {
     }
   });
 
-  // /audit <mint>
+  // /audit <mint or ticker>
   bot.onText(/\/audit(?:\s+(.+))?/i, async (msg, match) => {
-    const mint = match?.[1]?.trim();
-    if (!mint) {
-      await bot.sendMessage(msg.chat.id, 'ℹ️ <i>Please provide a token mint address: <code>/audit &lt;mintAddress&gt;</code></i>', { parse_mode: 'HTML' });
+    const query = match?.[1]?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        msg.chat.id,
+        'ℹ️ <i>Please provide a token mint or ticker symbol:\n<code>/audit &lt;mintAddress or $TICKER&gt;</code>\n\nExamples:\n• <code>/audit BONK</code>\n• <code>/audit $NPC</code>\n• <code>/audit 7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump</code></i>',
+        { parse_mode: 'HTML' }
+      );
       return;
     }
 
-    const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI & On-Chain Audit for <code>${mint.slice(0, 8)}...</code></i>`, { parse_mode: 'HTML' });
+    const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI & On-Chain Audit for <code>${escapeHtml(query)}</code>...</i>`, { parse_mode: 'HTML' });
     try {
-      const { auditTokenByMint } = await import('./aiIntelligence.js');
-      const audit = await auditTokenByMint(mint);
-      const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+      const { lookupTokenAnalytics, renderTokenAnalyticsCard } = await import('./aiIntelligence.js');
+      const audit = await lookupTokenAnalytics(query);
 
-      const auditCard = `
-🔍 <b>AI TOKEN AUDIT REPORT</b>
-🪙 <b>Token:</b> <b>${escapeHtml(audit.name)}</b> (<code>$${escapeHtml(audit.symbol)}</code>)
-🏷️ <b>Mint:</b> <code>${audit.mint}</code>
+      if (!audit) {
+        await bot.editMessageText(
+          `⚠️ <i>Could not find an active Solana liquidity pool for "<b>${escapeHtml(query)}</b>" on DexScreener or radar. Check the spelling or provide the raw mint address.</i>`,
+          {
+            chat_id: msg.chat.id,
+            message_id: waitMsg.message_id,
+            parse_mode: 'HTML',
+          }
+        );
+        return;
+      }
 
-🤖 <b>AI Verdict:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})
-🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>
-🎯 <b>Recommendation:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>
-💡 <i>${escapeHtml(audit.score.thesis)}</i>
-
-📊 <b>On-Chain Health:</b>
-• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}
-• 💧 <b>Est. Liquidity:</b> $${Math.round(audit.onChainMetrics.liquidityUsd).toLocaleString()}
-• 🕒 <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m
-• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%
-• 🔒 <b>LP Burnt:</b> ${audit.onChainMetrics.liquidityBurntPct}% 🔥 | <b>Mint Revoked:</b> ✅
-
-🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Live Chart]</a> • <a href="https://solscan.io/token/${audit.mint}">[Solscan]</a>
-      `.trim();
+      const auditCard = renderTokenAnalyticsCard(audit);
 
       await bot.editMessageText(auditCard, {
         chat_id: msg.chat.id,
@@ -720,18 +717,52 @@ export function initTelegramCommands(): void {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${audit.mint}` },
+              { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
               { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
             ],
             [
               { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
               { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
             ],
+            [
+              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+            ],
           ],
         },
       });
     } catch (err: any) {
       await bot.sendMessage(msg.chat.id, `⚠️ <i>Audit error: ${err.message}</i>`, { parse_mode: 'HTML' });
+    }
+  });
+
+  // /predict or /gems or /recommend
+  bot.onText(/\/predict|\/gems|\/recommend|\/buy/i, async (msg) => {
+    const waitMsg = await bot.sendMessage(msg.chat.id, '🎯 <i>Analyzing live on-chain momentum, buy pressure & radar breakout signals...</i>', { parse_mode: 'HTML' });
+    try {
+      const { predictTopGemsToBuy } = await import('./aiIntelligence.js');
+      const { text, tokens } = await predictTopGemsToBuy();
+
+      const inlineKeyboard: any[] = [];
+      for (const t of tokens) {
+        inlineKeyboard.push([
+          { text: `📊 Chart $${t.tokenSymbol}`, url: `https://dexscreener.com/solana/${t.tokenMint}` },
+          { text: `⚡ Snipe $${t.tokenSymbol} (0.1 SOL)`, callback_data: `snipe_quick_0.1_${t.tokenMint}` },
+        ]);
+      }
+      inlineKeyboard.push([
+        { text: '🔄 Refresh Predictions', callback_data: 'cmd_predict' },
+        { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+      ]);
+
+      await bot.editMessageText(text, {
+        chat_id: msg.chat.id,
+        message_id: waitMsg.message_id,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ <i>Prediction error: ${err.message}</i>`, { parse_mode: 'HTML' });
     }
   });
 
@@ -856,29 +887,18 @@ export function initTelegramCommands(): void {
     if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(text)) {
       const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI &amp; On-Chain Audit for <code>${text.slice(0, 8)}...</code></i>`, { parse_mode: 'HTML' });
       try {
-        const { auditTokenByMint } = await import('./aiIntelligence.js');
-        const audit = await auditTokenByMint(text);
-        const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+        const { lookupTokenAnalytics, renderTokenAnalyticsCard } = await import('./aiIntelligence.js');
+        const audit = await lookupTokenAnalytics(text);
 
-        const auditCard = `
-🔍 <b>AI TOKEN AUDIT REPORT</b>
-🪙 <b>Token:</b> <b>${escapeHtml(audit.name)}</b> (<code>$${escapeHtml(audit.symbol)}</code>)
-🏷️ <b>Mint:</b> <code>${audit.mint}</code>
+        if (!audit) {
+          await bot.editMessageText(
+            `⚠️ <i>No active Solana liquidity pool found for mint <code>${text}</code> on DexScreener.</i>`,
+            { chat_id: msg.chat.id, message_id: waitMsg.message_id, parse_mode: 'HTML' }
+          );
+          return;
+        }
 
-🤖 <b>AI Verdict:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})
-🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>
-🎯 <b>Recommendation:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>
-💡 <i>${escapeHtml(audit.score.thesis)}</i>
-
-📊 <b>On-Chain Health:</b>
-• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}
-• 💧 <b>Est. Liquidity:</b> $${Math.round(audit.onChainMetrics.liquidityUsd).toLocaleString()}
-• 🕒 <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m
-• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%
-• 🔒 <b>LP Burnt:</b> ${audit.onChainMetrics.liquidityBurntPct}% 🔥 | <b>Mint Revoked:</b> ✅
-
-🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Live Chart]</a> • <a href="https://solscan.io/token/${audit.mint}">[Solscan]</a>
-        `.trim();
+        const auditCard = renderTokenAnalyticsCard(audit);
 
         await bot.editMessageText(auditCard, {
           chat_id: msg.chat.id,
@@ -888,12 +908,15 @@ export function initTelegramCommands(): void {
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${audit.mint}` },
+                { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
                 { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
               ],
               [
                 { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
                 { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
+              ],
+              [
+                { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
               ],
             ],
           },
@@ -913,20 +936,47 @@ export function initTelegramCommands(): void {
     if (isQuestion) {
       const waitMsg = await bot.sendMessage(msg.chat.id, '⚡ <i>Checking market &amp; on-chain data...</i>', { parse_mode: 'HTML' });
       try {
-        const { askTradingCoPilot } = await import('./aiIntelligence.js');
+        const { askTradingCoPilot, lookupTokenAnalytics, predictTopGemsToBuy } = await import('./aiIntelligence.js');
         const answer = await askTradingCoPilot(text);
-        const replyMarkup = {
-          inline_keyboard: [
-            [
-              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-              { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-            ],
-            [
-              { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
-              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-            ],
-          ],
-        };
+
+        // Check if query mentioned a specific token or asks for buy recommendations to generate dynamic buttons
+        const mintMatch = text.match(/\b([1-9A-HJ-NP-za-km-z]{32,44})\b/);
+        const tickerMatch = text.match(/\$([A-Za-z0-9_]{2,12})\b/);
+        const isRecQuery = /(buy|predict|recommend|gem|coin)/i.test(text);
+
+        const inlineKeyboard: any[] = [];
+
+        if (mintMatch || tickerMatch) {
+          const target = mintMatch ? mintMatch[1] : tickerMatch![1];
+          if (!['sol', 'solana', 'usdc'].includes(target.toLowerCase())) {
+            const tokenAudit = await lookupTokenAnalytics(target);
+            if (tokenAudit) {
+              inlineKeyboard.push([
+                { text: `📊 Chart $${tokenAudit.symbol}`, url: tokenAudit.dexUrl || `https://dexscreener.com/solana/${tokenAudit.mint}` },
+                { text: `⚡ Snipe $${tokenAudit.symbol} (0.1 SOL)`, callback_data: `snipe_quick_0.1_${tokenAudit.mint}` },
+              ]);
+            }
+          }
+        } else if (isRecQuery) {
+          const { tokens } = await predictTopGemsToBuy();
+          for (const t of tokens.slice(0, 2)) {
+            inlineKeyboard.push([
+              { text: `📊 Chart $${t.tokenSymbol}`, url: `https://dexscreener.com/solana/${t.tokenMint}` },
+              { text: `⚡ Snipe $${t.tokenSymbol}`, callback_data: `snipe_quick_0.1_${t.tokenMint}` },
+            ]);
+          }
+        }
+
+        inlineKeyboard.push([
+          { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+          { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+        ]);
+        inlineKeyboard.push([
+          { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+          { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+        ]);
+
+        const replyMarkup = { inline_keyboard: inlineKeyboard };
 
         try {
           await bot.editMessageText(answer, {
@@ -957,44 +1007,78 @@ export function initTelegramCommands(): void {
 
     try {
       const results: any[] = [];
+      const cleanQ = rawQ.trim().replace(/^\$/, '');
+      const isMint = /^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(cleanQ);
+      const isTicker = /^[A-Za-z0-9_]{2,12}$/.test(cleanQ) && !['start', 'help', 'scan', 'daily', 'top', 'flops', 'weekly'].includes(cleanQ.toLowerCase());
+      const isPredictQuery = /(buy|predict|gems?|coins?|recommend)/i.test(rawQ);
 
-      // 1. If user typed a mint address, show instant audit inline
-      if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(rawQ)) {
-        const { auditTokenByMint } = await import('./aiIntelligence.js');
-        const audit = await auditTokenByMint(rawQ);
-        const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+      // 1. If user typed a mint address or ticker symbol, show instant AI analytics inline
+      if (isMint || (isTicker && !isPredictQuery)) {
+        const { lookupTokenAnalytics, renderTokenAnalyticsCard } = await import('./aiIntelligence.js');
+        const audit = await lookupTokenAnalytics(cleanQ);
+        if (audit) {
+          const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : '🔴';
+          const cardText = renderTokenAnalyticsCard(audit);
+
+          results.push({
+            type: 'article',
+            id: `audit_${audit.mint}`,
+            title: `🔍 $${audit.symbol} (${recEmoji} ${audit.recommendation})`,
+            description: `MC: $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()} • Reasons to Buy & Avoid`,
+            input_message_content: {
+              message_text: cardText,
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+            },
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
+                  { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
+                ],
+                [
+                  { text: `⚡ Snipe 0.1 SOL`, callback_data: `snipe_quick_0.1_${audit.mint}` },
+                  { text: `⚡ Snipe 0.5 SOL`, callback_data: `snipe_quick_0.5_${audit.mint}` },
+                ],
+                [
+                  { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+                ],
+              ],
+            },
+          });
+        }
+      }
+
+      // 2. If user searched for predictions or coins to buy
+      if (isPredictQuery) {
+        const { predictTopGemsToBuy } = await import('./aiIntelligence.js');
+        const { text: predText, tokens } = await predictTopGemsToBuy();
+        const predButtons: any[] = [];
+        for (const t of tokens.slice(0, 3)) {
+          predButtons.push([
+            { text: `📊 Chart $${t.tokenSymbol}`, url: `https://dexscreener.com/solana/${t.tokenMint}` },
+            { text: `⚡ Snipe $${t.tokenSymbol}`, callback_data: `snipe_quick_0.1_${t.tokenMint}` },
+          ]);
+        }
+        predButtons.push([
+          { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+        ]);
 
         results.push({
           type: 'article',
-          id: `audit_${audit.mint}`,
-          title: `🔍 Audit $${audit.symbol} (${recEmoji} ${audit.recommendation})`,
-          description: `Conviction: ${audit.score.convictionScore}/100 • MC $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}`,
+          id: `predict_${Date.now()}`,
+          title: `🎯 AI Predicted Gems to Buy Right Now`,
+          description: `Live radar momentum & buy-pressure recommendations`,
           input_message_content: {
-            message_text: `🔍 <b>AI TOKEN AUDIT: $${escapeHtml(audit.symbol)}</b>\n` +
-              `🏷️ <code>${audit.mint}</code>\n\n` +
-              `🤖 <b>Conviction:</b> <code>${audit.score.convictionScore}/100</code> (${audit.score.metaCategory})\n` +
-              `🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code>\n` +
-              `🎯 <b>Verdict:</b> ${recEmoji} <b>${audit.recommendation.replace('_', ' ')}</b>\n\n` +
-              `📊 <b>On-Chain Metrics:</b>\n` +
-              `• 💰 <b>Market Cap:</b> $${Math.round(audit.onChainMetrics.marketCapUsd).toLocaleString()}\n` +
-              `• 👥 <b>Snipers:</b> ${audit.onChainMetrics.snipersCount} | 🛠️ Dev: ${audit.onChainMetrics.devHoldingPct}%\n` +
-              `• 🔥 <b>LP Burnt:</b> 100% | <b>Mint Revoked:</b> ✅\n\n` +
-              `🔗 <a href="https://dexscreener.com/solana/${audit.mint}">[DexScreener Chart]</a>`,
+            message_text: predText,
             parse_mode: 'HTML',
             disable_web_page_preview: true,
           },
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '📊 Chart', url: `https://dexscreener.com/solana/${audit.mint}` },
-                { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
-              ],
-            ],
-          },
+          reply_markup: { inline_keyboard: predButtons },
         });
       }
 
-      // 2. AI Strategy / Question Answer
+      // 3. AI Strategy / Question Answer
       const qText = rawQ || 'how do we maximize profit today';
       const { askTradingCoPilot } = await import('./aiIntelligence.js');
       const aiReply = await askTradingCoPilot(qText);
@@ -1023,7 +1107,7 @@ export function initTelegramCommands(): void {
         },
       });
 
-      // 3. Today's Top Gainers Card
+      // 4. Today's Top Gainers Card
       const today = new Date().toISOString().slice(0, 10);
       let topTokens: any[] = [];
       try {
@@ -1080,12 +1164,34 @@ export function initTelegramCommands(): void {
         } else {
           await bot.sendMessage(chatId, `✅ <i>Scan complete. No unalerted tokens met the strict 5X/20X criteria right this second. Continuous background radar is scanning every 35s!</i>`, { parse_mode: 'HTML' });
         }
+      } else if (data === 'cmd_predict') {
+        const waitMsg = await bot.sendMessage(chatId, '🎯 <i>Analyzing live on-chain momentum, buy pressure & radar breakout signals...</i>', { parse_mode: 'HTML' });
+        const { predictTopGemsToBuy } = await import('./aiIntelligence.js');
+        const { text: predText, tokens } = await predictTopGemsToBuy();
+        const predButtons: any[] = [];
+        for (const t of tokens) {
+          predButtons.push([
+            { text: `📊 Chart $${t.tokenSymbol}`, url: `https://dexscreener.com/solana/${t.tokenMint}` },
+            { text: `⚡ Snipe $${t.tokenSymbol} (0.1 SOL)`, callback_data: `snipe_quick_0.1_${t.tokenMint}` },
+          ]);
+        }
+        predButtons.push([
+          { text: '🔄 Refresh Predictions', callback_data: 'cmd_predict' },
+          { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+        ]);
+        await bot.editMessageText(predText, {
+          chat_id: chatId,
+          message_id: waitMsg.message_id,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: predButtons },
+        });
       } else if (data === 'cmd_wallet') {
         const wallet = env.USER_SOLANA_WALLET;
         const mode = env.SNIPER_PRIVATE_KEY ? '🟢 Live On-Chain' : '⚡ Paper Trading';
         await bot.sendMessage(chatId, `💼 <b>Wallet:</b> <code>${wallet}</code>\n🔗 <a href="https://solscan.io/account/${wallet}">View on Solscan</a>\n⚡ <b>Mode:</b> ${mode}`, { parse_mode: 'HTML', disable_web_page_preview: true });
       } else if (data === 'cmd_help') {
-        await bot.sendMessage(chatId, `📖 <b>Quick Guide:</b>\n• Continuous radar scans every 35s\n• Strict LP burnt & revoked authority audit\n• Instant +50% to 79X pump tracking & alerts\n• 1-Tap Snipe buttons on every alert card`, { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, `📖 <b>Quick Guide:</b>\n• Continuous radar scans every 35s\n• Strict LP burnt & revoked authority audit\n• Instant +50% to 79X pump tracking & alerts\n• 1-Tap Snipe buttons on every alert card\n• <code>/predict</code> for AI predicted coins to buy\n• <code>/audit &lt;token&gt;</code> for reasons to buy or avoid`, { parse_mode: 'HTML' });
       } else if (data === 'cmd_early') {
         await handleEarlyTrendingCommand(chatId);
       } else if (data === 'cmd_top') {
@@ -1098,10 +1204,12 @@ export function initTelegramCommands(): void {
         await bot.sendMessage(
           chatId,
           `🤖 <b>AI Trading Co-Pilot</b> 🧠\n\n` +
-            `Type <code>/ask &lt;your question&gt;</code> to ask about any tokens, stats, or strategies!\n\n` +
+            `Ask me anything on Telegram or use commands:\n\n` +
+            `• <code>/predict</code> — Top predicted breakout coins to buy\n` +
+            `• <code>/audit &lt;mint or $TICKER&gt;</code> — Live analytics with reasons to buy or avoid\n` +
             `• <code>/ask which coins made the most today?</code>\n` +
-            `• <code>/ask why did our tokens flop?</code>\n` +
-            `• <code>/audit &lt;mintAddress&gt;</code> to audit any token address!`,
+            `• <code>/ask how do we avoid yesterday's losses?</code>\n` +
+            `• Or simply type: <i>"tell me about $BONK"</i> or <i>"what coins should I buy?"</i>`,
           { parse_mode: 'HTML' }
         );
       } else if (data === 'cmd_milestones') {

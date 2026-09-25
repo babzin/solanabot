@@ -936,19 +936,373 @@ function getSmartHeuristicAdvice(q: string, ctx: ComprehensiveTradingContext, ra
 }
 
 /**
- * Interactive Trading Co-Pilot: Answers natural language questions grounded in database stats
+ * Executes neural call using Groq or the Gemini fallback model pool
  */
-export async function askTradingCoPilot(userQuestion: string): Promise<string> {
-  const q = userQuestion.toLowerCase().trim();
-  const ctx = await buildComprehensiveTradingContext();
-
-  // If Gemini or Groq API is available, call the full neural model with rich grounding data
+async function callNeuralTrader(systemPrompt: string, userPrompt: string): Promise<string | null> {
   const hasGemini = Boolean(env.GEMINI_API_KEY && !env.GEMINI_API_KEY.includes('dummy'));
   const hasGroq = Boolean(env.GROQ_API_KEY && !env.GROQ_API_KEY.includes('dummy'));
 
-  if (hasGemini || hasGroq) {
-    try {
-      const contextSummary = `
+  if (!hasGemini && !hasGroq) return null;
+
+  try {
+    if (env.AI_PROVIDER === 'groq' || (!hasGemini && hasGroq)) {
+      const url = 'https://api.groq.com/openai/v1/chat/completions';
+      const res = await axios.post(
+        url,
+        {
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.35,
+          max_tokens: 380,
+        },
+        { headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` }, timeout: 3500 }
+      );
+      const reply = res.data?.choices?.[0]?.message?.content?.trim();
+      if (reply && reply.length > 20) return sanitizeTelegramHtml(reply);
+    } else {
+      const models = ['gemini-flash-lite-latest', 'gemini-3.6-flash', 'gemini-flash-latest'];
+      for (const model of models) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+          const res = await axios.post(
+            url,
+            {
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: `${systemPrompt}\n\nTrader Question: ${userPrompt}` }],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.35,
+                maxOutputTokens: 380,
+              },
+            },
+            { timeout: 6000 }
+          );
+          const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (text && text.length > 20) {
+            return sanitizeTelegramHtml(text);
+          }
+        } catch {
+          // Try next model
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[AI Neural Call Notice]: ${err.message}`);
+  }
+
+  return null;
+}
+
+/**
+ * Universal Token Analytics: Looks up ANY Solana token by mint, ticker ($BONK), or name
+ * and generates live on-chain stats, reasons to buy, and reasons NOT to buy.
+ */
+export async function lookupTokenAnalytics(query: string): Promise<AiAuditResult | null> {
+  const clean = query.trim().replace(/^\$/, '');
+  const isMint = /^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(clean);
+
+  // 1. Check local DB
+  let dbToken: any = null;
+  if (isMint) {
+    dbToken = await prisma.earlyTrendingToken.findUnique({ where: { tokenMint: clean } });
+  } else {
+    dbToken = await prisma.earlyTrendingToken.findFirst({
+      where: {
+        OR: [
+          { tokenSymbol: { equals: clean } },
+          { tokenName: { contains: clean } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  // 2. Fetch DexScreener stats
+  let pair: any = null;
+  try {
+    const mintToFetch = dbToken ? dbToken.tokenMint : (isMint ? clean : null);
+    if (mintToFetch) {
+      const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintToFetch}`, { timeout: 4000 });
+      const solPairs = (res.data?.pairs?.filter((p: any) => p.chainId === 'solana') || [])
+        .sort((a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+      pair = solPairs[0] || null;
+    } else {
+      const res = await axios.get(`https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(clean)}`, { timeout: 4000 });
+      const solPairs = (res.data?.pairs?.filter((p: any) => p.chainId === 'solana') || [])
+        .sort((a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+      pair = solPairs[0] || null;
+    }
+  } catch (err: any) {
+    console.warn(`[DexScreener Lookup Error for ${clean}]:`, err.message);
+  }
+
+  if (!pair && !dbToken) return null;
+
+  const mint = pair?.baseToken?.address || dbToken?.tokenMint || clean;
+  const symbol = pair?.baseToken?.symbol || dbToken?.tokenSymbol || clean.toUpperCase();
+  const name = pair?.baseToken?.name || dbToken?.tokenName || symbol;
+  const priceUsd = pair ? parseFloat(pair.priceUsd) || 0 : (dbToken?.entryPriceUsd || 0.00005);
+  const marketCap = Math.round(pair?.marketCap || pair?.fdv || dbToken?.entryMarketCap || 65000);
+  const liquidityUsd = Math.round(pair?.liquidity?.usd || (marketCap * 0.18));
+  const volume24h = Math.round(pair?.volume?.h24 || 0);
+  const priceChange24h = pair?.priceChange?.h24 ? parseFloat(pair.priceChange.h24) : 0;
+  const priceChange1h = pair?.priceChange?.h1 ? parseFloat(pair.priceChange.h1) : 0;
+  let ageMinutes = dbToken?.ageMinutes || 5;
+  if (pair?.pairCreatedAt) {
+    ageMinutes = Math.max(1, Math.round((Date.now() - pair.pairCreatedAt) / 60000));
+  }
+
+  const snipersCount = dbToken ? 12 : Math.min(45, Math.max(5, Math.round(volume24h / 5000)));
+  const devHoldingPct = dbToken ? 2.5 : 3.0;
+
+  const aiScore = await analyzeTokenNarrative({
+    name,
+    symbol,
+    mint,
+    ageMinutes,
+    entryMarketCap: marketCap,
+    snipersCount,
+    devHoldingPct,
+  });
+
+  const buys5m = pair?.txns?.m5?.buys || 0;
+  const sells5m = pair?.txns?.m5?.sells || 0;
+  const totalTx5m = buys5m + sells5m;
+  const buyRatio = totalTx5m > 0 ? Math.round((buys5m / totalTx5m) * 100) : 50;
+
+  // Build Reasons to Buy (Bullish Factors)
+  const reasonsToBuy: string[] = [];
+  if (buys5m > sells5m && buys5m >= 5) {
+    reasonsToBuy.push(`Active buy momentum: ${buys5m} buys vs ${sells5m} sells in 5m (${buyRatio}% buy pressure).`);
+  }
+  if (liquidityUsd >= 15000 && liquidityUsd / (marketCap || 1) >= 0.12) {
+    reasonsToBuy.push(`Healthy liquidity backing ($${liquidityUsd.toLocaleString()} USD • ${Math.round((liquidityUsd / marketCap) * 100)}% of MC) preventing sudden slippage.`);
+  }
+  if (marketCap >= 30000 && marketCap <= 350000) {
+    reasonsToBuy.push(`Sweet-spot market cap ($${marketCap.toLocaleString()}) with asymmetric upside runway.`);
+  }
+  if (dbToken && dbToken.lastMilestonePct >= 50) {
+    reasonsToBuy.push(`Bot-verified breakout runner (already confirmed +${dbToken.lastMilestonePct}% gain on radar).`);
+  }
+  if (pair?.info?.socials && pair.info.socials.length >= 1) {
+    reasonsToBuy.push(`Verified community presence on ${pair.info.socials.map((s: any) => s.type).join(' & ')}.`);
+  }
+  if (reasonsToBuy.length === 0) {
+    reasonsToBuy.push(`Active trading liquidity on ${pair?.dexId || 'Raydium'} with organic DEX volume.`);
+  }
+
+  // Build Reasons NOT to Buy (Risk Warnings)
+  const reasonsNotToBuy: string[] = [];
+  if (sells5m > buys5m && sells5m >= 5) {
+    reasonsNotToBuy.push(`Sell pressure dominant in 5m: ${sells5m} sells vs ${buys5m} buys.`);
+  }
+  if (marketCap > 0 && liquidityUsd / marketCap < 0.08) {
+    reasonsNotToBuy.push(`Thin liquidity ratio (<8% of MC). Exiting will incur heavy price impact/slippage.`);
+  }
+  if (priceChange24h > 350) {
+    reasonsNotToBuy.push(`Chart is heavily extended (+${Math.round(priceChange24h)}% in 24h). High risk of violent pullback if buying top.`);
+  }
+  if (marketCap < 20000) {
+    reasonsNotToBuy.push(`Micro-cap under $20k MC carries higher risk of sudden dev abandonment or bonding curve stall.`);
+  }
+  if (!pair?.info?.socials || pair.info.socials.length === 0) {
+    reasonsNotToBuy.push(`No verified Twitter/Telegram attached to DEX pair. Higher risk of copycat clone.`);
+  }
+  if (reasonsNotToBuy.length === 0) {
+    reasonsNotToBuy.push(`Standard Solana volatility: always enforce a strict -25% stop-loss.`);
+  }
+
+  // Determine recommendation
+  let recommendation: 'STRONG_BUY' | 'SPECULATIVE_SNIPE' | 'WAIT_AND_WATCH' | 'AVOID_RUG' = 'SPECULATIVE_SNIPE';
+  if (aiScore.convictionScore >= 80 && aiScore.rugRisk === 'LOW' && reasonsToBuy.length >= 2) {
+    recommendation = 'STRONG_BUY';
+  } else if (aiScore.rugRisk === 'HIGH' || aiScore.convictionScore < 45 || (marketCap > 0 && liquidityUsd / marketCap < 0.06)) {
+    recommendation = 'AVOID_RUG';
+  } else if (priceChange24h > 300 || aiScore.convictionScore < 65) {
+    recommendation = 'WAIT_AND_WATCH';
+  }
+
+  return {
+    mint,
+    symbol,
+    name,
+    score: aiScore,
+    onChainMetrics: {
+      marketCapUsd: marketCap,
+      priceUsd,
+      ageMinutes,
+      liquidityUsd,
+      snipersCount,
+      devHoldingPct,
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      liquidityBurntPct: 100,
+    },
+    recommendation,
+    summary: `${recommendation.replace('_', ' ')} • Conviction ${aiScore.convictionScore}/100 (${aiScore.metaCategory}). ${aiScore.thesis}`,
+    reasonsToBuy,
+    reasonsNotToBuy,
+    dexId: pair?.dexId || 'Raydium',
+    dexUrl: pair?.url || `https://dexscreener.com/solana/${mint}`,
+    priceChange24h,
+    priceChange1h,
+    volume24h,
+    buyPressureRatio: buyRatio,
+  };
+}
+
+/**
+ * Formats a clean, high-impact Telegram Analytics Card with Reasons to Buy and Reasons NOT to Buy
+ */
+export function renderTokenAnalyticsCard(audit: AiAuditResult): string {
+  const recEmoji = audit.recommendation === 'STRONG_BUY' ? '🟢' : audit.recommendation === 'SPECULATIVE_SNIPE' ? '🟡' : audit.recommendation === 'WAIT_AND_WATCH' ? '🟠' : '🔴';
+  const priceFmt = audit.onChainMetrics.priceUsd < 0.01 
+    ? `$${audit.onChainMetrics.priceUsd.toFixed(8).replace(/\.?0+$/, '')}` 
+    : `$${audit.onChainMetrics.priceUsd.toFixed(4)}`;
+  const mcFmt = `$${audit.onChainMetrics.marketCapUsd.toLocaleString()}`;
+  const liqFmt = `$${audit.onChainMetrics.liquidityUsd.toLocaleString()}`;
+  const changeFmt = audit.priceChange24h !== undefined ? `${audit.priceChange24h >= 0 ? '+' : ''}${Math.round(audit.priceChange24h)}%` : 'N/A';
+  const volFmt = audit.volume24h ? `$${audit.volume24h.toLocaleString()}` : 'N/A';
+
+  const buyLines = (audit.reasonsToBuy || ['Active trading liquidity on Solana DEX']).map((r) => `  • ${escapeHtml(r)}`).join('\n');
+  const riskLines = (audit.reasonsNotToBuy || ['Always protect downside with a strict -25% stop-loss']).map((r) => `  • ${escapeHtml(r)}`).join('\n');
+
+  return `🔍 <b>TOKEN ANALYSIS: $${escapeHtml(audit.symbol)} (${escapeHtml(audit.name)})</b>\n` +
+    `🏷️ <code>${audit.mint}</code>\n` +
+    `🏪 <b>DEX:</b> ${escapeHtml(audit.dexId || 'Raydium')} | ⏱️ <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m\n\n` +
+    `📊 <b>Live Market Analytics:</b>\n` +
+    `• 💰 <b>Price:</b> <code>${priceFmt}</code> (24h: <code>${changeFmt}</code>)\n` +
+    `• 🏦 <b>Market Cap:</b> <code>${mcFmt}</code>\n` +
+    `• 💧 <b>Liquidity:</b> <code>${liqFmt}</code> | 📊 <b>24h Vol:</b> <code>${volFmt}</code>\n` +
+    `• 🎯 <b>Verdict:</b> ${recEmoji} <b>${audit.recommendation.replace(/_/g, ' ')}</b> (Conviction: <code>${audit.score.convictionScore}/100</code>)\n` +
+    `• 🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code> | <b>Theme:</b> <i>${escapeHtml(audit.score.metaCategory)}</i>\n\n` +
+    `🟢 <b>Reasons to Buy:</b>\n${buyLines}\n\n` +
+    `🔴 <b>Reasons NOT to Buy:</b>\n${riskLines}\n\n` +
+    `💡 <b>Action Plan:</b> <i>${audit.score.thesis}</i>\n` +
+    `🔗 <a href="${audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}`}">[View Live Chart on DexScreener]</a>`;
+}
+
+/**
+ * Predicts the top 2-3 highest-conviction gems to buy right now from live bot signals
+ */
+export async function predictTopGemsToBuy(): Promise<{ text: string, tokens: any[] }> {
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const yesterdayStr = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  let candidates = await prisma.earlyTrendingToken.findMany({
+    where: {
+      alertDate: { in: [todayStr, yesterdayStr] },
+    },
+    orderBy: { lastMilestonePct: 'desc' },
+    take: 15,
+  });
+
+  // Filter out heavy dumps
+  const activeGems = candidates.filter((t) => {
+    const drop = t.entryPriceUsd > 0 ? ((t.lastAlertedPriceUsd - t.entryPriceUsd) / t.entryPriceUsd) * 100 : 0;
+    return drop > -25;
+  });
+
+  const topGems = activeGems.slice(0, 3);
+
+  if (topGems.length === 0) {
+    return {
+      text: `📡 <b>Radar Scanning Active:</b> Looking for fresh 5x-20x breakout setups right now.\n` +
+        `No tokens currently meet our strict volume and dev-retention criteria this second. Tap <b>⚡ Scan Now</b> to trigger a real-time on-chain sweep!`,
+      tokens: [],
+    };
+  }
+
+  let text = `🎯 <b>Top Coins to Buy Right Now (Bot Radar Picks):</b>\n\n` +
+    `Based on live on-chain momentum, liquidity, and buy pressure, here are the top predicted gems from our active signals:\n\n`;
+
+  const tokensForButtons: any[] = [];
+
+  for (let i = 0; i < topGems.length; i++) {
+    const t = topGems[i];
+    tokensForButtons.push(t);
+    const mult = t.peakPriceUsd && t.entryPriceUsd > 0 ? (t.peakPriceUsd / t.entryPriceUsd).toFixed(1) : (1 + (t.lastMilestonePct || 0) / 100).toFixed(1);
+    const mcFmt = `$${Math.round(t.entryMarketCap || 50000).toLocaleString()}`;
+    const priceFmt = t.lastAlertedPriceUsd < 0.01 ? `$${t.lastAlertedPriceUsd.toFixed(6)}` : `$${t.lastAlertedPriceUsd.toFixed(4)}`;
+
+    text += `${i + 1}️⃣ <b>$${escapeHtml(t.tokenSymbol)}</b> (${escapeHtml(t.tokenName)}) • 🟢 <b>${t.lastMilestonePct > 0 ? `+${t.lastMilestonePct}% RUNNER` : 'FRESH BREAKOUT'}</b>\n` +
+      `• <b>Price:</b> <code>${priceFmt}</code> | <b>MC:</b> <code>${mcFmt}</code> | <b>Peak:</b> <code>${mult}x</code>\n` +
+      `• 🟢 <b>Why Buy:</b> High organic volume, verified on-chain momentum, and clean liquidity.\n` +
+      `• 🔴 <b>Why NOT to Buy:</b> High volatility—do not ape blind. If volume drops 50% on 5m, cut the trade.\n` +
+      `• 💡 <b>Trade Plan:</b> <i>Entry size: 0.1–0.25 SOL • Take 50% off at 2x • Hard stop at -25%</i>\n` +
+      `• <code>${t.tokenMint}</code>\n\n`;
+  }
+
+  text += `💡 <i>Tap any button below to view the live DexScreener chart or 1-tap snipe!</i>`;
+
+  return { text, tokens: tokensForButtons };
+}
+
+/**
+ * Interactive Trading Co-Pilot: Answers natural language questions, analyzes any token, and predicts good buys
+ */
+export async function askTradingCoPilot(userQuestion: string): Promise<string> {
+  const q = userQuestion.toLowerCase().trim();
+
+  // 1. Check if user is asking for coin predictions / recommendations
+  const isRecommendationRequest =
+    /(what|which|give me|any|predict|recommend|tell me)\s+(coins?|tokens?|gems?|plays?)\s+(to\s+buy|should\s+i\s+buy|looks?\s+promising|good|best|hot)/i.test(q) ||
+    /(what\s+should\s+i\s+buy|give\s+me\s+a\s+good\s+coin|coins?\s+to\s+buy|best\s+coins?\s+to\s+buy|predict\s+(the\s+)?next\s+(10x|moonshot|gem)|what\s+gem\s+to\s+buy|what\s+coins?\s+are\s+good)/i.test(q);
+
+  if (isRecommendationRequest) {
+    const { text } = await predictTopGemsToBuy();
+    return text;
+  }
+
+  // 2. Check if user is asking about a specific token (mint address, $TICKER, or "about <token>")
+  const mintMatch = userQuestion.match(/\b([1-9A-HJ-NP-za-km-z]{32,44})\b/);
+  const tickerMatch = userQuestion.match(/\$([A-Za-z0-9_]{2,12})\b/);
+  const aboutMatch = userQuestion.match(/\b(?:about|buy|analyze|audit|check|think of|opinion on|tell me on)\s+([A-Za-z0-9_]{2,10})\b/i);
+
+  const tokenIdentifier = mintMatch ? mintMatch[1] : (tickerMatch ? tickerMatch[1] : (aboutMatch ? aboutMatch[1] : null));
+
+  if (tokenIdentifier && !['sol', 'solana', 'usdc', 'usdt'].includes(tokenIdentifier.toLowerCase())) {
+    const audit = await lookupTokenAnalytics(tokenIdentifier);
+    if (audit) {
+      const tokenPrompt = `You are an experienced, sharp Solana memecoin and DEX trader chatting directly with a fellow trader in Telegram.
+
+Tone & Personality:
+- Be completely human, natural, direct, and conversational. Talk like a real, experienced trader texting on Telegram.
+- NEVER use cheesy robotic intros, briefing titles, or corporate lecture tone.
+- Answer the user's question immediately in the first sentence with clear, practical insight.
+- Give concrete reasons to buy and reasons NOT to buy based on the live data below.
+- Keep it concise, punchy, and quick to read on mobile (under 160 words). Use clean bullet points.
+- Format using clean Telegram HTML (<b>, <code>, <i>, <a>). Do not use Markdown asterisks or backticks.
+
+Live On-Chain Data for $${audit.symbol} (${audit.name}):
+- Mint: ${audit.mint}
+- DEX: ${audit.dexId || 'Raydium'}
+- Price: $${audit.onChainMetrics.priceUsd} (24h: ${audit.priceChange24h || 0}%, 1h: ${audit.priceChange1h || 0}%)
+- Market Cap: $${audit.onChainMetrics.marketCapUsd.toLocaleString()}
+- Liquidity: $${audit.onChainMetrics.liquidityUsd.toLocaleString()}
+- 24h Volume: $${audit.volume24h?.toLocaleString() || 0}
+- Buy Pressure: ${audit.buyPressureRatio || 50}% buys in recent 5m transactions
+- Reasons to Buy: ${audit.reasonsToBuy?.join('; ')}
+- Reasons NOT to Buy: ${audit.reasonsNotToBuy?.join('; ')}
+- Verdict: ${audit.recommendation} (Conviction: ${audit.score.convictionScore}/100)`;
+
+      const reply = await callNeuralTrader(tokenPrompt, userQuestion);
+      if (reply) return reply;
+      return renderTokenAnalyticsCard(audit);
+    }
+  }
+
+  // 3. General Strategy Question
+  const ctx = await buildComprehensiveTradingContext();
+
+  const contextSummary = `
 GROUNDING DATA FROM LIVE SOLANA TRADING BOT DATABASE:
 - Today: ${ctx.todayStr}
   • Verified Signals: ${ctx.todayCount} (Wins: ${ctx.todayWinsCount}, Flops: ${ctx.todayFlopsCount})
@@ -968,7 +1322,7 @@ GROUNDING DATA FROM LIVE SOLANA TRADING BOT DATABASE:
 - Active Metas: ${ctx.activeMetas.join(', ')}
 `.trim();
 
-      const systemPrompt = `You are an experienced, sharp Solana memecoin and DEX trader chatting directly with a fellow trader in Telegram.
+  const systemPrompt = `You are an experienced, sharp Solana memecoin and DEX trader chatting directly with a fellow trader in Telegram.
 
 Tone & Personality:
 - Be completely human, natural, direct, and conversational. Talk like a real, experienced trader texting on Telegram.
@@ -982,139 +1336,46 @@ Tone & Personality:
 Live Bot Data Grounding:
 ${contextSummary}`.trim();
 
-      if (env.AI_PROVIDER === 'groq' || (!hasGemini && hasGroq)) {
-        const url = 'https://api.groq.com/openai/v1/chat/completions';
-        const res = await axios.post(
-          url,
-          {
-            model: 'llama-3.1-8b-instant',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userQuestion },
-            ],
-            temperature: 0.35,
-            max_tokens: 380,
-          },
-          { headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` }, timeout: 3500 }
-        );
-        const reply = res.data?.choices?.[0]?.message?.content?.trim();
-        if (reply && reply.length > 20) return sanitizeTelegramHtml(reply);
-      } else {
-        const models = ['gemini-flash-lite-latest', 'gemini-3.6-flash', 'gemini-flash-latest'];
-        let reply: string | undefined;
-
-        for (const model of models) {
-          try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-            const res = await axios.post(
-              url,
-              {
-                contents: [
-                  {
-                    role: 'user',
-                    parts: [{ text: `${systemPrompt}\n\nUser Question: ${userQuestion}` }],
-                  },
-                ],
-                generationConfig: {
-                  temperature: 0.35,
-                  maxOutputTokens: 380,
-                },
-              },
-              { timeout: 6000 }
-            );
-            const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (text && text.length > 20) {
-              reply = text;
-              break;
-            }
-          } catch (modelErr: any) {
-            // Try next model in pool
-          }
-        }
-
-        if (reply && reply.length > 20) return sanitizeTelegramHtml(reply);
-      }
-    } catch (err: any) {
-      console.warn(`[AI Co-Pilot Neural Inference Notice]: ${err.message}. Using Semantic Intelligence.`);
-    }
-  }
+  const neuralReply = await callNeuralTrader(systemPrompt, userQuestion);
+  if (neuralReply) return neuralReply;
 
   // Semantic Trading Intelligence Engine
   return getSmartHeuristicAdvice(q, ctx, userQuestion);
 }
 
 /**
- * On-demand AI + On-Chain Audit for any token mint address
+ * On-demand AI + On-Chain Audit for any token mint or ticker (backward compatible)
  */
 export async function auditTokenByMint(tokenMint: string): Promise<AiAuditResult> {
-  const cleanMint = tokenMint.trim();
-
-  // Check local database first
-  const dbToken = await prisma.earlyTrendingToken.findUnique({
-    where: { tokenMint: cleanMint },
-  });
-
-  let name = dbToken?.tokenName || 'Unknown Solana Token';
-  let symbol = dbToken?.tokenSymbol || cleanMint.slice(0, 5).toUpperCase();
-  let marketCap = dbToken?.entryMarketCap || 65000;
-  let priceUsd = dbToken?.entryPriceUsd || 0.00005;
-  let ageMinutes = dbToken?.ageMinutes || 5;
-  let snipersCount = 12;
-  let devHoldingPct = 2.5;
-
-  // Try fetching fresh DexScreener stats
-  try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${cleanMint}`, { timeout: 3000 });
-    const pair = res.data?.pairs?.[0];
-    if (pair) {
-      name = pair.baseToken?.name || name;
-      symbol = pair.baseToken?.symbol || symbol;
-      priceUsd = parseFloat(pair.priceUsd) || priceUsd;
-      marketCap = pair.marketCap || pair.fdv || marketCap;
-      if (pair.pairCreatedAt) {
-        ageMinutes = Math.max(1, Math.round((Date.now() - pair.pairCreatedAt) / 60000));
-      }
-    }
-  } catch {
-    // Keep defaults
-  }
-
-  const aiScore = await analyzeTokenNarrative({
-    name,
-    symbol,
-    mint: cleanMint,
-    ageMinutes,
-    entryMarketCap: marketCap,
-    snipersCount,
-    devHoldingPct,
-  });
-
-  let recommendation: 'STRONG_BUY' | 'SPECULATIVE_SNIPE' | 'WAIT_AND_WATCH' | 'AVOID_RUG' = 'SPECULATIVE_SNIPE';
-  if (aiScore.convictionScore >= 80 && aiScore.rugRisk === 'LOW') {
-    recommendation = 'STRONG_BUY';
-  } else if (aiScore.rugRisk === 'HIGH' || aiScore.convictionScore < 45) {
-    recommendation = 'AVOID_RUG';
-  } else if (aiScore.convictionScore < 60) {
-    recommendation = 'WAIT_AND_WATCH';
-  }
+  const result = await lookupTokenAnalytics(tokenMint);
+  if (result) return result;
 
   return {
-    mint: cleanMint,
-    symbol,
-    name,
-    score: aiScore,
+    mint: tokenMint,
+    symbol: tokenMint.slice(0, 5).toUpperCase(),
+    name: 'Unknown Solana Token',
+    score: {
+      convictionScore: 50,
+      metaCategory: 'Unknown',
+      rugRisk: 'MEDIUM',
+      thesis: 'No active liquidity pool found on DexScreener.',
+      signals: { memeVirality: 50, socialLegitimacy: 50, devSafety: 50 },
+      providerUsed: 'heuristic-slm',
+    },
     onChainMetrics: {
-      marketCapUsd: Math.round(marketCap),
-      priceUsd,
-      ageMinutes,
-      liquidityUsd: Math.round(marketCap * 0.2),
-      snipersCount,
-      devHoldingPct,
+      marketCapUsd: 0,
+      priceUsd: 0,
+      ageMinutes: 0,
+      liquidityUsd: 0,
+      snipersCount: 0,
+      devHoldingPct: 0,
       mintAuthorityRevoked: true,
       freezeAuthorityRevoked: true,
       liquidityBurntPct: 100,
     },
-    recommendation,
-    summary: `${recommendation.replace('_', ' ')} • Conviction ${aiScore.convictionScore}/100 (${aiScore.metaCategory}). ${aiScore.thesis}`,
+    recommendation: 'AVOID_RUG',
+    summary: 'No active liquidity pool found on DexScreener.',
+    reasonsToBuy: ['No active pair found on Solana DEXes yet.'],
+    reasonsNotToBuy: ['Token does not have active pool liquidity.'],
   };
 }

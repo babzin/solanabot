@@ -226,5 +226,13 @@ export interface AiAuditResult {
   };
   recommendation: 'STRONG_BUY' | 'SPECULATIVE_SNIPE' | 'WAIT_AND_WATCH' | 'AVOID_RUG';
   summary: string;
+  reasonsToBuy?: string[];
+  reasonsNotToBuy?: string[];
+  dexId?: string;
+  dexUrl?: string;
+  priceChange24h?: number;
+  priceChange1h?: number;
+  volume24h?: number;
+  buyPressureRatio?: number;
 }
 
