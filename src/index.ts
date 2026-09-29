@@ -6,6 +6,8 @@ import { adminRoutes } from './routes/admin.js';
 import { terminalRoutes } from './routes/terminal.js';
 import { prisma } from './services/db.js';
 import { initEarlyTrendingCron } from './services/earlyTrending.js';
+import { initLossLearningEngine } from './services/lossLearner.js';
+import { initPaperTradingEngine } from './services/paperTrading.js';
 import { initPriceMilestoneTracker } from './services/priceTracker.js';
 import { redis } from './services/redis.js';
 import { bot, initTelegramCommands } from './services/telegram.js';
@@ -32,13 +34,19 @@ async function main() {
   await server.register(terminalRoutes);
   await server.register(adminRoutes);
 
-  // 3. Initialize Early Trending Discovery Engine (35s cycle)
+  // 3. Initialize Adaptive Loss-Learning Feedback Engine (Pre-computes flop signatures & danger zones)
+  await initLossLearningEngine();
+
+  // 4. Initialize $100 Real-Market Paper Trading Engine
+  await initPaperTradingEngine();
+
+  // 5. Initialize Early Trending Discovery Engine (12s cycle)
   initEarlyTrendingCron();
 
-  // 4. Initialize Price Milestone Tracker (+50% to 79X pumps & -50% retracements)
+  // 5. Initialize Price Milestone Tracker (+50% to 79X pumps & -50% retracements)
   initPriceMilestoneTracker();
 
-  // 5. Initialize Weekly Performance Recap Scheduler (Sunday 23:55 UTC)
+  // 6. Initialize Weekly Performance Recap Scheduler (Sunday 23:55 UTC)
   initWeeklyReportCron();
 
   // 5. Initialize Telegram Command Handlers & Polling

@@ -276,6 +276,14 @@ export function renderEarlyTrendingCardText(token: any): string {
       `💡 <i>${escapeHtml(token.aiScore.thesis)}</i>`;
   }
 
+  let lossDefenseSection = '';
+  if (token.learnedRisk) {
+    const risk = token.learnedRisk.flopRiskScore;
+    const runner = token.learnedRisk.runnerAffinityScore ?? 50;
+    const shieldEmoji = risk <= 20 ? '🛡️' : risk <= 40 ? '⚖️' : '⚠️';
+    lossDefenseSection = `\n🧠 <b>Loss-Defense:</b> Flop Risk <code>${risk}%</code> ${shieldEmoji} | Runner Match <code>${runner}%</code> 🎯`;
+  }
+
   return `
 🔥 <a href="${dexscreenerUrl}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
 🕒 <b>Age</b>: ${ageText} | <b>Security</b>: ✅
@@ -295,7 +303,7 @@ ${row2}
 
 <a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
 ┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
-┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}${lossDefenseSection}
 `.trim();
 }
 
@@ -489,11 +497,14 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
+    { command: 'paper', description: '💼 $100 Paper Portfolio & Live PnL' },
+    { command: 'paper_reset', description: '🔄 Reset Paper Account to $100' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
     { command: 'flops', description: '📉 Daily Flopped Coins & Dips (-50%+)' },
     { command: 'weekly', description: '🗓️ Weekly Cumulative Recap & PnL' },
+    { command: 'learner', description: '🧠 Adaptive Loss-Learning Feedback Engine' },
     { command: 'ask', description: '🤖 AI Trading Co-Pilot Q&A' },
     { command: 'audit', description: '🔍 AI Audit Any Token Mint or Ticker' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
@@ -509,10 +520,10 @@ export function initTelegramCommands(): void {
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
-      [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
-      [{ text: '🗓️ Weekly Report' }, { text: '🤖 AI Co-Pilot' }],
-      [{ text: '💼 My Positions' }, { text: '⚙️ Auto-Snipe' }],
+      [{ text: '💼 $100 Paper' }, { text: '💎 Daily Coins' }],
+      [{ text: '🏆 Top Gainers' }, { text: '📉 Daily Flops' }],
+      [{ text: '📈 Price Milestones' }, { text: '🗓️ Weekly Report' }],
+      [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -544,34 +555,43 @@ export function initTelegramCommands(): void {
 • 📊 <b>DexScreener:</b> 1-Tap direct pair chart button on every call
 • 🤖 <b>AI Co-Pilot:</b> Pre-alert meme narrative &amp; rug risk conviction scoring
 
+💼 <b>$100 REAL-MARKET PAPER TRADING:</b>
+• 🏦 <b>Bankroll:</b> $100.00 USD with real-time Solana priority gas &amp; slippage friction
+• 🎯 <b>Position Sizing:</b> 3% compounding capital per trade (Up to 20 concurrent positions)
+• 🛡️ <b>Automated Trailing:</b> 2X Take-Profit + -40% Moonbag Trailing Stop-Loss
+
 ⚙️ <b>AUTO-SNIPER &amp; EXIT STRATEGY:</b>
 • <b>Status:</b> ${snipeBadge}
 • 🎯 <b>2X Take-Profit:</b> Sells 50% at +100% to secure initial SOL risk-free!
-• 🛡️ <b>Trailing Stop-Loss:</b> Protects remaining moonbag on sharp reversals (-25%)
+• 🛡️ <b>Trailing Stop-Loss:</b> Protects remaining moonbag on deep reversals (-40%)
 
 <i>Tap any button below to view active gems or manage auto-snipe:</i>
     `.trim();
 
     const inlineKeyboard = [
       [
+        { text: '💼 $100 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
         { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+      ],
+      [
         { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-      ],
-      [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+      ],
+      [
         { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
-      ],
-      [
         { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
+      ],
+      [
         { text: '🤖 AI Co-Pilot', callback_data: 'cmd_copilot' },
-      ],
-      [
         { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
-        { text: '💼 My Positions', callback_data: 'cmd_positions' },
       ],
       [
+        { text: '💼 My Positions', callback_data: 'cmd_positions' },
         { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
+      ],
+      [
         { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
+        { text: '🧠 Loss Learner', callback_data: 'cmd_learner' },
       ],
       [
         { text: '❓ How It Works', callback_data: 'cmd_help' },
@@ -604,6 +624,16 @@ export function initTelegramCommands(): void {
       return;
     }
     await sendWelcomeDashboard(msg.chat.id);
+  });
+
+  // /paper or /portfolio or "💼 $100 Paper" button
+  bot.onText(/💼 \$100 Paper|\/paper|\/portfolio|Paper Trading|Paper Portfolio/i, async (msg) => {
+    await handlePaperPortfolioCommand(msg.chat.id);
+  });
+
+  // /paper_reset or /reset_paper
+  bot.onText(/\/paper_reset|\/reset_paper/i, async (msg) => {
+    await handlePaperResetCommand(msg.chat.id);
   });
 
   // /daily or /early or "💎 Daily Coins" button
@@ -862,9 +892,31 @@ export function initTelegramCommands(): void {
       `• /milestones — View Pumps &amp; Retracements\n` +
       `• /positions — View Active Positions &amp; PnL\n` +
       `• /autosnipe — Toggle Automated Sniping\n` +
-      `• /wallet — View Connected Wallet &amp; Solscan`,
+      `• /wallet — View Connected Wallet &amp; Solscan\n` +
+      `• /learner — Adaptive Loss-Learning Engine &amp; Autopsies`,
       { parse_mode: 'HTML' }
     );
+  });
+
+  // /learner or /memory or "🧠 Loss Learner"
+  bot.onText(/\/(?:learner|memory|lossanalytics)|🧠 Loss Learner|Loss Learner/i, async (msg) => {
+    try {
+      const { getLearnedLossDashboard } = await import('./lossLearner.js');
+      const dash = getLearnedLossDashboard();
+      await bot.sendMessage(msg.chat.id, dash, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '🔄 Refresh Memory & Stats', callback_data: 'cmd_learner' },
+              { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+            ],
+          ],
+        },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Error loading loss learner: ${err.message}`);
+    }
   });
 
   // Natural Language & Free-form Question Listener
@@ -936,26 +988,22 @@ export function initTelegramCommands(): void {
     if (isQuestion) {
       const waitMsg = await bot.sendMessage(msg.chat.id, '⚡ <i>Checking market &amp; on-chain data...</i>', { parse_mode: 'HTML' });
       try {
-        const { askTradingCoPilot, lookupTokenAnalytics, predictTopGemsToBuy } = await import('./aiIntelligence.js');
+        const { askTradingCoPilot, lookupTokenAnalytics, predictTopGemsToBuy, extractTokenFromQuery } = await import('./aiIntelligence.js');
         const answer = await askTradingCoPilot(text);
 
         // Check if query mentioned a specific token or asks for buy recommendations to generate dynamic buttons
-        const mintMatch = text.match(/\b([1-9A-HJ-NP-za-km-z]{32,44})\b/);
-        const tickerMatch = text.match(/\$([A-Za-z0-9_]{2,12})\b/);
+        const target = extractTokenFromQuery(text);
         const isRecQuery = /(buy|predict|recommend|gem|coin)/i.test(text);
 
         const inlineKeyboard: any[] = [];
 
-        if (mintMatch || tickerMatch) {
-          const target = mintMatch ? mintMatch[1] : tickerMatch![1];
-          if (!['sol', 'solana', 'usdc'].includes(target.toLowerCase())) {
-            const tokenAudit = await lookupTokenAnalytics(target);
-            if (tokenAudit) {
-              inlineKeyboard.push([
-                { text: `📊 Chart $${tokenAudit.symbol}`, url: tokenAudit.dexUrl || `https://dexscreener.com/solana/${tokenAudit.mint}` },
-                { text: `⚡ Snipe $${tokenAudit.symbol} (0.1 SOL)`, callback_data: `snipe_quick_0.1_${tokenAudit.mint}` },
-              ]);
-            }
+        if (target) {
+          const tokenAudit = await lookupTokenAnalytics(target);
+          if (tokenAudit) {
+            inlineKeyboard.push([
+              { text: `📊 Chart $${tokenAudit.symbol}`, url: tokenAudit.dexUrl || `https://dexscreener.com/solana/${tokenAudit.mint}` },
+              { text: `⚡ Snipe $${tokenAudit.symbol} (0.1 SOL)`, callback_data: `snipe_quick_0.1_${tokenAudit.mint}` },
+            ]);
           }
         } else if (isRecQuery) {
           const { tokens } = await predictTopGemsToBuy();
@@ -1155,6 +1203,10 @@ export function initTelegramCommands(): void {
 
       if (data === 'cmd_start') {
         await sendWelcomeDashboard(chatId);
+      } else if (data === 'cmd_paper_portfolio') {
+        await handlePaperPortfolioCommand(chatId);
+      } else if (data === 'cmd_paper_reset') {
+        await handlePaperResetCommand(chatId);
       } else if (data === 'cmd_scan') {
         await bot.sendMessage(chatId, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
         const { runEarlyTrendingRadarCycle } = await import('./earlyTrending.js');
@@ -1190,6 +1242,20 @@ export function initTelegramCommands(): void {
         const wallet = env.USER_SOLANA_WALLET;
         const mode = env.SNIPER_PRIVATE_KEY ? '🟢 Live On-Chain' : '⚡ Paper Trading';
         await bot.sendMessage(chatId, `💼 <b>Wallet:</b> <code>${wallet}</code>\n🔗 <a href="https://solscan.io/account/${wallet}">View on Solscan</a>\n⚡ <b>Mode:</b> ${mode}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+      } else if (data === 'cmd_learner') {
+        const { getLearnedLossDashboard } = await import('./lossLearner.js');
+        const dash = getLearnedLossDashboard();
+        await bot.sendMessage(chatId, dash, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🔄 Refresh Memory & Stats', callback_data: 'cmd_learner' },
+                { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+              ],
+            ],
+          },
+        });
       } else if (data === 'cmd_help') {
         await bot.sendMessage(chatId, `📖 <b>Quick Guide:</b>\n• Continuous radar scans every 35s\n• Strict LP burnt & revoked authority audit\n• Instant +50% to 79X pump tracking & alerts\n• 1-Tap Snipe buttons on every alert card\n• <code>/predict</code> for AI predicted coins to buy\n• <code>/audit &lt;token&gt;</code> for reasons to buy or avoid`, { parse_mode: 'HTML' });
       } else if (data === 'cmd_early') {
@@ -1988,8 +2054,8 @@ async function handleSnipeStatus(chatId: number | string, userId: string, messag
 
 <b>Autonomous Exit Strategy:</b>
 • 🎯 <b>2X Take-Profit:</b> Automatically sells 50% at +100% to recoup principal risk-free!
-• 🛡️ <b>Trailing Stop-Loss:</b> Automatically locks in gains if token drops 25% from its peak!
-• 🛑 <b>Hard Stop-Loss:</b> Sells position if price falls -25% from entry.
+• 🛡️ <b>Trailing Stop-Loss:</b> Automatically locks in gains if token drops 40% from its peak!
+• 🛑 <b>Hard Stop-Loss:</b> Sells position if price sustains -35% drop (with 45s wick buffer).
 
 <b>How it works:</b>
 • <b>DISABLED (Default):</b> You receive 2-minute Early &amp; Whale alerts with 1-tap quick buy buttons. The bot never spends your SOL automatically.
@@ -2039,4 +2105,90 @@ async function handleSnipeStatus(chatId: number | string, userId: string, messag
     reply_markup: { inline_keyboard: keyboard },
   });
 }
+
+/**
+ * Handles /paper and /portfolio command displaying live $100 bankroll & active positions
+ */
+export async function handlePaperPortfolioCommand(chatId: number | string): Promise<void> {
+  try {
+    const { getPaperPortfolioSummary } = await import('./paperTrading.js');
+    const summary = await getPaperPortfolioSummary();
+    const w = summary.wallet;
+
+    const pnlSign = summary.totalPnlUsd >= 0 ? '+' : '';
+    const pnlEmoji = summary.totalPnlUsd >= 0 ? '💸' : '🩸';
+    const statusColor = summary.totalPnlUsd >= 0 ? '🟢' : '🔴';
+
+    let msg = `
+💼 <b>[PAPER TRADING: $100 LIVE PORTFOLIO]</b> ${pnlEmoji}
+<i>100% Real Market Dynamics • Real Gas &amp; Slippage Deductions</i>
+
+🏦 <b>NET EQUITY:</b> <b>$${summary.netWorthUsd.toFixed(2)} USD</b> (<code>${summary.netWorthSol.toFixed(4)} SOL</code>)
+${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)} (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)</b>
+💵 <b>Liquid Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)} USD</code> (<code>${w.liquidCashSol.toFixed(4)} SOL</code>)
+🔒 <b>In Active Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)} USD</code>
+⛽ <b>Total Real Gas Paid:</b> <code>-${w.totalFeesPaidSol.toFixed(4)} SOL</code> (<b>-$${w.totalFeesPaidUsd.toFixed(2)}</b>)
+🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L • ${w.totalTrades} Total)
+
+📊 <b>ACTIVE POSITIONS (${summary.activePositions.length}/${w.maxConcurrentPositions}):</b>
+`;
+
+    if (summary.activePositions.length === 0) {
+      msg += `<i>No active open positions right now. Standing by for radar gems!</i>\n`;
+    } else {
+      for (const pos of summary.activePositions) {
+        const gainPct = ((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+        const sign = gainPct >= 0 ? '+' : '';
+        const badge = pos.status === 'PARTIAL_TP_2X' ? '🌙 MOONBAG (50%)' : '🟢 OPEN (100%)';
+        const mult = (pos.currentPriceUsd / pos.entryPriceUsd).toFixed(2);
+        msg += `\n• <b>$${pos.tokenSymbol}</b> [${badge}]\n` +
+          `  Entry: <code>$${pos.entryPriceUsd.toFixed(6)}</code> ➔ Now: <code>$${pos.currentPriceUsd.toFixed(6)}</code> (${sign}${gainPct.toFixed(1)}% | ${mult}X)\n` +
+          `  Peak: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (${pos.peakMultiplier}X) • Initial: $${pos.investedUsd.toFixed(2)}\n`;
+      }
+    }
+
+    msg += `\n🛡️ <i>Trailing Stop (-40% off peak) + 2X Take-Profit + -35% SL (45s buffer) active.</i>`;
+
+    const inlineKeyboard = [
+      [
+        { text: '🔄 Refresh Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
+      ],
+      [
+        { text: '🔄 Reset Paper Account to $100', callback_data: 'cmd_paper_reset' },
+      ],
+    ];
+
+    await bot.sendMessage(chatId, msg.trim(), {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `⚠️ Could not fetch paper trading portfolio: ${err.message}`);
+  }
+}
+
+/**
+ * Handles /paper_reset command resetting the paper trading account to pristine $100
+ */
+export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
+  try {
+    const { resetPaperTradingWallet } = await import('./paperTrading.js');
+    const w = await resetPaperTradingWallet();
+    await bot.sendMessage(
+      chatId,
+      `🔄 <b>[PAPER TRADING RESET SUCCESSFUL]</b> ✅\n\n` +
+        `Your paper trading portfolio has been reset to <b>$100.00 USD</b> pristine capital!\n` +
+        `• 💵 Liquid Balance: <code>$100.00 USD</code> (${w.liquidCashSol} SOL)\n` +
+        `• 🎯 Allocation: <code>3% compounding per trade ($${w.tradeSizeUsd.toFixed(2)})</code> (Up to ${w.maxConcurrentPositions} positions)\n` +
+        `• 🛡️ Trailing Stop-Loss: Active at -40% from peak (-35% SL with 45s buffer)\n\n` +
+        `<i>Ready to capture the next live market runner!</i>`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `⚠️ Failed to reset paper portfolio: ${err.message}`);
+  }
+}
+
 

@@ -757,8 +757,9 @@
 
     <div class="header-stats">
       <div class="stat-pill online">SOLANA MAINNET</div>
+      <div class="stat-pill" id="paper-pill" style="border-color: rgba(0, 255, 136, 0.4); color: var(--green); font-weight: 700;">💼 PAPER: $100.00</div>
       <div class="stat-pill">⚡ 2,480 TPS</div>
-      <div class="stat-pill">SOL: $160.40</div>
+      <div class="stat-pill" id="sol-price-pill">SOL: $145.00</div>
       <div class="stat-pill" id="daily-quota-pill">💎 28/45 GEMS TODAY</div>
     </div>
 
@@ -947,12 +948,58 @@
 
             <div class="snipe-strategy-row">
               <span>🎯 Auto Take-Profit: <b class="tp-badge">+100% (2X Free Moonbag)</b></span>
-              <span>🛡️ Trailing SL: <b>-25%</b></span>
+              <span>🛡️ Trailing SL: <b>-40%</b></span>
             </div>
 
             <button class="btn-execute-snipe" id="btn-snipe-now">
               <span>🚀 INSTANT SNIPE TOKEN</span>
             </button>
+          </div>
+
+          <!-- $100 REAL-MARKET PAPER TRADING WIDGET -->
+          <div class="audit-card" style="border-color: rgba(0, 240, 255, 0.25); background: rgba(0, 240, 255, 0.02); margin-top: 12px;">
+            <div class="audit-title">
+              <span style="color: var(--cyan);">💼 $100 Paper Trading Simulator</span>
+              <button id="btn-reset-paper" style="background: rgba(255,59,48,0.15); border: 1px solid rgba(255,59,48,0.3); color: #ff6b6b; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; cursor: pointer;">RESET $100</button>
+            </div>
+            
+            <div class="audit-grid" style="margin-bottom: 8px;">
+              <div class="audit-row">
+                <span>Net Equity:</span>
+                <b id="paper-net-worth" style="color: var(--green); font-size: 12px;">$100.00</b>
+              </div>
+              <div class="audit-row">
+                <span>Total PnL:</span>
+                <b id="paper-pnl" style="color: var(--text-dim); font-size: 12px;">+$0.00 (+0.0%)</b>
+              </div>
+              <div class="audit-row">
+                <span>Liquid Cash:</span>
+                <b id="paper-liquid">$100.00</b>
+              </div>
+              <div class="audit-row">
+                <span>In Positions:</span>
+                <b id="paper-invested">$0.00</b>
+              </div>
+              <div class="audit-row">
+                <span>Total Gas Paid:</span>
+                <b id="paper-fees" style="color: #ff9f43;">-$0.00</b>
+              </div>
+              <div class="audit-row">
+                <span>Win Rate:</span>
+                <b id="paper-winrate">0.0% (0/0)</b>
+              </div>
+            </div>
+
+            <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 4px; display: flex; justify-content: space-between;">
+              <span>Active Trades (<span id="paper-active-count">0</span>/<span id="paper-max-slots">20</span> slots • 3% each):</span>
+              <span style="color: var(--cyan);">🛡️ -40% Trailing SL • -35% Stop (45s Buffer)</span>
+            </div>
+
+            <div id="paper-positions-list" style="display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto;">
+              <div style="font-size: 11px; color: var(--text-dim); text-align: center; padding: 6px;">
+                No open positions. Scanner auto-allocates 3% capital/trade.
+              </div>
+            </div>
           </div>
 
         </div>
@@ -1294,6 +1341,98 @@
         showToast(`❌ Snipe request error: ${err.message}`);
       }
     });
+
+    // --- $100 PAPER TRADING ENGINE CLIENT ---
+    async function loadPaperPortfolio() {
+      try {
+        const res = await fetch('/api/paper/portfolio');
+        if (!res.ok) return;
+        const data = await res.json();
+        const w = data.wallet;
+
+        // Header pill
+        const paperPill = document.getElementById('paper-pill');
+        if (paperPill) {
+          const sign = data.totalPnlUsd >= 0 ? '+' : '';
+          paperPill.innerText = `💼 PAPER: $${data.netWorthUsd.toFixed(2)} (${sign}$${data.totalPnlUsd.toFixed(2)})`;
+          paperPill.style.color = data.totalPnlUsd >= 0 ? 'var(--green)' : '#ff6b6b';
+        }
+
+        // Sol pill
+        const solPill = document.getElementById('sol-price-pill');
+        if (solPill && w.solPriceUsd) {
+          solPill.innerText = `SOL: $${w.solPriceUsd.toFixed(2)}`;
+        }
+
+        // Widget details
+        const netWorthEl = document.getElementById('paper-net-worth');
+        if (netWorthEl) netWorthEl.innerText = `$${data.netWorthUsd.toFixed(2)}`;
+
+        const pnlEl = document.getElementById('paper-pnl');
+        if (pnlEl) {
+          const sign = data.totalPnlUsd >= 0 ? '+' : '';
+          pnlEl.innerText = `${sign}$${data.totalPnlUsd.toFixed(2)} (${sign}${data.totalPnlPercent.toFixed(1)}%)`;
+          pnlEl.style.color = data.totalPnlUsd >= 0 ? 'var(--green)' : '#ff6b6b';
+        }
+
+        const liquidEl = document.getElementById('paper-liquid');
+        if (liquidEl) liquidEl.innerText = `$${w.liquidCashUsd.toFixed(2)}`;
+
+        const investedEl = document.getElementById('paper-invested');
+        if (investedEl) investedEl.innerText = `$${w.totalInvestedUsd.toFixed(2)}`;
+
+        const feesEl = document.getElementById('paper-fees');
+        if (feesEl) feesEl.innerText = `-$${w.totalFeesPaidUsd.toFixed(2)} (${w.totalFeesPaidSol.toFixed(3)} SOL)`;
+
+        const winrateEl = document.getElementById('paper-winrate');
+        if (winrateEl) winrateEl.innerText = `${w.winRatePercent.toFixed(1)}% (${w.winningTrades}W/${w.losingTrades}L)`;
+
+        const countEl = document.getElementById('paper-active-count');
+        if (countEl) countEl.innerText = data.activePositions.length;
+        const slotsEl = document.getElementById('paper-max-slots');
+        if (slotsEl && w.maxConcurrentPositions) slotsEl.innerText = w.maxConcurrentPositions;
+
+        // Active positions list
+        const listEl = document.getElementById('paper-positions-list');
+        if (listEl) {
+          if (data.activePositions.length === 0) {
+            listEl.innerHTML = `<div style="font-size: 11px; color: var(--text-dim); text-align: center; padding: 6px;">No open positions. Scanner auto-allocates 3% capital/trade.</div>`;
+          } else {
+            listEl.innerHTML = data.activePositions.map(pos => {
+              const gainPct = ((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+              const sign = gainPct >= 0 ? '+' : '';
+              const color = gainPct >= 0 ? 'var(--green)' : '#ff6b6b';
+              const badge = pos.status === 'PARTIAL_TP_2X' ? '🌙 MOONBAG' : '🟢 OPEN';
+              return `
+                <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(0,0,0,0.3); padding:4px 6px; border-radius:4px; font-size:10px; font-family:'JetBrains Mono';">
+                  <span><b>$${pos.tokenSymbol}</b> <span style="font-size:9px; color:var(--text-muted);">${badge}</span></span>
+                  <span style="color:${color}; font-weight:700;">${sign}${gainPct.toFixed(1)}%</span>
+                  <span style="color:var(--text-dim); font-size:9px;">ATH ${pos.peakMultiplier}X</span>
+                </div>
+              `;
+            }).join('');
+          }
+        }
+      } catch (err) {}
+    }
+
+    document.getElementById('btn-reset-paper')?.addEventListener('click', async () => {
+      if (!confirm('Are you sure you want to reset the Paper Trading portfolio back to $100.00?')) return;
+      try {
+        const res = await fetch('/api/paper/reset', { method: 'POST' });
+        const result = await res.json();
+        if (result.success) {
+          showToast('🔄 Paper Trading portfolio reset back to $100.00 USD!');
+          loadPaperPortfolio();
+        }
+      } catch (err) {
+        showToast(`❌ Reset failed: ${err.message}`);
+      }
+    });
+
+    // Refresh paper portfolio every 4 seconds
+    setInterval(loadPaperPortfolio, 4000);
+    loadPaperPortfolio();
 
     // Initialize
     loadTrending();

@@ -9,6 +9,8 @@ import {
   PriceDipMilestoneData,
   PricePumpMilestoneData,
 } from './telegram.js';
+import { notifyFlopObserved } from './lossLearner.js';
+import { checkPaperPositionsTpSl } from './paperTrading.js';
 
 let priceTrackerTimer: NodeJS.Timeout | null = null;
 
@@ -89,6 +91,13 @@ export async function checkPriceMilestones(): Promise<number> {
           }
         } catch (tpslErr: any) {
           console.warn('⚠️ TP/SL check error:', tpslErr.message);
+        }
+
+        // Check autonomous $100 Paper Trading TP/SL and Trailing Stop-Loss
+        try {
+          await checkPaperPositionsTpSl(token.tokenMint, currentPriceUsd, pair);
+        } catch (paperTpSlErr: any) {
+          console.warn('⚠️ Paper TP/SL check error:', paperTpSlErr.message);
         }
 
         // --- CHECK A: +50% PUMP MILESTONES (+50%, +100%, +150%, +200%, +250%...) ---
@@ -176,6 +185,9 @@ export async function checkPriceMilestones(): Promise<number> {
           console.log(`⚠️ [DIP ALERT] $${token.tokenSymbol} dropped -50% (${dipLabel})!`);
           await dispatchPriceDipMilestoneAlert(dipData);
           alertsDispatched++;
+
+          // Asynchronously notify Adaptive Loss Learner to update flop signatures & blacklist
+          notifyFlopObserved(token.tokenMint, dipData.dropPercent, dipLabel).catch(() => {});
 
           await prisma.earlyTrendingToken.update({
             where: { id: token.id },

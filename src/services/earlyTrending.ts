@@ -7,7 +7,9 @@ import { verifyTokenSecurity } from './security.js';
 import { executeSnipeTrade, getUserAutoSnipeConfig } from './sniper.js';
 import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
 import { analyzeTokenNarrative } from './aiIntelligence.js';
-import { HolderDistributionItem, AiNarrativeScore } from '../types/index.js';
+import { HolderDistributionItem, AiNarrativeScore, LearnedEvaluationResult } from '../types/index.js';
+import { evaluateCandidateAgainstLearnedPatterns } from './lossLearner.js';
+import { processPaperTradeBuy } from './paperTrading.js';
 
 export interface EarlyWhaleCandidate {
   tokenMint: string;
@@ -64,6 +66,7 @@ export interface EarlyWhaleCandidate {
   webUrl?: string;
   tgUrl?: string;
   aiScore?: AiNarrativeScore;
+  learnedRisk?: LearnedEvaluationResult;
 }
 
 const ESTIMATED_SOL_PRICE_USD = 160.0;
@@ -439,6 +442,32 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
     const canonicalDexUrl = pair.url || (pair.pairAddress ? `https://dexscreener.com/solana/${pair.pairAddress}` : `https://dexscreener.com/solana/${mint}`);
     const fakeVolUsd = sec.analytics?.fakeVolume ?? Math.round(vol1h * 0.015);
     const fakeVolPct = vol1h > 0 ? Number(((fakeVolUsd / vol1h) * 100).toFixed(1)) : 1.5;
+    const devAddr = sec.analytics?.devAddress || mint;
+
+    // --- ADAPTIVE LOSS-LEARNING FEEDBACK EVALUATION ---
+    const learnedEval = evaluateCandidateAgainstLearnedPatterns({
+      tokenMint: mint,
+      tokenSymbol,
+      tokenName,
+      marketCap,
+      liquidityUsd,
+      devHoldingPct: devHolding,
+      top20Pct,
+      devAddress: devAddr,
+      webUrl: webSite,
+      xUrl: xSocial,
+      tgUrl: tgSocial,
+      buyPressurePct,
+      volume1h: vol1h,
+    });
+
+    if (!learnedEval.passed) {
+      console.log(`🛡️ [Adaptive Loss Learner] Blocked $${tokenSymbol} (Flop Risk: ${learnedEval.flopRiskScore}/100): ${learnedEval.rejectionReason}`);
+      continue; // REJECT candidate based on historical flop signature!
+    }
+
+    // Adjust potential score with learned affinity / flop risk weighting
+    const adjustedPotentialScore = Number((potentialScore + (learnedEval.runnerAffinityScore - learnedEval.flopRiskScore) * 0.25).toFixed(1));
 
     qualified.push({
       tokenMint: mint,
@@ -469,7 +498,7 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
       mintAuthorityRevoked: true,
       freezeAuthorityRevoked: true,
       lpBurnedOrLocked: true,
-      potentialScore,
+      potentialScore: adjustedPotentialScore,
       buyPressurePct,
       buys5m,
       sells5m,
@@ -483,7 +512,7 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
       sniperCount: sec.analytics?.sniperCount ?? 23,
       sniperInitialPct: sec.analytics?.sniperInitialPct ?? 38,
       sniperCurrentPct: sec.analytics?.sniperCurrentPct ?? 1.2,
-      devAddress: sec.analytics?.devAddress || mint,
+      devAddress: devAddr,
       devSolBalance: sec.analytics?.devSolBalance ?? 0,
       devHoldingPct: devHolding,
       devBundledPct: sec.analytics?.devBundledPct ?? 0,
@@ -493,6 +522,7 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
       xUrl: xSocial,
       webUrl: webSite,
       tgUrl: tgSocial,
+      learnedRisk: learnedEval,
     });
   }
 
@@ -634,7 +664,23 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
       // 2. Broadcast live event to connected Soul Web Terminals
       broadcastNewTrending(candidate);
 
-      // 3. Autonomous 1-Click / Auto-Snipe execution if enabled
+      // 3. Autonomous $100 Real-Market Paper Trading Engine
+      try {
+        await processPaperTradeBuy({
+          tokenMint: candidate.tokenMint,
+          tokenSymbol: candidate.tokenSymbol,
+          tokenName: candidate.tokenName,
+          priceUsd: candidate.priceUsd,
+          marketCap: candidate.marketCap,
+          liquidityUsd: candidate.liquidityUsd,
+          dexUrl: candidate.dexUrl,
+          imageUrl: candidate.imageUrl,
+        });
+      } catch (paperErr: any) {
+        console.warn('⚠️ Paper trading buy execution notice:', paperErr.message);
+      }
+
+      // 4. Autonomous 1-Click / Auto-Snipe execution if enabled
       try {
         const autoSnipePref = await getUserAutoSnipeConfig(env.TELEGRAM_CHAT_ID);
         if (autoSnipePref.autoSnipeEnabled && autoSnipePref.autoSnipeSolAmount > 0) {

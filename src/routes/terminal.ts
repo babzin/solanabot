@@ -315,4 +315,47 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       all: getAllPositions(),
     });
   });
+
+  /**
+   * Adaptive Loss-Learning Feedback Engine Telemetry API
+   */
+  fastify.get('/api/learner', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { getLearnedFlopMemory, getLearnedLossDashboard } = await import('../services/lossLearner.js');
+      return reply.send({
+        success: true,
+        memory: getLearnedFlopMemory(),
+        dashboardHtml: getLearnedLossDashboard(),
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Paper Trading Portfolio & Telemetry API ($100 Real-Market Fidelity)
+   */
+  fastify.get('/api/paper/portfolio', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { getPaperPortfolioSummary } = await import('../services/paperTrading.js');
+      const summary = await getPaperPortfolioSummary();
+      return reply.send(summary);
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Reset Paper Trading Wallet to $100.00
+   */
+  fastify.post('/api/paper/reset', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { resetPaperTradingWallet } = await import('../services/paperTrading.js');
+      const wallet = await resetPaperTradingWallet();
+      return reply.send({ success: true, wallet });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
 }
+

@@ -35,6 +35,7 @@ export interface SnipedPosition {
   realizedSolProfit: number;
   exitReason?: string;
   isSimulated: boolean;
+  firstUnderStopLossAt?: number;
 }
 
 // In-memory active positions registry (persists across trades during bot uptime)
@@ -372,8 +373,9 @@ export async function checkActivePositionsTpSl(
     };
   }
 
-  // 2. Trailing Stop-Loss on remaining Moonbag: If price falls 25% from peak
-  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= 25.0) {
+  // 2. Trailing Stop-Loss on remaining Moonbag: If price falls 40% from peak
+  // Allows 5X-20X runners breathing room for normal consolidation waves
+  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= 40.0) {
     console.log(`🛑 [TRAILING STOP-LOSS] $${pos.tokenSymbol} retraced -${dropFromPeakPct.toFixed(1)}% from peak. Liquidating remaining 50% moonbag...`);
 
     const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
@@ -399,30 +401,53 @@ export async function checkActivePositionsTpSl(
     };
   }
 
-  // 3. Capital Protection Stop-Loss: If un-profited token drops -25% from entry
-  if (pos.status === 'OPEN' && gainFromEntryPct <= -25.0) {
-    console.log(`🛡️ [CAPITAL PROTECTION SL] $${pos.tokenSymbol} dropped -25% from entry. Exiting immediately to prevent loss...`);
+  // 3. Smart Shakeout Capital Protection Stop-Loss on un-profited tokens
+  // - Emergency Rug Cut: If price collapses <= -65%, cut immediately with 0s delay
+  // - Standard Stop-Loss: If price dips <= -35%, initiate a 45-second wick confirmation buffer
+  if (pos.status === 'OPEN') {
+    const isEmergencyRug = gainFromEntryPct <= -65.0;
 
-    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
-    const solRecovered = sellRes.solAmount || (pos.solInvested * 0.75);
+    if (gainFromEntryPct <= -35.0) {
+      if (!pos.firstUnderStopLossAt) {
+        pos.firstUnderStopLossAt = Date.now();
+        console.log(
+          `⏳ [SNIPER SHAKEOUT DEFENSE] $${pos.tokenSymbol} dipped ${gainFromEntryPct.toFixed(1)}%. Initiating 45s confirmation buffer...`
+        );
+      }
 
-    pos.status = 'CLOSED';
-    pos.closedAt = Date.now();
-    pos.remainingTokens = 0;
-    pos.realizedSolProfit += solRecovered;
-    pos.exitReason = 'HARD_STOP_25';
+      const elapsedUnderSlMs = Date.now() - (pos.firstUnderStopLossAt || Date.now());
+      const isConfirmed = isEmergencyRug || elapsedUnderSlMs >= 45_000;
 
-    return {
-      position: pos,
-      action: 'HARD_STOP',
-      gainPercent: gainFromEntryPct,
-      solAmount: solRecovered,
-      message: `🛡️ <b>[CAPITAL PROTECTION STOP-LOSS]</b> ⚠️\n\n` +
-        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-        `📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry</b>\n` +
-        `💰 Action: <b>Emergency cut-loss execution</b>\n` +
-        `💵 SOL Preserved: <code>${solRecovered.toFixed(3)} SOL</code> (Protected ~75% of capital).`,
-    };
+      if (!isConfirmed) {
+        return null; // Hold through momentary micro-wick
+      }
+
+      console.log(`🛡️ [CAPITAL PROTECTION SL] $${pos.tokenSymbol} confirmed sustained breakdown (${gainFromEntryPct.toFixed(1)}%). Exiting to preserve capital...`);
+
+      const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
+      const solRecovered = sellRes.solAmount || (pos.solInvested * 0.65);
+
+      pos.status = 'CLOSED';
+      pos.closedAt = Date.now();
+      pos.remainingTokens = 0;
+      pos.realizedSolProfit += solRecovered;
+      pos.exitReason = isEmergencyRug ? 'EMERGENCY_RUG_CUT' : 'HARD_STOP_35';
+
+      return {
+        position: pos,
+        action: 'HARD_STOP',
+        gainPercent: gainFromEntryPct,
+        solAmount: solRecovered,
+        message: `🛡️ <b>[CAPITAL PROTECTION STOP-LOSS]</b> ⚠️\n\n` +
+          `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
+          `📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry (${isEmergencyRug ? 'Emergency Cut' : 'Sustained 45s Breakdown'})</b>\n` +
+          `💰 Action: <b>Cut-loss execution</b>\n` +
+          `💵 SOL Preserved: <code>${solRecovered.toFixed(3)} SOL</code> (Protected ~65% of capital).`,
+      };
+    } else if (pos.firstUnderStopLossAt) {
+      console.log(`🛡️ [SNIPER SHAKEOUT AVOIDED] $${pos.tokenSymbol} bounced back to ${gainFromEntryPct.toFixed(1)}%! Stop timer cleared.`);
+      pos.firstUnderStopLossAt = undefined;
+    }
   }
 
   return null;

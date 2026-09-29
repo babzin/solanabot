@@ -2,6 +2,7 @@ import axios from 'axios';
 import { env } from '../config/env.js';
 import { prisma } from './db.js';
 import { AiAuditResult, AiNarrativeScore } from '../types/index.js';
+import { getLearnedLossContextForCoPilot, getLearnedLossDashboard } from './lossLearner.js';
 
 /**
  * Robust JSON extraction helper that handles markdown code fences
@@ -537,6 +538,14 @@ function getSmartHeuristicAdvice(q: string, ctx: ComprehensiveTradingContext, ra
       `• US &amp; EU market overlap gives the cleanest follow-through and lowest risk of instant volume die-off.`;
   }
 
+  // Intent 2b: Adaptive Loss Learning Engine
+  if (
+    (q.includes('learn') || q.includes('feedback') || q.includes('adapt')) &&
+    (q.includes('how') || q.includes('does') || q.includes('bot') || q.includes('system') || q.includes('engine') || q.includes('pick') || q.includes('better'))
+  ) {
+    return getLearnedLossDashboard();
+  }
+
   // Intent 2: Avoiding Losses (e.g. yesterday's losses, flop prevention)
   if (
     q.includes('avoid') ||
@@ -1000,6 +1009,133 @@ async function callNeuralTrader(systemPrompt: string, userPrompt: string): Promi
 }
 
 /**
+ * Scrapes token's official website, social links, and on-chain metadata for rich narrative intelligence
+ */
+export async function fetchTokenWebAndSocialIntelligence(
+  websiteUrl?: string,
+  socials?: any[],
+  mint?: string
+): Promise<{
+  websiteUrl?: string;
+  websiteTitle?: string;
+  websiteDescription?: string;
+  websiteTextSnippet?: string;
+  twitterUrl?: string;
+  twitterHandle?: string;
+  telegramUrl?: string;
+  discordUrl?: string;
+  rawSummary?: string;
+}> {
+  let websiteTitle = '';
+  let websiteDescription = '';
+  let websiteTextSnippet = '';
+  let twitterUrl = '';
+  let twitterHandle = '';
+  let telegramUrl = '';
+  let discordUrl = '';
+
+  // 1. Parse Social Handles from DEX info
+  if (socials && Array.isArray(socials)) {
+    for (const s of socials) {
+      const url = s.url || '';
+      if (s.type === 'twitter' || url.includes('x.com') || url.includes('twitter.com')) {
+        twitterUrl = url;
+        const match = url.match(/(?:twitter\.com|x\.com)\/([A-Za-z0-9_]+)/i);
+        if (match) twitterHandle = `@${match[1]}`;
+      } else if (s.type === 'telegram' || url.includes('t.me')) {
+        telegramUrl = url;
+      } else if (s.type === 'discord' || url.includes('discord.gg') || url.includes('discord.com')) {
+        discordUrl = url;
+      }
+    }
+  }
+
+  // 2. Fetch Helius DAS Metadata Description if available
+  if (mint && env.HELIUS_API_KEY) {
+    try {
+      const url = `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;
+      const res = await axios.post(
+        url,
+        {
+          jsonrpc: '2.0',
+          id: 'helius_das',
+          method: 'getAsset',
+          params: { id: mint },
+        },
+        { timeout: 2500 }
+      );
+      const dasDesc = res.data?.result?.content?.metadata?.description;
+      if (dasDesc && typeof dasDesc === 'string' && dasDesc.trim().length > 0) {
+        websiteDescription = dasDesc.trim();
+      }
+    } catch {
+      // Helius DAS fallback gracefully ignored
+    }
+  }
+
+  // 3. Scrape Official Project Website in Real Time
+  if (websiteUrl) {
+    try {
+      const res = await axios.get(websiteUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeout: 4000,
+      });
+
+      const titleMatch = res.data.match(/<title[^>]*>(.*?)<\/title>/i);
+      if (titleMatch) websiteTitle = titleMatch[1].replace(/<[^>]+>/g, '').trim();
+
+      const descMatch =
+        res.data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
+        res.data.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i) ||
+        res.data.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) ||
+        res.data.match(/<meta[^>]*name=["']twitter:description["'][^>]*content=["']([^"']*)["']/i);
+      if (descMatch && descMatch[1]?.trim()) {
+        websiteDescription = descMatch[1].trim();
+      }
+
+      const bodyText = res.data
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      websiteTextSnippet = bodyText.slice(0, 1200);
+    } catch (err: any) {
+      console.warn(`[Website fetch notice for ${websiteUrl}]:`, err.message);
+    }
+  }
+
+  // 4. Build Structured Raw Summary
+  const summaryParts: string[] = [];
+  if (websiteUrl) summaryParts.push(`• Official Website: ${websiteUrl}`);
+  if (websiteTitle) summaryParts.push(`• Website Title: ${websiteTitle}`);
+  if (websiteDescription) summaryParts.push(`• Project Description / Tagline: "${websiteDescription}"`);
+  if (websiteTextSnippet) summaryParts.push(`• Scraped Site Text Preview:\n"${websiteTextSnippet.slice(0, 700)}..."`);
+  if (twitterHandle) summaryParts.push(`• Official Twitter/X: ${twitterHandle} (${twitterUrl})`);
+  if (telegramUrl) summaryParts.push(`• Official Telegram: ${telegramUrl}`);
+  if (discordUrl) summaryParts.push(`• Official Discord: ${discordUrl}`);
+
+  const rawSummary = summaryParts.length > 0 ? summaryParts.join('\n') : '• No official website or socials attached to DEX pair.';
+
+  return {
+    websiteUrl,
+    websiteTitle,
+    websiteDescription,
+    websiteTextSnippet,
+    twitterUrl,
+    twitterHandle,
+    telegramUrl,
+    discordUrl,
+    rawSummary,
+  };
+}
+
+/**
  * Universal Token Analytics: Looks up ANY Solana token by mint, ticker ($BONK), or name
  * and generates live on-chain stats, reasons to buy, and reasons NOT to buy.
  */
@@ -1058,6 +1194,13 @@ export async function lookupTokenAnalytics(query: string): Promise<AiAuditResult
     ageMinutes = Math.max(1, Math.round((Date.now() - pair.pairCreatedAt) / 60000));
   }
 
+  // 3. Fetch Real-time Web and Social Intelligence
+  const webNarrative = await fetchTokenWebAndSocialIntelligence(
+    pair?.info?.websites?.[0]?.url,
+    pair?.info?.socials,
+    mint
+  );
+
   const snipersCount = dbToken ? 12 : Math.min(45, Math.max(5, Math.round(volume24h / 5000)));
   const devHoldingPct = dbToken ? 2.5 : 3.0;
 
@@ -1090,7 +1233,12 @@ export async function lookupTokenAnalytics(query: string): Promise<AiAuditResult
   if (dbToken && dbToken.lastMilestonePct >= 50) {
     reasonsToBuy.push(`Bot-verified breakout runner (already confirmed +${dbToken.lastMilestonePct}% gain on radar).`);
   }
-  if (pair?.info?.socials && pair.info.socials.length >= 1) {
+  if (webNarrative.websiteDescription) {
+    reasonsToBuy.push(`Verified project concept: "${webNarrative.websiteDescription.slice(0, 80)}..."`);
+  }
+  if (webNarrative.twitterHandle) {
+    reasonsToBuy.push(`Active official Twitter/X presence (${webNarrative.twitterHandle}).`);
+  } else if (pair?.info?.socials && pair.info.socials.length >= 1) {
     reasonsToBuy.push(`Verified community presence on ${pair.info.socials.map((s: any) => s.type).join(' & ')}.`);
   }
   if (reasonsToBuy.length === 0) {
@@ -1154,6 +1302,7 @@ export async function lookupTokenAnalytics(query: string): Promise<AiAuditResult
     priceChange1h,
     volume24h,
     buyPressureRatio: buyRatio,
+    webNarrative,
   };
 }
 
@@ -1173,9 +1322,25 @@ export function renderTokenAnalyticsCard(audit: AiAuditResult): string {
   const buyLines = (audit.reasonsToBuy || ['Active trading liquidity on Solana DEX']).map((r) => `  • ${escapeHtml(r)}`).join('\n');
   const riskLines = (audit.reasonsNotToBuy || ['Always protect downside with a strict -25% stop-loss']).map((r) => `  • ${escapeHtml(r)}`).join('\n');
 
+  let webSocialLine = '';
+  const webParts: string[] = [];
+  if (audit.webNarrative?.websiteUrl) webParts.push(`<a href="${audit.webNarrative.websiteUrl}">Website</a>`);
+  if (audit.webNarrative?.twitterUrl) webParts.push(`<a href="${audit.webNarrative.twitterUrl}">Twitter ${audit.webNarrative.twitterHandle || ''}</a>`);
+  if (audit.webNarrative?.telegramUrl) webParts.push(`<a href="${audit.webNarrative.telegramUrl}">Telegram</a>`);
+  if (webParts.length > 0) {
+    webSocialLine = `🌐 <b>Socials & Web:</b> ${webParts.join(' • ')}\n`;
+  }
+  let descLine = '';
+  if (audit.webNarrative?.websiteDescription) {
+    descLine = `📝 <b>Concept:</b> <i>"${escapeHtml(audit.webNarrative.websiteDescription.slice(0, 140))}"</i>\n`;
+  }
+
   return `🔍 <b>TOKEN ANALYSIS: $${escapeHtml(audit.symbol)} (${escapeHtml(audit.name)})</b>\n` +
     `🏷️ <code>${audit.mint}</code>\n` +
-    `🏪 <b>DEX:</b> ${escapeHtml(audit.dexId || 'Raydium')} | ⏱️ <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m\n\n` +
+    `🏪 <b>DEX:</b> ${escapeHtml(audit.dexId || 'Raydium')} | ⏱️ <b>Age:</b> ${audit.onChainMetrics.ageMinutes}m\n` +
+    webSocialLine +
+    descLine +
+    `\n` +
     `📊 <b>Live Market Analytics:</b>\n` +
     `• 💰 <b>Price:</b> <code>${priceFmt}</code> (24h: <code>${changeFmt}</code>)\n` +
     `• 🏦 <b>Market Cap:</b> <code>${mcFmt}</code>\n` +
@@ -1246,6 +1411,94 @@ export async function predictTopGemsToBuy(): Promise<{ text: string, tokens: any
 }
 
 /**
+ * Synthesizes a deep, accurate Narrative & Social Alpha Breakdown for any token
+ * grounded in real-time scraped website, Twitter handle, and on-chain DEX data.
+ */
+export async function generateTokenNarrativeAlpha(audit: AiAuditResult, userQuestion: string): Promise<string> {
+  const webData = audit.webNarrative?.rawSummary || '• No website or socials attached.';
+
+  const prompt = `You are a sharp, veteran Solana memecoin and narrative researcher chatting directly with a fellow trader on Telegram.
+The user is asking: "${userQuestion}"
+
+Token: $${audit.symbol} (${audit.name})
+Mint: ${audit.mint}
+Market Cap: $${audit.onChainMetrics.marketCapUsd.toLocaleString()} | Price: $${audit.onChainMetrics.priceUsd} (24h: ${audit.priceChange24h || 0}%, 1h: ${audit.priceChange1h || 0}%)
+DEX: ${audit.dexId || 'Raydium'} | Age: ${audit.onChainMetrics.ageMinutes}m
+Liquidity: $${audit.onChainMetrics.liquidityUsd.toLocaleString()} | 24h Volume: $${audit.volume24h?.toLocaleString() || 0}
+Buy Pressure: ${audit.buyPressureRatio || 50}%
+
+LIVE INTERNET, WEBSITE & SOCIAL MEDIA DATA EXTRACTED IN REAL-TIME:
+${webData}
+
+Explain in rich, accurate detail:
+1. 📖 <b>The Lore & Meme Origin:</b> What is the authentic origin or reference? Is it an AI agent, internet cultural meme, pop culture trend, utility product, or degen parody? Give the exact context.
+2. 🚀 <b>The Core Narrative & Meta:</b> What is the token actually trying to do or represent? Why are buyers accumulating it (e.g. automated buybacks, fee share, AI trading, cult community)?
+3. 💬 <b>Social Sentiment & Community Vibe:</b> Reference the official Twitter/X handle ${audit.webNarrative?.twitterHandle || '(if available)'} and Telegram community sentiment.
+4. 💡 <b>Trader's Verdict:</b> Is this a sticky, multi-day runner with viral narrative legs, or a quick short-lived copycat? Give a clear, decisive takeaway.
+
+Tone & Rules:
+- Be completely human, punchy, conversational, and direct. Talk like an experienced trench trader on Telegram.
+- NEVER say "[NOVA // BRIEFING]", "Listen up", "Greetings", or corporate AI intros. Start immediately with the narrative breakdown.
+- Keep it concise, engaging, and readable on mobile (around 150-200 words).
+- Format strictly with Telegram HTML (<b>, <i>, <code>, <a>). Do NOT use Markdown asterisks or markdown links.`;
+
+  const neuralReply = await callNeuralTrader(prompt, userQuestion);
+  if (neuralReply) {
+    const linkItems: string[] = [];
+    if (audit.webNarrative?.websiteUrl) linkItems.push(`<a href="${audit.webNarrative.websiteUrl}">[Website]</a>`);
+    if (audit.webNarrative?.twitterUrl) linkItems.push(`<a href="${audit.webNarrative.twitterUrl}">[Twitter ${audit.webNarrative.twitterHandle || ''}]</a>`);
+    if (audit.webNarrative?.telegramUrl) linkItems.push(`<a href="${audit.webNarrative.telegramUrl}">[Telegram]</a>`);
+    linkItems.push(`<a href="${audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}`}">[DexScreener]</a>`);
+
+    let links = '';
+    if (linkItems.length > 0) {
+      links = `\n\n🔗 <b>Verified Links:</b> ${linkItems.join(' • ')}`;
+    }
+    return neuralReply + links;
+  }
+
+  // Fallback if AI provider is unavailable
+  return renderTokenAnalyticsCard(audit);
+}
+
+/**
+ * Accurately extracts a token symbol, mint address, or ticker from natural language trading questions
+ */
+export function extractTokenFromQuery(q: string): string | null {
+  // 1. Raw Solana Mint address (base58 32-44 characters)
+  const mintMatch = q.match(/\b([1-9A-HJ-NP-za-km-z]{32,44})\b/);
+  if (mintMatch) return mintMatch[1];
+
+  // 2. Explicit ticker with dollar sign: $BONK, $NPC
+  const tickerMatch = q.match(/\$([A-Za-z0-9_]{2,12})\b/);
+  if (tickerMatch) return tickerMatch[1];
+
+  // 3. Narrative/lore/about phrase: "narrative of NPC", "lore of BONK", "what is the narrative behind UNTXD"
+  const phraseMatch = q.match(/(?:narrative|lore|meme|concept|story|origin|background|whitepaper|about)\s+(?:of|on|behind|for|about)\s+(?:the\s+)?(?:\$)?([A-Za-z0-9_]{2,12})\b/i);
+  if (phraseMatch) return phraseMatch[1];
+
+  // 4. "what is <token> about"
+  const whatIsAboutMatch = q.match(/what(?:\s+is|\x27s)\s+(?:the\s+)?(?:\$)?([A-Za-z0-9_]{2,12})\s+about\b/i);
+  if (whatIsAboutMatch) return whatIsAboutMatch[1];
+
+  // 5. Common trading verbs: "tell me about <token>", "audit <token>", "check <token>", "opinion on <token>", "explain <token>"
+  const verbMatch = q.match(/(?:tell me about|check|audit|analyze|opinion on|think of|explain)\s+(?:the\s+)?(?:\$)?([A-Za-z0-9_]{2,12})\b/i);
+  if (verbMatch) return verbMatch[1];
+
+  // 6. Direct "what is <token>?"
+  const whatIsMatch = q.match(/what(?:\s+is|\x27s)\s+(?:the\s+)?(?:\$)?([A-Za-z0-9_]{2,12})(?:\?|\s|$)/i);
+  if (whatIsMatch) {
+    const candidate = whatIsMatch[1];
+    const nonTokens = ['narrative', 'lore', 'meme', 'concept', 'story', 'today', 'pnl', 'loss', 'profit', 'radar', 'bot', 'market', 'price', 'winner', 'flop', 'runner', 'gainers', 'good', 'best', 'our', 'sol', 'solana', 'usdc', 'usdt'];
+    if (!nonTokens.includes(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Interactive Trading Co-Pilot: Answers natural language questions, analyzes any token, and predicts good buys
  */
 export async function askTradingCoPilot(userQuestion: string): Promise<string> {
@@ -1261,16 +1514,27 @@ export async function askTradingCoPilot(userQuestion: string): Promise<string> {
     return text;
   }
 
-  // 2. Check if user is asking about a specific token (mint address, $TICKER, or "about <token>")
-  const mintMatch = userQuestion.match(/\b([1-9A-HJ-NP-za-km-z]{32,44})\b/);
-  const tickerMatch = userQuestion.match(/\$([A-Za-z0-9_]{2,12})\b/);
-  const aboutMatch = userQuestion.match(/\b(?:about|buy|analyze|audit|check|think of|opinion on|tell me on)\s+([A-Za-z0-9_]{2,10})\b/i);
+  // 1b. Check if user is asking about the Adaptive Loss-Learning Feedback Engine
+  const isLossLearningQuery =
+    /(learn|learning|loss|losses|flop|flops|memory|feedback loop|adapt|rugs)/i.test(q) &&
+    /(bot|engine|ai|system|how|does|pick|better|avoid|work|prevent)/i.test(q);
 
-  const tokenIdentifier = mintMatch ? mintMatch[1] : (tickerMatch ? tickerMatch[1] : (aboutMatch ? aboutMatch[1] : null));
+  if (isLossLearningQuery) {
+    return getLearnedLossDashboard();
+  }
 
-  if (tokenIdentifier && !['sol', 'solana', 'usdc', 'usdt'].includes(tokenIdentifier.toLowerCase())) {
+  // 2. Check if user is asking about a specific token (mint address, $TICKER, narrative of <token>, or "about <token>")
+  const tokenIdentifier = extractTokenFromQuery(userQuestion);
+
+  if (tokenIdentifier) {
     const audit = await lookupTokenAnalytics(tokenIdentifier);
     if (audit) {
+      const isNarrativeQuery = /(narrative|lore|meme|origin|about|what is|what's|background|story|concept|idea|why was|who created|culture|community|twitter|social|whitepaper)/i.test(q);
+
+      if (isNarrativeQuery) {
+        return generateTokenNarrativeAlpha(audit, userQuestion);
+      }
+
       const tokenPrompt = `You are an experienced, sharp Solana memecoin and DEX trader chatting directly with a fellow trader in Telegram.
 
 Tone & Personality:
@@ -1281,7 +1545,7 @@ Tone & Personality:
 - Keep it concise, punchy, and quick to read on mobile (under 160 words). Use clean bullet points.
 - Format using clean Telegram HTML (<b>, <code>, <i>, <a>). Do not use Markdown asterisks or backticks.
 
-Live On-Chain Data for $${audit.symbol} (${audit.name}):
+Live On-Chain & Web Narrative Data for $${audit.symbol} (${audit.name}):
 - Mint: ${audit.mint}
 - DEX: ${audit.dexId || 'Raydium'}
 - Price: $${audit.onChainMetrics.priceUsd} (24h: ${audit.priceChange24h || 0}%, 1h: ${audit.priceChange1h || 0}%)
@@ -1289,12 +1553,22 @@ Live On-Chain Data for $${audit.symbol} (${audit.name}):
 - Liquidity: $${audit.onChainMetrics.liquidityUsd.toLocaleString()}
 - 24h Volume: $${audit.volume24h?.toLocaleString() || 0}
 - Buy Pressure: ${audit.buyPressureRatio || 50}% buys in recent 5m transactions
+- Project Concept & Web Lore: ${audit.webNarrative?.websiteDescription || audit.score.thesis}
+- Official Socials: Twitter: ${audit.webNarrative?.twitterHandle || 'N/A'}, Telegram: ${audit.webNarrative?.telegramUrl || 'N/A'}, Website: ${audit.webNarrative?.websiteUrl || 'N/A'}
 - Reasons to Buy: ${audit.reasonsToBuy?.join('; ')}
 - Reasons NOT to Buy: ${audit.reasonsNotToBuy?.join('; ')}
 - Verdict: ${audit.recommendation} (Conviction: ${audit.score.convictionScore}/100)`;
 
       const reply = await callNeuralTrader(tokenPrompt, userQuestion);
-      if (reply) return reply;
+      if (reply) {
+        const linkItems: string[] = [];
+        if (audit.webNarrative?.websiteUrl) linkItems.push(`<a href="${audit.webNarrative.websiteUrl}">[Website]</a>`);
+        if (audit.webNarrative?.twitterUrl) linkItems.push(`<a href="${audit.webNarrative.twitterUrl}">[Twitter ${audit.webNarrative.twitterHandle || ''}]</a>`);
+        linkItems.push(`<a href="${audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}`}">[DexScreener]</a>`);
+        let links = '';
+        if (linkItems.length > 0) links = `\n\n🔗 ${linkItems.join(' • ')}`;
+        return reply + links;
+      }
       return renderTokenAnalyticsCard(audit);
     }
   }
@@ -1320,6 +1594,8 @@ GROUNDING DATA FROM LIVE SOLANA TRADING BOT DATABASE:
   • Net PnL: +${ctx.weeklyNetSolPnL} SOL (~$${Math.round(ctx.weeklyNetSolPnL * 160)} USD)
   • Capital Protected by Stop-Loss: approx +${ctx.stopLossSavingsSol} SOL
 - Active Metas: ${ctx.activeMetas.join(', ')}
+
+${getLearnedLossContextForCoPilot()}
 `.trim();
 
   const systemPrompt = `You are an experienced, sharp Solana memecoin and DEX trader chatting directly with a fellow trader in Telegram.

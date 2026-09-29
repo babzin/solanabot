@@ -234,5 +234,74 @@ export interface AiAuditResult {
   priceChange1h?: number;
   volume24h?: number;
   buyPressureRatio?: number;
+  webNarrative?: {
+    websiteUrl?: string;
+    websiteTitle?: string;
+    websiteDescription?: string;
+    websiteTextSnippet?: string;
+    twitterUrl?: string;
+    twitterHandle?: string;
+    telegramUrl?: string;
+    discordUrl?: string;
+    rawSummary?: string;
+  };
+}
+
+export interface LearnedEvaluationResult {
+  passed: boolean;
+  flopRiskScore: number; // 0 (safest) to 100 (highest flop probability)
+  runnerAffinityScore: number; // 0 to 100 (similarity to recent 5x-20x winners)
+  rejectionReason?: string;
+  penalties: string[];
+  bonuses: string[];
+  verdict: 'APPROVED' | 'CAUTION' | 'REJECTED_FLOP_SIGNATURE';
+  similarFlopToken?: string;
+  similarRunnerToken?: string;
+}
+
+export interface LearnedFlopMemory {
+  analyzedAt: string;
+  totalTokensAnalyzed: number;
+  totalFlops: number;
+  totalWinners: number;
+  flopRatePct: number;
+  winRatePct: number;
+  dangerZones: {
+    maxSafeEntryMarketCap: number;
+    minSafeLiquidityRatio: number;
+    maxSafeTop20Pct: number;
+    maxSafeDevHoldingPct: number;
+    requireWebsiteIfConcentrated: boolean;
+  };
+  blacklistedDevs: Array<{
+    address: string;
+    tokenSymbol: string;
+    dropPct: number;
+    blacklistedAt: string;
+  }>;
+  recentFlops: Array<{
+    tokenMint: string;
+    tokenSymbol: string;
+    tokenName: string;
+    dropPct: number;
+    entryMarketCap: number;
+    liquidityUsd: number;
+    devHoldingPct: number;
+    top20Pct: number;
+    hasWebsite: boolean;
+    hasTwitter: boolean;
+    primaryFlopReason: string;
+  }>;
+  recentWinners: Array<{
+    tokenMint: string;
+    tokenSymbol: string;
+    peakMultiplier: number;
+    entryMarketCap: number;
+    liquidityUsd: number;
+    hasWebsite: boolean;
+    hasTwitter: boolean;
+  }>;
+  actionableInsights: string[];
+  blockedSetupsToday: number;
 }
 
