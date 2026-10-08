@@ -241,9 +241,12 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const tradeSol = parseFloat(request.query?.tradeSol || '0.1') || 0.1;
       const { calculateWeeklyStats } = await import('../services/weeklyReport.js');
       const stats = await calculateWeeklyStats(offset, tradeSol);
+      if (!stats || stats.totalSignals === 0) {
+        return reply.send({ message: 'No report found', totalSignals: 0, stats: null });
+      }
       return reply.send(stats);
     } catch (err: any) {
-      return reply.code(500).send({ error: 'Failed to calculate weekly stats', details: err.message });
+      return reply.code(404).send({ error: 'No report found', details: err.message });
     }
   });
 
@@ -346,16 +349,13 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Reset Paper Trading Wallet to $100.00
+   * Reset Paper Trading Wallet (Disabled)
    */
   fastify.post('/api/paper/reset', async (_request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      const { resetPaperTradingWallet } = await import('../services/paperTrading.js');
-      const wallet = await resetPaperTradingWallet();
-      return reply.send({ success: true, wallet });
-    } catch (err: any) {
-      return reply.code(500).send({ success: false, error: err.message });
-    }
+    return reply.status(403).send({
+      success: false,
+      error: 'Paper account reset has been permanently disabled to preserve trade history and PnL integrity.',
+    });
   });
 }
 

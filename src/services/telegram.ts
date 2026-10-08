@@ -13,6 +13,7 @@ import {
   SnipedPosition,
 } from './sniper.js';
 import { broadcastPricePump, broadcastPriceDip } from './events.js';
+import { getTokensForDate, getActiveTrackedTokens, getTokensForPastDays } from './earlyTokenStore.js';
 
 export const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, {
   polling: {
@@ -284,9 +285,26 @@ export function renderEarlyTrendingCardText(token: any): string {
     lossDefenseSection = `\n🧠 <b>Loss-Defense:</b> Flop Risk <code>${risk}%</code> ${shieldEmoji} | Runner Match <code>${runner}%</code> 🎯`;
   }
 
+  let slmSection = '';
+  if (token.slmVerdict) {
+    const verdict = token.slmVerdict;
+    const isGo = verdict.viabilitySignal === 'GO';
+    const gateBadge = isGo ? '🟢 <b>GO (CONFIRMED)</b>' : '🔴 <b>NO_GO (TRADE BLOCKED)</b>';
+    const targets = Array.isArray(verdict.recommendedMultiples) && verdict.recommendedMultiples.length > 0
+      ? verdict.recommendedMultiples.map((m: number) => `${m}X`).join(' • ')
+      : '2X • 4X • 7X';
+    const trailing = verdict.trailingStopLossPct ?? 15;
+    const justSummary = escapeHtml(verdict.justificationSummary || verdict.verdictReason || '');
+
+    slmSection = `\n\n🛡️ <b>SLM Quality Gate:</b> ${gateBadge}\n` +
+      `📊 <b>Organic Hype:</b> <code>${verdict.organicHypeScore}/10</code> | <b>Narrative:</b> <code>${verdict.narrativeStrength}/10</code>\n` +
+      `🎯 <b>Ladder TP:</b> <code>${targets}</code> | <b>Trailing Stop:</b> <code>-${trailing}%</code>\n` +
+      `⚖️ <i>${justSummary}</i>`;
+  }
+
   return `
 🔥 <a href="${dexscreenerUrl}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
-🕒 <b>Age</b>: ${ageText} | <b>Security</b>: ✅
+🕒 <b>Age</b>: ${escapeHtml(ageText)} | <b>Security</b>: ✅
 🔗 ${linksLine}
 
 💰 <b>MC: ${mcStr}</b> • 🔝 ${peakStr}
@@ -303,7 +321,7 @@ ${row2}
 
 <a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
 ┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
-┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}${lossDefenseSection}
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}${lossDefenseSection}${slmSection}
 `.trim();
 }
 
@@ -345,8 +363,8 @@ export async function dispatchEarlyTrendingAlert(
     return;
   }
 
-  // Attempt photo alert with card as caption if imageUrl is present
-  if (candidate.imageUrl) {
+  // Attempt photo alert with card as caption if imageUrl is present and fits Telegram's 1024-character caption limit
+  if (candidate.imageUrl && message.length <= 1024) {
     try {
       await bot.sendPhoto(env.TELEGRAM_CHAT_ID, candidate.imageUrl, {
         caption: message,
@@ -355,7 +373,7 @@ export async function dispatchEarlyTrendingAlert(
       });
       return;
     } catch (photoErr: any) {
-      console.warn(`⚠️ Photo dispatch notice for ${candidate.tokenSymbol} (${photoErr.message}), falling back to text card...`);
+      // Fall through to full text card
     }
   }
 
@@ -498,7 +516,7 @@ export function initTelegramCommands(): void {
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
     { command: 'paper', description: '💼 $100 Paper Portfolio & Live PnL' },
-    { command: 'paper_reset', description: '🔄 Reset Paper Account to $100' },
+    { command: 'buy', description: '💼 Instant Paper Buy Any Solana Mint' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
@@ -507,6 +525,7 @@ export function initTelegramCommands(): void {
     { command: 'learner', description: '🧠 Adaptive Loss-Learning Feedback Engine' },
     { command: 'ask', description: '🤖 AI Trading Co-Pilot Q&A' },
     { command: 'audit', description: '🔍 AI Audit Any Token Mint or Ticker' },
+    { command: 'slm', description: '🛡️ SLM Quality Gate Sentiment Evaluator' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
     { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
     { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
@@ -542,6 +561,12 @@ export function initTelegramCommands(): void {
       const today = new Date().toISOString().slice(0, 10);
       dailyCoinCount = await prisma.earlyTrendingToken.count({ where: { alertDate: today } });
     } catch {}
+    if (dailyCoinCount === 0) {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        dailyCoinCount = (await getTokensForDate(today)).length;
+      } catch {}
+    }
 
     const welcome = `
 🔥 <b>Solana Early &amp; Whale Trending Radar (@solearlytrending)</b> 💵
@@ -626,12 +651,17 @@ export function initTelegramCommands(): void {
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-  // /paper or /portfolio or "💼 $100 Paper" button
-  bot.onText(/💼 \$100 Paper|\/paper|\/portfolio|Paper Trading|Paper Portfolio/i, async (msg) => {
+  // /paper or /portfolio or "💼 $100 Paper" button (supports /paper <mint or ticker>)
+  bot.onText(/💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
+    const target = match?.[1]?.trim();
+    if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
+      await handleUserSubmittedToken(msg.chat.id, target);
+      return;
+    }
     await handlePaperPortfolioCommand(msg.chat.id);
   });
 
-  // /paper_reset or /reset_paper
+  // /paper_reset or /reset_paper (Disabled)
   bot.onText(/\/paper_reset|\/reset_paper/i, async (msg) => {
     await handlePaperResetCommand(msg.chat.id);
   });
@@ -642,17 +672,17 @@ export function initTelegramCommands(): void {
   });
 
   // /top or /profits or "🏆 Top Gainers" button
-  bot.onText(/🏆 Top Gainers|\/top|\/profits|\/leaderboard|Top Early Trending|Top Gainer|Hall of Fame/i, async (msg) => {
+  bot.onText(/🏆 Top Gainers|\/top|\/profits|\/leaderboard|Top Early Trending|Top Gainer|Hall of Fame|^top gainers?$|^top$/i, async (msg) => {
     await handleTopCommand(msg.chat.id);
   });
 
   // /flops or /bad or "📉 Daily Flops" button
-  bot.onText(/📉 Daily Flops|\/flops|\/bad|\/flopped|\/dips|Bad Coin|Daily Flop/i, async (msg) => {
+  bot.onText(/📉 Daily Flops|\/flops|\/bad|\/flopped|\/dips|Bad Coin|Daily Flop|^daily flops?$|^flops?$/i, async (msg) => {
     await handleDailyFlopsCommand(msg.chat.id);
   });
 
   // /weekly or /week or "🗓️ Weekly Report"
-  bot.onText(/🗓️ Weekly Report|\/weekly|\/week|Weekly Report|Weekly Recap/i, async (msg) => {
+  bot.onText(/🗓️ Weekly Report|\/weekly|\/week|Weekly Report|Weekly Recap|^weekly report$|^weekly recap$|^weekly$/i, async (msg) => {
     await handleWeeklyReportCommand(msg.chat.id);
   });
 
@@ -765,8 +795,125 @@ export function initTelegramCommands(): void {
     }
   });
 
+  // /slm or /gate <mint or ticker>
+  bot.onText(/\/slm(?:\s+(.+))?|\/gate(?:\s+(.+))?/i, async (msg, match) => {
+    const query = (match?.[1] || match?.[2])?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        msg.chat.id,
+        '🛡️ <b>SLM Quality Gate Meme Coin Evaluator</b>\n\n' +
+          '<i>Autonomous community sentiment, bot-raid filtering &amp; velocity validation ($0.00 cost)</i>\n\n' +
+          '<b>Usage:</b>\n<code>/slm &lt;mintAddress or $TICKER&gt;</code>\n\n' +
+          '<b>Examples:</b>\n' +
+          '• <code>/slm BONK</code>\n' +
+          '• <code>/slm $WIF</code>\n' +
+          '• <code>/slm 7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump</code>',
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    const waitMsg = await bot.sendMessage(
+      msg.chat.id,
+      `🛡️ <i>Evaluating community sentiment, TG public previews, and on-chain velocity for <code>${escapeHtml(query)}</code>...</i>`,
+      { parse_mode: 'HTML' }
+    );
+
+    try {
+      const { lookupTokenAnalytics, evaluateSlmQualityGate } = await import('./aiIntelligence.js');
+      const audit = await lookupTokenAnalytics(query);
+
+      if (!audit) {
+        await bot.editMessageText(
+          `⚠️ <i>Could not find an active liquidity pool for "<b>${escapeHtml(query)}</b>". Provide the raw mint address.</i>`,
+          {
+            chat_id: msg.chat.id,
+            message_id: waitMsg.message_id,
+            parse_mode: 'HTML',
+          }
+        );
+        return;
+      }
+
+      const m = audit.onChainMetrics;
+      const vol1h = Math.round((audit.volume24h || 24000) / 24);
+      const verdict = await evaluateSlmQualityGate({
+        tokenSymbol: audit.symbol,
+        tokenName: audit.name || audit.symbol,
+        tokenMint: audit.mint,
+        ageMinutes: m?.ageMinutes || 5,
+        marketCap: m?.marketCapUsd || 50000,
+        liquidityUsd: m?.liquidityUsd || 15000,
+        volume1h: vol1h,
+        volume5m: Math.round(vol1h / 12),
+        buySellRatio: audit.buyPressureRatio || 1.5,
+        buys5m: 15,
+        sells5m: 10,
+        holderCount: 300,
+        devHoldingPct: m?.devHoldingPct ?? 0,
+        devSoldPct: m?.devHoldingPct === 0 ? 100 : 0,
+        twitterUrl: audit.webNarrative?.twitterUrl,
+        telegramUrl: audit.webNarrative?.telegramUrl,
+        websiteUrl: audit.webNarrative?.websiteUrl,
+        websiteTextSnippet: audit.webNarrative?.websiteTextSnippet,
+      });
+
+      const isGo = verdict.viabilitySignal === 'GO';
+      const signalBadge = isGo ? '🟢 <b>CONFIRMED (GO)</b>' : '🔴 <b>BLOCKED (NO_GO)</b>';
+      const targets = Array.isArray(verdict.recommendedMultiples) && verdict.recommendedMultiples.length > 0
+        ? verdict.recommendedMultiples.map((m: number) => `${m}X`).join(' • ')
+        : '2X • 4X • 7X';
+      const flagsText = verdict.riskFlags.length > 0
+        ? verdict.riskFlags.map((f: string) => `• ⚠️ ${escapeHtml(f)}`).join('\n')
+        : '• ✅ <i>No dev dump, bot raid, or manipulation flags detected</i>';
+
+      const card = `
+🛡️ <b>SLM Quality Gate:</b> <b>$${escapeHtml(audit.symbol)}</b>
+<i>Autonomous Community Sentiment &amp; Narrative Gatekeeper</i>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚦 <b>Viability Signal:</b> ${signalBadge}
+🔥 <b>Organic Hype Score:</b> <code>${verdict.organicHypeScore}/10</code> (bot raid filter)
+🧠 <b>Narrative Strength:</b> <code>${verdict.narrativeStrength}/10</code>
+🌊 <b>Volume Velocity:</b> <code>${verdict.volumeVelocityAlignment}/10</code>
+
+🎯 <b>Ladder TP Targets:</b> <code>${targets}</code>
+🛡️ <b>Moonbag Trailing Stop:</b> <code>-${verdict.trailingStopLossPct}%</code>
+
+💬 <b>Telegram Preview:</b> ${verdict.telegramAnalyzed ? '✅ Analyzed (Web Preview)' : '⚠️ None found'}
+🐦 <b>Twitter Handle:</b> ${verdict.twitterAnalyzed ? '✅ Verified Profile' : '⚠️ None found'}
+
+⚖️ <b>SLM Analytical Thesis:</b>
+<i>${escapeHtml(verdict.justificationSummary)}</i>
+
+🚩 <b>Guardrail Flags:</b>
+${flagsText}
+      `.trim();
+
+      await bot.editMessageText(card, {
+        chat_id: msg.chat.id,
+        message_id: waitMsg.message_id,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
+              { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
+            ],
+            [
+              { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
+              { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
+            ],
+          ],
+        },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ <i>SLM Gatekeeper notice: ${err.message}</i>`, { parse_mode: 'HTML' });
+    }
+  });
+
   // /predict or /gems or /recommend
-  bot.onText(/\/predict|\/gems|\/recommend|\/buy/i, async (msg) => {
+  bot.onText(/\/predict|\/gems|\/recommend/i, async (msg) => {
     const waitMsg = await bot.sendMessage(msg.chat.id, '🎯 <i>Analyzing live on-chain momentum, buy pressure & radar breakout signals...</i>', { parse_mode: 'HTML' });
     try {
       const { predictTopGemsToBuy } = await import('./aiIntelligence.js');
@@ -796,8 +943,28 @@ export function initTelegramCommands(): void {
     }
   });
 
+  // /buy or /submit or /trade <mint or ticker>
+  bot.onText(/\/buy(?:\s+(.+))?|\/submit(?:\s+(.+))?|\/trade(?:\s+(.+))?/i, async (msg, match) => {
+    const query = (match?.[1] || match?.[2] || match?.[3])?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `💼 <b>Instant Paper Trading Submission</b> ⚡\n\n` +
+          `Submit any Solana token to trade it immediately with paper money (regardless of SLM signal):\n` +
+          `<code>/buy &lt;mintAddress or $TICKER&gt;</code>\n\n` +
+          `<b>Examples:</b>\n` +
+          `• <code>/buy 7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump</code>\n` +
+          `• <code>/buy BONK</code>\n\n` +
+          `<i>Tip: You can also simply paste any Solana contract address directly into this chat!</i>`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+    await handleUserSubmittedToken(msg.chat.id, query);
+  });
+
   // /milestones or "📈 Price Milestones" button
-  bot.onText(/\/milestones|📈 Price Milestones|📈 Milestones|Price Milestone/i, async (msg) => {
+  bot.onText(/\/milestones|📈 Price Milestones|📈 Milestones|Price Milestone|^price milestones?$|^milestones?$/i, async (msg) => {
     await handlePriceMilestonesCommand(msg.chat.id);
   });
 
@@ -937,45 +1104,7 @@ export function initTelegramCommands(): void {
 
     // Check if the user pasted a raw Solana Mint address (base58 32-44 characters)
     if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(text)) {
-      const waitMsg = await bot.sendMessage(msg.chat.id, `🔍 <i>Running AI &amp; On-Chain Audit for <code>${text.slice(0, 8)}...</code></i>`, { parse_mode: 'HTML' });
-      try {
-        const { lookupTokenAnalytics, renderTokenAnalyticsCard } = await import('./aiIntelligence.js');
-        const audit = await lookupTokenAnalytics(text);
-
-        if (!audit) {
-          await bot.editMessageText(
-            `⚠️ <i>No active Solana liquidity pool found for mint <code>${text}</code> on DexScreener.</i>`,
-            { chat_id: msg.chat.id, message_id: waitMsg.message_id, parse_mode: 'HTML' }
-          );
-          return;
-        }
-
-        const auditCard = renderTokenAnalyticsCard(audit);
-
-        await bot.editMessageText(auditCard, {
-          chat_id: msg.chat.id,
-          message_id: waitMsg.message_id,
-          parse_mode: 'HTML',
-          disable_web_page_preview: true,
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
-                { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
-              ],
-              [
-                { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
-                { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
-              ],
-              [
-                { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-              ],
-            ],
-          },
-        });
-      } catch (err: any) {
-        await bot.sendMessage(msg.chat.id, `⚠️ <i>Audit error: ${err.message}</i>`, { parse_mode: 'HTML' });
-      }
+      await handleUserSubmittedToken(msg.chat.id, text);
       return;
     }
 
@@ -1364,17 +1493,25 @@ export function initTelegramCommands(): void {
 async function handleEarlyTrendingCommand(chatId: number | string, targetIndex?: number, messageIdToEdit?: number): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   try {
-    const tokens = await prisma.earlyTrendingToken.findMany({
-      where: { alertDate: today },
-      orderBy: { dailyQuotaIndex: 'asc' },
-    });
+    let tokens: any[] = [];
+    try {
+      tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: today },
+        orderBy: { dailyQuotaIndex: 'asc' },
+      });
+    } catch {}
+
+    if (!tokens || tokens.length === 0) {
+      tokens = await getTokensForDate(today);
+    }
 
     if (tokens.length === 0) {
       await bot.sendMessage(
         chatId,
         `💎 <b>Daily Coins (@solearlytrending Strategy)</b>\n\n` +
-          `No tokens have met the strict @solearlytrending criteria yet today.\n` +
-          `The engine scans DexScreener continuously and requires revoked mint/freeze, 100% burned/locked LP, and clean audits.`,
+          `⚠️ <b>No report found.</b>\n` +
+          `<i>No tokens have met the strict @solearlytrending criteria yet today (${today}).\n` +
+          `The engine scans DexScreener continuously and requires revoked mint/freeze, 100% burned/locked LP, and clean audits.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -1450,17 +1587,25 @@ async function handleEarlyTrendingCommand(chatId: number | string, targetIndex?:
  */
 async function handlePriceMilestonesCommand(chatId: number | string): Promise<void> {
   try {
-    const tokens = await prisma.earlyTrendingToken.findMany({
-      where: { status: 'ACTIVE' },
-      orderBy: { updatedAt: 'desc' },
-      take: 15,
-    });
+    let tokens: any[] = [];
+    try {
+      tokens = await prisma.earlyTrendingToken.findMany({
+        where: { status: 'ACTIVE' },
+        orderBy: { updatedAt: 'desc' },
+        take: 15,
+      });
+    } catch {}
+
+    if (!tokens || tokens.length === 0) {
+      tokens = await getActiveTrackedTokens();
+    }
 
     if (tokens.length === 0) {
       await bot.sendMessage(
         chatId,
-        `📈 <b>Price Milestone Trackers (Active: 0)</b>\n\n` +
-          `No tokens are currently in the active milestone tracking list.\n` +
+        `📈 <b>Price Milestone Trackers</b> 🎯\n\n` +
+          `⚠️ <b>No report found.</b>\n` +
+          `<i>No tokens are currently in active milestone tracking (+50% pumps / -50% dips).</i>\n\n` +
           `Whenever a daily gem is alerted, it is tracked in real-time for +50% pumps and -50% dips!`,
         {
           parse_mode: 'HTML',
@@ -1520,6 +1665,21 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
     });
   } catch (err: any) {
     console.warn('handlePriceMilestonesCommand error:', err.message);
+    await bot.sendMessage(
+      chatId,
+      `📈 <b>Price Milestone Trackers</b> 🎯\n\n` +
+        `⚠️ <b>No report found.</b>\n` +
+        `<i>No tokens are currently in active milestone tracking.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '💎 Daily Coins', callback_data: 'cmd_early' }],
+            [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+          ],
+        },
+      }
+    );
   }
 }
 
@@ -1639,9 +1799,17 @@ export function renderTopLeaderboardText(tokens: any[], dateStr?: string): strin
  */
 export async function handleTokenDeepLink(chatId: number | string, tokenMint: string): Promise<void> {
   try {
-    const token = await prisma.earlyTrendingToken.findUnique({
-      where: { tokenMint },
-    });
+    let token: any = null;
+    try {
+      token = await prisma.earlyTrendingToken.findUnique({
+        where: { tokenMint },
+      });
+    } catch {}
+
+    if (!token) {
+      const active = await getActiveTrackedTokens();
+      token = active.find((t) => t.tokenMint === tokenMint) || null;
+    }
 
     if (token) {
       const card = renderEarlyTrendingCardText(token);
@@ -1721,12 +1889,19 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
     const today = new Date().toISOString().slice(0, 10);
     const dateFormatted = formatDisplayDate(today);
 
-    // Strictly fetch today's alerted coins (no cross-day fallback)
-    let tokens = await prisma.earlyTrendingToken.findMany({
-      where: { alertDate: today },
-      orderBy: { lastMilestonePct: 'desc' },
-      take: 25,
-    });
+    // Strictly fetch today's alerted coins (with resilient fallback to token store)
+    let tokens: any[] = [];
+    try {
+      tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: today },
+        orderBy: { lastMilestonePct: 'desc' },
+        take: 25,
+      });
+    } catch {}
+
+    if (!tokens || tokens.length === 0) {
+      tokens = await getTokensForDate(today);
+    }
 
     // Sort by highest actual multiplier
     tokens.sort((a, b) => {
@@ -1739,12 +1914,20 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
       return multB - multA;
     });
 
-    if (tokens.length === 0) {
+    const gainers = tokens.filter((t) => {
+      const mult = t.peakPriceUsd && t.entryPriceUsd && t.entryPriceUsd > 0
+        ? t.peakPriceUsd / t.entryPriceUsd
+        : (1 + (t.lastMilestonePct || 0) / 100);
+      return mult > 1.0 || (t.lastMilestonePct && t.lastMilestonePct > 0);
+    });
+
+    if (tokens.length === 0 || gainers.length === 0) {
       await bot.sendMessage(
         chatId,
         `🏆 <b>Top Early Trending</b> 💸\n` +
           `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
-          `<i>No coins recorded yet for today (${today}). Background radar is actively scanning!</i>\n` +
+          `⚠️ <b>No report found.</b>\n` +
+          `<i>No top gainers recorded yet for today (${today}). Background radar is actively scanning!</i>\n` +
           `Tap <b>⚡ Scan Now</b> to run an immediate discovery cycle.`,
         {
           parse_mode: 'HTML',
@@ -1760,7 +1943,7 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
       return;
     }
 
-    const report = renderTopLeaderboardText(tokens.slice(0, 15), today);
+    const report = renderTopLeaderboardText(gainers.slice(0, 15), today);
 
     const inlineKeyboard = [
       [
@@ -1787,6 +1970,24 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
     });
   } catch (err: any) {
     console.warn('handleTopCommand error:', err.message);
+    const today = new Date().toISOString().slice(0, 10);
+    const dateFormatted = formatDisplayDate(today);
+    await bot.sendMessage(
+      chatId,
+      `🏆 <b>Top Early Trending</b> 💸\n` +
+        `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
+        `⚠️ <b>No report found.</b>\n` +
+        `<i>No top gainers recorded yet for today.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+          ],
+        },
+      }
+    );
   }
 }
 
@@ -1798,11 +1999,18 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
     const today = new Date().toISOString().slice(0, 10);
     const dateFormatted = formatDisplayDate(today);
 
-    // Strictly fetch today's alerted coins (no fallback to earlier days)
-    const tokens = await prisma.earlyTrendingToken.findMany({
-      where: { alertDate: today },
-      orderBy: { createdAt: 'desc' },
-    });
+    // Strictly fetch today's alerted coins (with resilient fallback to token store)
+    let tokens: any[] = [];
+    try {
+      tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: today },
+        orderBy: { createdAt: 'desc' },
+      });
+    } catch {}
+
+    if (!tokens || tokens.length === 0) {
+      tokens = await getTokensForDate(today);
+    }
 
     // Calculate drop and retracement metrics
     const flops = tokens
@@ -1831,10 +2039,10 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
     if (flops.length === 0) {
       await bot.sendMessage(
         chatId,
-        `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🟢\n` +
+        `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🩸\n` +
           `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
-          `<i>No coins have dumped today! All alerted gems for today (${today}) are holding strong or currently in profit.</i>\n\n` +
-          `Whenever an alerted coin drops &gt;20% or triggers a -50% retracement, it is automatically cataloged here.`,
+          `⚠️ <b>No report found.</b>\n` +
+          `<i>No flopped coins or dips recorded for today (${today}). All alerted gems are holding strong or currently in profit.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -1911,6 +2119,24 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
     });
   } catch (err: any) {
     console.warn('handleDailyFlopsCommand error:', err.message);
+    const today = new Date().toISOString().slice(0, 10);
+    const dateFormatted = formatDisplayDate(today);
+    await bot.sendMessage(
+      chatId,
+      `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🩸\n` +
+        `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
+        `⚠️ <b>No report found.</b>\n` +
+        `<i>No flopped coins or dips recorded for today.</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+          ],
+        },
+      }
+    );
   }
 }
 
@@ -1945,7 +2171,24 @@ export async function handleWeeklyReportCommand(chatId: number | string): Promis
     });
   } catch (err: any) {
     console.warn('handleWeeklyReportCommand error:', err.message);
-    await bot.sendMessage(chatId, `⚠️ <i>Could not generate weekly report: ${err.message}</i>`, { parse_mode: 'HTML' });
+    const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+    const headerLink = `https://t.me/${botUsername}`;
+    await bot.sendMessage(
+      chatId,
+      `🗓️ <a href="${headerLink}"><b>WEEKLY PERFORMANCE RECAP</b></a> 📊\n\n` +
+        `⚠️ <b>No report found.</b>\n` +
+        `<i>No alerted token signals or performance records found for this week.</i>`,
+      {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+          ],
+        },
+      }
+    );
   }
 }
 
@@ -2107,6 +2350,176 @@ async function handleSnipeStatus(chatId: number | string, userId: string, messag
 }
 
 /**
+ * Handles any user-submitted token (raw mint address or /buy /submit /paper command).
+ * Analyzes the coin, evaluates SLM Quality Gate, tracks in earlyTokenStore for pump/dump milestones,
+ * and INSTANTLY trades it using paper money regardless of whether SLM signal is GO or NO_GO!
+ */
+export async function handleUserSubmittedToken(chatId: number | string, query: string): Promise<void> {
+  const waitMsg = await bot.sendMessage(
+    chatId,
+    `⚡ <i>Analyzing <code>${escapeHtml(query)}</code> &amp; executing instant Paper Trade Buy...</i>`,
+    { parse_mode: 'HTML' }
+  );
+
+  try {
+    const {
+      lookupTokenAnalytics,
+      renderTokenAnalyticsCard,
+      evaluateSlmQualityGate,
+    } = await import('./aiIntelligence.js');
+    const { processPaperTradeBuy } = await import('./paperTrading.js');
+    const { saveAlertedToken } = await import('./earlyTokenStore.js');
+
+    const audit = await lookupTokenAnalytics(query);
+    if (!audit) {
+      await bot.editMessageText(
+        `⚠️ <i>Could not find an active Solana liquidity pool for "<b>${escapeHtml(query)}</b>" on DexScreener. Please verify the contract address or ticker.</i>`,
+        {
+          chat_id: chatId,
+          message_id: waitMsg.message_id,
+          parse_mode: 'HTML',
+        }
+      );
+      return;
+    }
+
+    // 1. Evaluate SLM Quality Gate Sentiment & Velocity
+    const m = audit.onChainMetrics;
+    const priceUsd = m?.priceUsd || 0.00005;
+    const marketCap = m?.marketCapUsd || 50000;
+    const liquidityUsd = m?.liquidityUsd || 15000;
+    const vol1h = Math.round((audit.volume24h || 24000) / 24);
+
+    const slmVerdict = await evaluateSlmQualityGate({
+      tokenSymbol: audit.symbol,
+      tokenName: audit.name || audit.symbol,
+      tokenMint: audit.mint,
+      ageMinutes: m?.ageMinutes || 5,
+      marketCap: marketCap,
+      liquidityUsd: liquidityUsd,
+      volume1h: vol1h,
+      volume5m: Math.round(vol1h / 12),
+      buySellRatio: audit.buyPressureRatio || 1.5,
+      buys5m: 15,
+      sells5m: 10,
+      holderCount: 300,
+      devHoldingPct: m?.devHoldingPct ?? 0,
+      devSoldPct: m?.devHoldingPct === 0 ? 100 : 0,
+      twitterUrl: audit.webNarrative?.twitterUrl,
+      telegramUrl: audit.webNarrative?.telegramUrl,
+      websiteUrl: audit.webNarrative?.websiteUrl,
+      websiteTextSnippet: audit.webNarrative?.websiteTextSnippet,
+    });
+
+    // 2. Persist in earlyTokenStore so PriceTracker monitors it every 30s for pump (+50%, 2X) & dump (-50%) milestones
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      await saveAlertedToken({
+        id: `user_sub_${Date.now()}_${audit.mint.slice(0, 4)}`,
+        tokenMint: audit.mint,
+        tokenSymbol: audit.symbol,
+        tokenName: audit.name,
+        pairAddress: audit.mint,
+        dexUrl: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}`,
+        xUrl: audit.webNarrative?.twitterUrl,
+        tgUrl: audit.webNarrative?.telegramUrl,
+        entryPriceUsd: priceUsd,
+        entryMarketCap: marketCap,
+        peakPriceUsd: priceUsd,
+        lowestPriceUsd: priceUsd,
+        lastAlertedPriceUsd: priceUsd,
+        lastMilestonePct: 0,
+        lastDipMilestonePct: 0,
+        status: 'ACTIVE',
+        alertDate: today,
+        dailyQuotaIndex: 0,
+        slmSignal: slmVerdict.viabilitySignal,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (storeErr: any) {
+      console.warn('⚠️ Token store notice on submission:', storeErr.message);
+    }
+
+    // 3. INSTANT PAPER TRADE BUY (trades instantly regardless of NO_GO)
+    let paperPos = null;
+    try {
+      paperPos = await processPaperTradeBuy(
+        {
+          tokenMint: audit.mint,
+          tokenSymbol: audit.symbol,
+          tokenName: audit.name,
+          priceUsd: priceUsd,
+          marketCap: marketCap,
+          liquidityUsd: liquidityUsd,
+          dexUrl: audit.dexUrl,
+          aiScore: audit.score,
+          slmVerdict,
+          forceBuy: true,
+        },
+        { forceBuy: true }
+      );
+    } catch (tradeErr: any) {
+      console.warn('⚠️ Error during instant paper trade buy:', tradeErr.message);
+    }
+
+    // 4. Construct rich Telegram confirmation response
+    const signalBadge = slmVerdict.viabilitySignal === 'GO'
+      ? '🟢 <b>CONFIRMED (GO)</b>'
+      : '🔴 <b>NO_GO (Traded with paper money anyway!)</b>';
+
+    let paperSection = '';
+    if (paperPos) {
+      paperSection = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💼 <b>[INSTANT PAPER BUY EXECUTED]</b> ✅
+• 💵 <b>Paper Capital Invested:</b> <code>$${paperPos.investedUsd.toFixed(2)} USD</code> (<code>${paperPos.investedSol.toFixed(4)} SOL</code>)
+• 💰 <b>Entry Price:</b> <code>$${paperPos.entryPriceUsd.toFixed(6)}</code>
+• 🪙 <b>Position Tokens:</b> <code>${formatTokenQuantity(paperPos.tokensAcquired)}</code>
+• 🛡️ <b>SLM Gate Verdict:</b> ${signalBadge}
+• 🎯 <b>Take-Profit Target:</b> <code>+100% (2X Moonbag)</code>
+• 🛑 <b>Trailing Stop-Loss:</b> <code>-40% from peak</code>
+• 📊 <b>Status:</b> 🟢 Active Tracking (${paperPos.strategyProfile})
+`;
+    } else {
+      paperSection = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💼 <b>[PAPER POSITION ACTIVE]</b>
+• Token is already open and tracked in your paper portfolio!
+`;
+    }
+
+    const auditCard = renderTokenAnalyticsCard(audit);
+    const fullMessage = `${paperSection}\n${auditCard}`.trim();
+
+    await bot.editMessageText(fullMessage, {
+      chat_id: chatId,
+      message_id: waitMsg.message_id,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: `📊 Chart $${audit.symbol}`, url: audit.dexUrl || `https://dexscreener.com/solana/${audit.mint}` },
+            { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
+          ],
+          [
+            { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+            { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+          ],
+          [
+            { text: '⚡ Snipe 0.1 SOL (Real)', callback_data: `snipe_quick_0.1_${audit.mint}` },
+            { text: '⚡ Snipe 0.5 SOL (Real)', callback_data: `snipe_quick_0.5_${audit.mint}` },
+          ],
+        ],
+      },
+    });
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `⚠️ <i>Submission error: ${err.message}</i>`, { parse_mode: 'HTML' });
+  }
+}
+
+/**
  * Handles /paper and /portfolio command displaying live $100 bankroll & active positions
  */
 export async function handlePaperPortfolioCommand(chatId: number | string): Promise<void> {
@@ -2155,7 +2568,8 @@ ${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)}
         { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
       ],
       [
-        { text: '🔄 Reset Paper Account to $100', callback_data: 'cmd_paper_reset' },
+        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       ],
     ];
 
@@ -2170,25 +2584,18 @@ ${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)}
 }
 
 /**
- * Handles /paper_reset command resetting the paper trading account to pristine $100
+ * Informs the user that /paper_reset has been permanently disabled
  */
 export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
-  try {
-    const { resetPaperTradingWallet } = await import('./paperTrading.js');
-    const w = await resetPaperTradingWallet();
-    await bot.sendMessage(
-      chatId,
-      `🔄 <b>[PAPER TRADING RESET SUCCESSFUL]</b> ✅\n\n` +
-        `Your paper trading portfolio has been reset to <b>$100.00 USD</b> pristine capital!\n` +
-        `• 💵 Liquid Balance: <code>$100.00 USD</code> (${w.liquidCashSol} SOL)\n` +
-        `• 🎯 Allocation: <code>3% compounding per trade ($${w.tradeSizeUsd.toFixed(2)})</code> (Up to ${w.maxConcurrentPositions} positions)\n` +
-        `• 🛡️ Trailing Stop-Loss: Active at -40% from peak (-35% SL with 45s buffer)\n\n` +
-        `<i>Ready to capture the next live market runner!</i>`,
-      { parse_mode: 'HTML' }
-    );
-  } catch (err: any) {
-    await bot.sendMessage(chatId, `⚠️ Failed to reset paper portfolio: ${err.message}`);
-  }
+  await bot.sendMessage(
+    chatId,
+    `🔒 <b>[PAPER ACCOUNT RESET PERMANENTLY DISABLED]</b>\n\n` +
+      `Paper account reset has been disabled to preserve your historical trade records, cumulative PnL, win-rate metrics, and streak analytics!\n\n` +
+      `• All closed trades remain permanently archived.\n` +
+      `• Liquid capital auto-replenishes as positions hit TP (+100%) or Trailing Stop-Loss.\n\n` +
+      `<i>Your $100 bankroll will continue compounding naturally from live trading performance.</i>`,
+    { parse_mode: 'HTML' }
+  );
 }
 
 

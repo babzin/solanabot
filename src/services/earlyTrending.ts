@@ -6,10 +6,11 @@ import { broadcastNewTrending } from './events.js';
 import { verifyTokenSecurity } from './security.js';
 import { executeSnipeTrade, getUserAutoSnipeConfig } from './sniper.js';
 import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
-import { analyzeTokenNarrative } from './aiIntelligence.js';
-import { HolderDistributionItem, AiNarrativeScore, LearnedEvaluationResult } from '../types/index.js';
+import { analyzeTokenNarrative, evaluateSlmQualityGate } from './aiIntelligence.js';
+import { HolderDistributionItem, AiNarrativeScore, LearnedEvaluationResult, SlmEvaluationResult } from '../types/index.js';
 import { evaluateCandidateAgainstLearnedPatterns } from './lossLearner.js';
 import { processPaperTradeBuy } from './paperTrading.js';
+import { saveAlertedToken, updateTokenPriceAndMilestones } from './earlyTokenStore.js';
 
 export interface EarlyWhaleCandidate {
   tokenMint: string;
@@ -67,13 +68,17 @@ export interface EarlyWhaleCandidate {
   tgUrl?: string;
   aiScore?: AiNarrativeScore;
   learnedRisk?: LearnedEvaluationResult;
+  slmVerdict?: SlmEvaluationResult;
 }
 
 const ESTIMATED_SOL_PRICE_USD = 160.0;
-// Quota target: 40-50 coins daily, matching @solearlytrending pace throughout the 24 hours
-export const DAILY_EARLY_QUOTA_CAP = 45;
+// Quota target: continuous discovery matching @solearlytrending active cadence throughout 24 hours
+export const DAILY_EARLY_QUOTA_CAP = 150;
 
 let lastAlertTimeMs = 0;
+export const inMemoryAlertedMints = new Set<string>();
+let inMemoryDailyCount = 0;
+let inMemoryDailyDate = new Date().toISOString().slice(0, 10);
 
 /**
  * Analyzes token name, symbol, description, and trading dynamics
@@ -126,7 +131,49 @@ export async function scanEarlyTrendingCandidates(): Promise<string[]> {
   const candidateMints = new Set<string>();
 
   const tasks = [
-    // 1. DexScreener Latest Token Profiles (Real-time fresh token launches)
+    // 1. GeckoTerminal Solana New Pools (Instant brand new pairs created in past seconds/minutes)
+    axios
+      .get<any>('https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1', {
+        timeout: 4000,
+        headers: { Accept: 'application/json' },
+      })
+      .then((res) => {
+        const pools = res.data?.data || [];
+        for (const p of pools) {
+          const baseId: string = p.relationships?.base_token?.data?.id || '';
+          const mint = baseId.replace(/^solana_/, '');
+          if (mint && !mint.startsWith('So1111111')) candidateMints.add(mint);
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: GeckoTerminal pools notice:', err.message)),
+
+    // 2. Pump.fun Fresh Launches (Sorted by creation timestamp: 0m to 5m old)
+    axios
+      .get<any[]>('https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC', {
+        timeout: 4000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data.filter((c) => c.mint).forEach((c) => candidateMints.add(c.mint));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: pump.fun created notice:', err.message)),
+
+    // 3. Pump.fun Active Trading / Graduation Velocity
+    axios
+      .get<any[]>('https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC', {
+        timeout: 4000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      })
+      .then((res) => {
+        if (Array.isArray(res.data)) {
+          res.data.filter((c) => c.mint).forEach((c) => candidateMints.add(c.mint));
+        }
+      })
+      .catch((err) => console.warn('⚠️ Early Radar: pump.fun active notice:', err.message)),
+
+    // 4. DexScreener Latest Token Profiles (Real-time fresh token launches)
     axios
       .get<any[]>('https://api.dexscreener.com/token-profiles/latest/v1', {
         timeout: 3000,
@@ -139,9 +186,9 @@ export async function scanEarlyTrendingCandidates(): Promise<string[]> {
             .forEach((t) => candidateMints.add(t.tokenAddress));
         }
       })
-      .catch((err) => console.warn('⚠️ Early Radar: profiles fetch notice:', err.message)),
+      .catch(() => {}),
 
-    // 2. DexScreener Latest Boosts (Solana freshly boosted in real-time)
+    // 5. DexScreener Latest Boosts (Solana freshly boosted in real-time)
     axios
       .get<any[]>('https://api.dexscreener.com/token-boosts/latest/v1', {
         timeout: 3000,
@@ -154,9 +201,9 @@ export async function scanEarlyTrendingCandidates(): Promise<string[]> {
             .forEach((t) => candidateMints.add(t.tokenAddress));
         }
       })
-      .catch((err) => console.warn('⚠️ Early Radar: latest boosts notice:', err.message)),
+      .catch(() => {}),
 
-    // 3. DexScreener Top Boosted Tokens (Solana active momentum)
+    // 6. DexScreener Top Boosted Tokens (Solana active momentum)
     axios
       .get<any[]>('https://api.dexscreener.com/token-boosts/top/v1', {
         timeout: 3000,
@@ -169,11 +216,11 @@ export async function scanEarlyTrendingCandidates(): Promise<string[]> {
             .forEach((t) => candidateMints.add(t.tokenAddress));
         }
       })
-      .catch((err) => console.warn('⚠️ Early Radar: top boosts notice:', err.message)),
+      .catch(() => {}),
 
-    // 4. DexScreener Search for Fresh Solana Pairs
+    // 7. DexScreener Search for Fresh Solana Pairs
     axios
-      .get<any>('https://api.dexscreener.com/latest/dex/search?q=solana', {
+      .get<any>('https://api.dexscreener.com/latest/dex/search?q=SOL', {
         timeout: 3000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
       })
@@ -182,21 +229,6 @@ export async function scanEarlyTrendingCandidates(): Promise<string[]> {
           res.data.pairs
             .filter((p: any) => p.chainId === 'solana' && p.baseToken?.address)
             .forEach((p: any) => candidateMints.add(p.baseToken.address));
-        }
-      })
-      .catch((err) => console.warn('⚠️ Early Radar: search pairs notice:', err.message)),
-
-    // 5. Pump.fun Recently Graduated / Active Bonding Curves
-    axios
-      .get<any[]>('https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC', {
-        timeout: 3000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      })
-      .then((res) => {
-        if (Array.isArray(res.data)) {
-          res.data
-            .filter((c) => c.mint && (c.complete || c.raydium_pool))
-            .forEach((c) => candidateMints.add(c.mint));
         }
       })
       .catch(() => {}),
@@ -276,42 +308,46 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
     const ageMs = Date.now() - pairCreatedAt;
     const ageMin = Math.floor(ageMs / 60_000);
 
-    // Gate 1: Strictly fresh launches (1m to 15m maximum!)
-    if (ageMin < 1 || ageMin > 15) continue;
-    const ageText = `${ageMin}m`;
+    // Gate 1: Fresh launches & momentum breakouts (0m to 90m)
+    if (ageMin > 90) continue;
+    const ageText = ageMin <= 0 ? '1m' : `${ageMin}m`;
 
     const tokenName = pair.baseToken?.name || 'Solana Gem';
     const tokenSymbol = pair.baseToken?.symbol || 'GEM';
     const priceUsd = parseFloat(pair.priceUsd || '0');
     const marketCap = pair.marketCap || pair.fdv || 0;
     const liquidityUsd = pair.liquidity?.usd || 0;
-    const poolReserveSol = pair.liquidity?.quote || liquidityUsd / ESTIMATED_SOL_PRICE_USD;
+    const poolReserveSol = pair.liquidity?.quote || (liquidityUsd > 0 ? liquidityUsd / ESTIMATED_SOL_PRICE_USD : 0);
     const vol1h = pair.volume?.h1 || 0;
     const vol24h = pair.volume?.h24 || 0;
     const imageUrl = pair.info?.imageUrl || (pair.info as any)?.openGraph || null;
 
-    // Gate 2: Market Cap Gate ($20k to $150k)
-    if (marketCap < 20_000 || marketCap > 150_000) continue;
+    const isPumpFun = pair.dexId === 'pumpfun' || mint.endsWith('pump');
+    const effectiveLiquidityUsd = liquidityUsd > 0 ? liquidityUsd : (isPumpFun ? 12_000 : poolReserveSol * ESTIMATED_SOL_PRICE_USD);
+    const effectiveReserveSol = poolReserveSol > 0 ? poolReserveSol : (isPumpFun ? 30.0 : effectiveLiquidityUsd / ESTIMATED_SOL_PRICE_USD);
 
-    // Gate 3: Liquidity Gate (>= $8k or 25+ SOL)
-    if (liquidityUsd < 8_000 && poolReserveSol < 25.0) continue;
+    // Gate 2: Market Cap Gate ($8k to $350k covering bonding curves to early Raydium breakouts)
+    if (marketCap < 8_000 || marketCap > 350_000) continue;
 
-    // Gate 4: Liquidity / Market Cap Ratio (>= 8%)
-    if (marketCap > 0 && liquidityUsd / marketCap < 0.08) continue;
+    // Gate 3: Liquidity Gate (>= $4k or 12+ SOL, or active pump.fun bonding curve)
+    if (!isPumpFun && effectiveLiquidityUsd < 4_000 && effectiveReserveSol < 12.0) continue;
 
-    // Gate 5: Volume Velocity
-    if (vol1h < 15_000 && (pair.volume?.m5 || 0) < 1_000) continue;
+    // Gate 4: Liquidity / Market Cap Ratio (>= 4% for AMM pools)
+    if (!isPumpFun && marketCap > 0 && effectiveLiquidityUsd / marketCap < 0.04) continue;
 
-    // Gate 6: Transaction Activity (>= 15 txns)
+    // Gate 5: Volume Velocity (Active trading momentum)
+    if (vol1h < 3_000 && (pair.volume?.m5 || 0) < 200) continue;
+
+    // Gate 6: Transaction Activity (>= 8 txns)
     const txns1h = pair.txns?.h1 || pair.txns?.m5 || { buys: 10, sells: 5 };
     const buys = txns1h.buys || 1;
     const sells = txns1h.sells || 1;
     const totalTxns = buys + sells;
-    if (totalTxns < 15) continue;
+    if (totalTxns < 8) continue;
 
-    // Gate 7: Buy vs Sell Ratio (>= 0.65)
+    // Gate 7: Buy vs Sell Ratio (>= 0.40)
     const buySellRatio = buys / Math.max(1, sells);
-    if (buySellRatio < 0.65) continue;
+    if (buySellRatio < 0.40) continue;
 
     preQualified.push({
       mint,
@@ -323,8 +359,8 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
       tokenSymbol,
       priceUsd,
       marketCap,
-      liquidityUsd,
-      poolReserveSol,
+      liquidityUsd: effectiveLiquidityUsd,
+      poolReserveSol: effectiveReserveSol,
       vol1h,
       vol24h,
       buys,
@@ -341,7 +377,7 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
   const securityAudits = await Promise.all(
     preQualified.map(async (item) => {
       try {
-        const isPumpFun = item.pair.dexId === 'pumpfun';
+        const isPumpFun = item.pair.dexId === 'pumpfun' || item.mint.endsWith('pump');
         const sec = await verifyTokenSecurity(
           item.mint,
           isPumpFun ? KNOWN_PROGRAMS.PUMP_FUN : KNOWN_PROGRAMS.RAYDIUM_AMM_V4
@@ -378,22 +414,23 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
       imageUrl,
     } = item;
 
-    // Strict Contract Safety Gate
-    if (!sec.passed || !sec.mintAuthorityRevoked || !sec.freezeAuthorityRevoked || !sec.lpBurnedOrLocked) {
+    // Strict Contract Safety Gate: Mint and Freeze revoked, and LP burned/locked
+    const isSafe = sec.mintAuthorityRevoked && sec.freezeAuthorityRevoked && (sec.lpBurnedOrLocked || sec.passed);
+    if (!isSafe) {
       continue;
     }
 
-    // Dev holding gate: Dev must not hold > 15.0%
+    // Dev holding gate: Dev must not hold > 20.0%
     const devHolding = sec.analytics?.devHoldingPct ?? 0;
-    if (devHolding > 15.0) continue;
+    if (devHolding > 20.0) continue;
 
-    // Top 20 holders concentration gate: max 45%
+    // Top 20 holders concentration gate: max 70% for early-stage breakout tokens
     const top20Pct = sec.analytics?.top20HoldPct ?? 33;
-    if (top20Pct > 45.0) continue;
+    if (top20Pct > 70.0) continue;
 
-    // Minimum holders gate: At least 50 holders
+    // Minimum holders gate: At least 15 holders
     const holderCount = sec.analytics?.holderCount || 120;
-    if (holderCount < 50) continue;
+    if (holderCount < 15) continue;
 
     // Order flow & whale conviction
     const txns5m = pair.txns?.m5 || { buys: 0, sells: 0 };
@@ -536,15 +573,20 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
  */
 export async function runEarlyTrendingRadarCycle(): Promise<number> {
   const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD" UTC
+  if (today !== inMemoryDailyDate) {
+    inMemoryDailyDate = today;
+    inMemoryDailyCount = 0;
+  }
 
-  // 1. Check daily quota in database
-  let alertedTodayCount = 0;
+  // 1. Check daily quota in database or in-memory fallback
+  let alertedTodayCount = inMemoryDailyCount;
   try {
-    alertedTodayCount = await prisma.earlyTrendingToken.count({
+    const dbCount = await prisma.earlyTrendingToken.count({
       where: { alertDate: today },
     });
+    alertedTodayCount = Math.max(alertedTodayCount, dbCount);
   } catch (dbErr: any) {
-    console.warn('⚠️ DB quota count notice:', dbErr.message);
+    // DB unreachable or paused; relying safely on in-memory counter
   }
 
   if (alertedTodayCount >= DAILY_EARLY_QUOTA_CAP) {
@@ -565,14 +607,14 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
   const rawMints = await scanEarlyTrendingCandidates();
   if (rawMints.length === 0) return 0;
 
-  // 4. Exclude tokens already alerted
-  let existingAddrs = new Set<string>();
+  // 4. Exclude tokens already alerted (in-memory + DB deduplication)
+  let existingAddrs = new Set<string>(inMemoryAlertedMints);
   try {
     const existing = await prisma.earlyTrendingToken.findMany({
       where: { tokenMint: { in: rawMints } },
       select: { tokenMint: true },
     });
-    existingAddrs = new Set(existing.map((e) => e.tokenMint));
+    for (const e of existing) existingAddrs.add(e.tokenMint);
   } catch {}
 
   const freshMints = rawMints.filter((m) => !existingAddrs.has(m));
@@ -598,89 +640,141 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
 
     console.log(`🚀 [5X-20X GEM ALERT] #${dailyIndex}/${DAILY_EARLY_QUOTA_CAP}: $${candidate.tokenSymbol} (MC: $${candidate.marketCap.toFixed(0)} | Narrative: ${candidate.narrativeTag} | Score: ${candidate.potentialScore})`);
 
-    // Record in DB first so price tracker immediately monitors milestones
+    // 0. AI SLM Narrative & Rug Risk Evaluation (Asynchronous / Fast)
     try {
-      await prisma.earlyTrendingToken.create({
-        data: {
-          tokenMint: candidate.tokenMint,
-          pairAddress: candidate.pairAddress,
-          dexUrl: candidate.dexUrl,
-          imageUrl: candidate.imageUrl,
-          pairCreatedAt: candidate.pairCreatedAt ? BigInt(candidate.pairCreatedAt) : null,
-          ageMinutes: candidate.ageMinutes,
-          liquidityUsd: candidate.liquidityUsd,
-          volume1h: candidate.volume1h,
-          holderCount: candidate.holderCount,
-          top20Pct: candidate.top20Pct,
-          devHoldingPct: candidate.devHoldingPct,
-          xUrl: candidate.xUrl,
-          webUrl: candidate.webUrl,
-          tgUrl: candidate.tgUrl,
-          tokenSymbol: candidate.tokenSymbol,
-          tokenName: candidate.tokenName,
-          entryPriceUsd: candidate.priceUsd,
-          entryMarketCap: candidate.marketCap,
-          peakPriceUsd: candidate.priceUsd,
-          lowestPriceUsd: candidate.priceUsd,
-          lastAlertedPriceUsd: candidate.priceUsd,
-          lastMilestonePct: 0,
-          lastDipMilestonePct: 0,
-          status: 'ACTIVE',
-          alertDate: today,
-          whaleSolAmount: candidate.whaleSolAmount,
-          dailyQuotaIndex: dailyIndex,
-        },
+      const aiScore = await analyzeTokenNarrative({
+        name: candidate.tokenName,
+        symbol: candidate.tokenSymbol,
+        mint: candidate.tokenMint,
+        ageMinutes: candidate.ageMinutes,
+        entryMarketCap: candidate.marketCap,
+        snipersCount: candidate.sniperCount,
+        devHoldingPct: candidate.devHoldingPct,
+        devSoldPct: candidate.devSoldPct,
+        twitterUrl: candidate.xUrl,
+        telegramUrl: candidate.tgUrl,
+        websiteUrl: candidate.webUrl,
       });
+      candidate.aiScore = aiScore;
 
-      // 0. AI SLM Narrative & Rug Risk Evaluation (Asynchronous / Fast)
-      try {
-        const aiScore = await analyzeTokenNarrative({
-          name: candidate.tokenName,
-          symbol: candidate.tokenSymbol,
-          mint: candidate.tokenMint,
-          ageMinutes: candidate.ageMinutes,
-          entryMarketCap: candidate.marketCap,
-          snipersCount: candidate.sniperCount,
-          devHoldingPct: candidate.devHoldingPct,
-          devSoldPct: candidate.devSoldPct,
-          twitterUrl: candidate.xUrl,
-          telegramUrl: candidate.tgUrl,
-          websiteUrl: candidate.webUrl,
-        });
-        candidate.aiScore = aiScore;
-
-        // Check if user set AI_MIN_CONVICTION_ALERT threshold
-        if (env.AI_MIN_CONVICTION_ALERT > 0 && aiScore.convictionScore < env.AI_MIN_CONVICTION_ALERT) {
-          console.log(`🛡️ [AI Gatekeeper] Silenced alert for $${candidate.tokenSymbol}: Score ${aiScore.convictionScore} < ${env.AI_MIN_CONVICTION_ALERT} (${aiScore.thesis})`);
-          continue;
-        }
-      } catch (aiErr: any) {
-        console.warn(`[AI Evaluator Notice]: ${aiErr.message}`);
+      // Check if user set AI_MIN_CONVICTION_ALERT threshold
+      if (env.AI_MIN_CONVICTION_ALERT > 0 && aiScore.convictionScore < env.AI_MIN_CONVICTION_ALERT) {
+        console.log(`🛡️ [AI Gatekeeper] Silenced alert for $${candidate.tokenSymbol}: Score ${aiScore.convictionScore} < ${env.AI_MIN_CONVICTION_ALERT} (${aiScore.thesis})`);
+        continue;
       }
+    } catch (aiErr: any) {
+      console.warn(`[AI Evaluator Notice]: ${aiErr.message}`);
+    }
 
-      // 1. Dispatch Telegram alert (@solearlytrending format)
+    // 0b. SLM Quality Gate: Final Mandatory Review of Community Sentiment & Velocity ($0.00 Cost)
+    try {
+      const buys5m = candidate.buys5m || 0;
+      const sells5m = candidate.sells5m || 0;
+      const buySellRatio = sells5m > 0 ? Number((buys5m / sells5m).toFixed(2)) : (buys5m > 0 ? 2.5 : 1.0);
+
+      const slmVerdict = await evaluateSlmQualityGate({
+        tokenSymbol: candidate.tokenSymbol,
+        tokenName: candidate.tokenName,
+        tokenMint: candidate.tokenMint,
+        ageMinutes: candidate.ageMinutes || 2,
+        marketCap: candidate.marketCap,
+        liquidityUsd: candidate.liquidityUsd,
+        volume1h: candidate.volume1h,
+        volume5m: candidate.volume5m || Math.round(candidate.volume1h / 12),
+        buySellRatio,
+        buys5m,
+        sells5m,
+        holderCount: candidate.holderCount || 350,
+        devHoldingPct: candidate.devHoldingPct ?? 0,
+        devSoldPct: candidate.devSoldPct ?? 0,
+        twitterUrl: candidate.xUrl,
+        telegramUrl: candidate.tgUrl,
+        websiteUrl: candidate.webUrl,
+      });
+      candidate.slmVerdict = slmVerdict;
+      console.log(`🛡️ [SLM Quality Gate] $${candidate.tokenSymbol}: Signal=${slmVerdict.viabilitySignal} | Hype=${slmVerdict.organicHypeScore}/10 | Narrative=${slmVerdict.narrativeStrength}/10 | ${slmVerdict.verdictReason}`);
+    } catch (slmErr: any) {
+      console.warn(`[SLM Evaluator Notice]: ${slmErr.message}`);
+    }
+
+    // 1. Record in resilient dual-layer token store ($0 cost, 100% offline resilient)
+    // CRITICAL: Whether GO or NO_GO from SLM Quality Gate, every single alerted coin is saved & price-tracked for pumps (+50%, 2X) & dumps (-50%)!
+    try {
+      await saveAlertedToken({
+        id: `early_${Date.now()}_${candidate.tokenMint.slice(0, 4)}`,
+        tokenMint: candidate.tokenMint,
+        tokenSymbol: candidate.tokenSymbol,
+        tokenName: candidate.tokenName,
+        pairAddress: candidate.pairAddress,
+        dexUrl: candidate.dexUrl,
+        imageUrl: candidate.imageUrl,
+        pairCreatedAt: candidate.pairCreatedAt ? Number(candidate.pairCreatedAt) : null,
+        ageMinutes: candidate.ageMinutes,
+        liquidityUsd: candidate.liquidityUsd,
+        volume1h: candidate.volume1h,
+        holderCount: candidate.holderCount,
+        top20Pct: candidate.top20Pct,
+        devHoldingPct: candidate.devHoldingPct,
+        xUrl: candidate.xUrl,
+        webUrl: candidate.webUrl,
+        tgUrl: candidate.tgUrl,
+        entryPriceUsd: candidate.priceUsd,
+        entryMarketCap: candidate.marketCap,
+        peakPriceUsd: candidate.priceUsd,
+        lowestPriceUsd: candidate.priceUsd,
+        lastAlertedPriceUsd: candidate.priceUsd,
+        lastMilestonePct: 0,
+        lastDipMilestonePct: 0,
+        status: 'ACTIVE',
+        alertDate: today,
+        whaleSolAmount: candidate.whaleSolAmount,
+        dailyQuotaIndex: dailyIndex,
+        slmSignal: candidate.slmVerdict?.viabilitySignal || 'GO',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (storeErr: any) {
+      console.warn(`⚠️ [Early Radar] Token store notice: ${storeErr.message}`);
+    }
+
+    // 2. Dispatch Telegram alert (@solearlytrending format) - ALWAYS DISPATCHES FOR BOTH GO & NO_GO
+    try {
       await dispatchEarlyTrendingAlert(candidate, dailyIndex);
+    } catch (tgErr: any) {
+      console.warn(`⚠️ Failed to dispatch early alert to Telegram for ${candidate.tokenMint}:`, tgErr.message);
+    }
 
-      // 2. Broadcast live event to connected Soul Web Terminals
+    // 2. Broadcast live event to connected Soul Web Terminals
+    try {
       broadcastNewTrending(candidate);
+    } catch {}
 
-      // 3. Autonomous $100 Real-Market Paper Trading Engine
-      try {
-        await processPaperTradeBuy({
-          tokenMint: candidate.tokenMint,
-          tokenSymbol: candidate.tokenSymbol,
-          tokenName: candidate.tokenName,
-          priceUsd: candidate.priceUsd,
-          marketCap: candidate.marketCap,
-          liquidityUsd: candidate.liquidityUsd,
-          dexUrl: candidate.dexUrl,
-          imageUrl: candidate.imageUrl,
-        });
-      } catch (paperErr: any) {
-        console.warn('⚠️ Paper trading buy execution notice:', paperErr.message);
-      }
+    // 3a. Autonomous $100 Real-Market Paper Trading Engine:
+    // ALWAYS executes immediately for every alerted coin, regardless of SLM GO or NO_GO!
+    try {
+      await processPaperTradeBuy({
+        tokenMint: candidate.tokenMint,
+        tokenSymbol: candidate.tokenSymbol,
+        tokenName: candidate.tokenName,
+        priceUsd: candidate.priceUsd,
+        marketCap: candidate.marketCap,
+        liquidityUsd: candidate.liquidityUsd,
+        dexUrl: candidate.dexUrl,
+        imageUrl: candidate.imageUrl,
+        aiScore: candidate.aiScore,
+        learnedRisk: candidate.learnedRisk,
+        slmVerdict: candidate.slmVerdict,
+      });
+    } catch (paperErr: any) {
+      console.warn('⚠️ Paper trading buy execution notice:', paperErr.message);
+    }
 
-      // 4. Autonomous 1-Click / Auto-Snipe execution if enabled
+    // 3b. Mandatory SLM Quality Gate Real-Snipe Interception (Real Wallet SOL only)
+    const isSlmBlocked = candidate.slmVerdict && candidate.slmVerdict.viabilitySignal === 'NO_GO';
+    if (isSlmBlocked) {
+      console.log(`🛑 [SLM QUALITY GATE BLOCKED REAL SNIPE] $${candidate.tokenSymbol}: Viability is NO_GO. Reason: ${candidate.slmVerdict?.verdictReason || 'Risk mitigation flags'}. Real wallet auto-snipe prevented.`);
+    } else {
+      // Autonomous 1-Click / Auto-Snipe execution if enabled (Real mainnet SOL)
       try {
         const autoSnipePref = await getUserAutoSnipeConfig(env.TELEGRAM_CHAT_ID);
         if (autoSnipePref.autoSnipeEnabled && autoSnipePref.autoSnipeSolAmount > 0) {
@@ -696,12 +790,12 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
       } catch (snipeErr: any) {
         console.warn('⚠️ Auto-sniper trigger note:', snipeErr.message);
       }
-
-      newAlertsDispatched++;
-      lastAlertTimeMs = Date.now();
-    } catch (err: any) {
-      console.warn(`⚠️ Failed to record/dispatch early alert for ${candidate.tokenMint}:`, err.message);
     }
+
+    newAlertsDispatched++;
+    inMemoryDailyCount++;
+    inMemoryAlertedMints.add(candidate.tokenMint);
+    lastAlertTimeMs = Date.now();
   }
 
   return newAlertsDispatched;

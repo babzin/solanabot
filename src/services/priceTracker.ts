@@ -11,6 +11,7 @@ import {
 } from './telegram.js';
 import { notifyFlopObserved } from './lossLearner.js';
 import { checkPaperPositionsTpSl } from './paperTrading.js';
+import { getActiveTrackedTokens, updateTokenPriceAndMilestones } from './earlyTokenStore.js';
 
 let priceTrackerTimer: NodeJS.Timeout | null = null;
 
@@ -19,13 +20,8 @@ let priceTrackerTimer: NodeJS.Timeout | null = null;
  * Queries DexScreener free batch API (0 Helius credits consumed)
  */
 export async function checkPriceMilestones(): Promise<number> {
-  // 1. Fetch active tokens being tracked from PostgreSQL
-  const activeTokens = await prisma.earlyTrendingToken.findMany({
-    where: { status: 'ACTIVE' },
-    orderBy: { createdAt: 'desc' },
-    take: 60, // Track up to the last 60 tokens (past 3 days of alerts)
-  });
-
+  // 1. Fetch active tokens being tracked from resilient dual-layer store
+  const activeTokens = await getActiveTrackedTokens();
   if (activeTokens.length === 0) {
     return 0;
   }
@@ -106,7 +102,8 @@ export async function checkPriceMilestones(): Promise<number> {
 
         if (pumpMilestoneStep >= 50 && pumpMilestoneStep > token.lastMilestonePct) {
           const multiplier = Number((currentPriceUsd / token.entryPriceUsd).toFixed(2));
-          const elapsedSec = Math.max(1, Math.floor((Date.now() - token.createdAt.getTime()) / 1000));
+          const createdMs = token.createdAt ? new Date(token.createdAt).getTime() : Date.now();
+          const elapsedSec = Math.max(1, Math.floor((Date.now() - createdMs) / 1000));
           const elapsedText =
             elapsedSec < 3600
               ? `${Math.floor(elapsedSec / 60)}m`
@@ -131,17 +128,14 @@ export async function checkPriceMilestones(): Promise<number> {
           await dispatchPricePumpMilestoneAlert(pumpData);
           alertsDispatched++;
 
-          // Update database state
-          await prisma.earlyTrendingToken.update({
-            where: { id: token.id },
-            data: {
-              lastMilestonePct: pumpMilestoneStep,
-              lastAlertedPriceUsd: currentPriceUsd,
-              peakPriceUsd: newPeak,
-              lowestPriceUsd: newLowest,
-              dexUrl: dexUrl,
-              pairAddress: pair.pairAddress || token.pairAddress,
-            },
+          // Update resilient token store & database
+          await updateTokenPriceAndMilestones(token.tokenMint, {
+            lastMilestonePct: pumpMilestoneStep,
+            lastAlertedPriceUsd: currentPriceUsd,
+            peakPriceUsd: newPeak,
+            lowestPriceUsd: newLowest,
+            dexUrl: dexUrl,
+            pairAddress: pair.pairAddress || token.pairAddress,
           });
           continue; // Processed pump
         }
@@ -189,28 +183,23 @@ export async function checkPriceMilestones(): Promise<number> {
           // Asynchronously notify Adaptive Loss Learner to update flop signatures & blacklist
           notifyFlopObserved(token.tokenMint, dipData.dropPercent, dipLabel).catch(() => {});
 
-          await prisma.earlyTrendingToken.update({
-            where: { id: token.id },
-            data: {
-              lastDipMilestonePct: isSignificantRetraceFromPeak ? -999 : -50,
-              lastAlertedPriceUsd: currentPriceUsd,
-              peakPriceUsd: newPeak,
-              lowestPriceUsd: newLowest,
-              dexUrl: dexUrl,
-              pairAddress: pair.pairAddress || token.pairAddress,
-            },
+          await updateTokenPriceAndMilestones(token.tokenMint, {
+            lastDipMilestonePct: isSignificantRetraceFromPeak ? -999 : -50,
+            lastAlertedPriceUsd: currentPriceUsd,
+            peakPriceUsd: newPeak,
+            lowestPriceUsd: newLowest,
+            dexUrl: dexUrl,
+            pairAddress: pair.pairAddress || token.pairAddress,
           });
         } else {
           // Just update peak/lowest or backfill dexUrl if changed
           if (newPeak !== token.peakPriceUsd || newLowest !== token.lowestPriceUsd || (!token.dexUrl && dexUrl)) {
-            await prisma.earlyTrendingToken.update({
-              where: { id: token.id },
-              data: {
-                peakPriceUsd: newPeak,
-                lowestPriceUsd: newLowest,
-                dexUrl: dexUrl,
-                pairAddress: pair.pairAddress || token.pairAddress,
-              },
+            await updateTokenPriceAndMilestones(token.tokenMint, {
+              peakPriceUsd: newPeak,
+              lowestPriceUsd: newLowest,
+              lastAlertedPriceUsd: currentPriceUsd,
+              dexUrl: dexUrl,
+              pairAddress: pair.pairAddress || token.pairAddress,
             });
           }
         }

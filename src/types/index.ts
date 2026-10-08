@@ -206,6 +206,9 @@ export interface AiNarrativeScore {
     devSafety: number; // 0-100
   };
   providerUsed: 'gemini' | 'groq' | 'heuristic-slm';
+  suggestedAllocationPct?: number; // Bounded between 1.0% and 3.0% by Iron Cage
+  strategyProfile?: 'VIRAL_RUNNER' | 'BALANCED_MOMENTUM' | 'FAST_SCALP';
+  targetMultiplier?: number; // Target peak e.g. 2X, 5X, 10X, 20X
 }
 
 export interface AiAuditResult {
@@ -305,3 +308,16 @@ export interface LearnedFlopMemory {
   blockedSetupsToday: number;
 }
 
+export interface SlmEvaluationResult {
+  viabilitySignal: 'GO' | 'NO_GO';
+  narrativeStrength: number; // 1 to 10
+  organicHypeScore: number; // 1 to 10 (filters bot raids and paid shills)
+  volumeVelocityAlignment: number; // 1 to 10 (correlation between social hype & on-chain buys)
+  justificationSummary: string; // Crisp analytical summary
+  recommendedMultiples: number[]; // e.g. [2, 4, 7]
+  trailingStopLossPct: number; // e.g. 15% or 20%
+  riskFlags: string[];
+  verdictReason: string;
+  telegramAnalyzed: boolean;
+  twitterAnalyzed: boolean;
+}

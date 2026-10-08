@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { env } from '../config/env.js';
 import { prisma } from './db.js';
-import { AiAuditResult, AiNarrativeScore } from '../types/index.js';
+import { AiAuditResult, AiNarrativeScore, SlmEvaluationResult } from '../types/index.js';
 import { getLearnedLossContextForCoPilot, getLearnedLossDashboard } from './lossLearner.js';
+import { aggregateCommunityIntelligence, CommunityIntelligenceBundle } from './socialSentiment.js';
 
 /**
  * Robust JSON extraction helper that handles markdown code fences
@@ -148,7 +149,27 @@ export function evaluateHeuristicSLM(token: {
   } else if (rugRisk === 'HIGH') {
     thesis = `Elevated risk: High sniper clustering or dev selling detected. Exercise caution or tight stop-loss.`;
   } else {
-    thesis = `Moderate conviction: ${metaCategory} narrative. Awaiting broader social verification.`;
+    thesis = `Speculative early ${metaCategory} play with moderate liquidity.`;
+  }
+
+  // 8. Bounded Autonomy: Dynamic sizing & exit strategy
+  let suggestedAllocationPct = 1.2;
+  if (conviction >= 85 && rugRisk === 'LOW') {
+    suggestedAllocationPct = 3.0; // Max ceiling under Iron Cage
+  } else if (conviction >= 70 && rugRisk !== 'HIGH') {
+    suggestedAllocationPct = 2.0;
+  } else if (conviction < 55 || rugRisk === 'HIGH') {
+    suggestedAllocationPct = 0.0; // AI rejects trade
+  }
+
+  let strategyProfile: 'VIRAL_RUNNER' | 'BALANCED_MOMENTUM' | 'FAST_SCALP' = 'BALANCED_MOMENTUM';
+  let targetMultiplier = 3;
+  if (conviction >= 80 && (metaCategory.includes('AI') || metaCategory.includes('Cult') || virality >= 80)) {
+    strategyProfile = 'VIRAL_RUNNER';
+    targetMultiplier = 10;
+  } else if (conviction < 65) {
+    strategyProfile = 'FAST_SCALP';
+    targetMultiplier = 2;
   }
 
   return {
@@ -162,6 +183,9 @@ export function evaluateHeuristicSLM(token: {
       devSafety: safety,
     },
     providerUsed: 'heuristic-slm',
+    suggestedAllocationPct,
+    strategyProfile,
+    targetMultiplier,
   };
 }
 
@@ -172,7 +196,7 @@ async function callGeminiNarrative(prompt: string): Promise<any> {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
-  const models = ['gemini-flash-lite-latest', 'gemini-3.6-flash', 'gemini-flash-latest'];
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'];
 
   for (const model of models) {
     try {
@@ -186,7 +210,7 @@ async function callGeminiNarrative(prompt: string): Promise<any> {
             responseMimeType: 'application/json',
           },
         },
-        { timeout: 3500, headers: { 'Content-Type': 'application/json' } }
+        { timeout: 8000, headers: { 'Content-Type': 'application/json' } }
       );
 
       const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -286,7 +310,10 @@ Respond with a strictly formatted JSON object:
   "thesis": "<1 crisp, high-impact trader sentence explaining why it's bullish or risky>",
   "memeVirality": <number 1-100>,
   "socialLegitimacy": <number 1-100>,
-  "devSafety": <number 1-100>
+  "devSafety": <number 1-100>,
+  "suggestedAllocationPct": <number between 0.0 and 3.0: up to 3.0 for max conviction runners, 1.2-2.0 for balanced, 0.0 to reject>,
+  "strategyProfile": "<'VIRAL_RUNNER' | 'BALANCED_MOMENTUM' | 'FAST_SCALP'>",
+  "targetMultiplier": <target multiplier number e.g. 2, 3, 5, 10, 20>
 }
 `.trim();
 
@@ -306,6 +333,28 @@ Respond with a strictly formatted JSON object:
       const conviction = Math.max(1, Math.min(99, Math.round(result.convictionScore)));
       const rugRisk = ['LOW', 'MEDIUM', 'HIGH'].includes(result.rugRisk) ? result.rugRisk : 'MEDIUM';
 
+      // Iron Cage Clamp: AI can suggest between 0% and 3.0% (hard maximum)
+      let suggestedAllocation = typeof result.suggestedAllocationPct === 'number'
+        ? Math.min(3.0, Math.max(0, Number(result.suggestedAllocationPct.toFixed(1))))
+        : conviction >= 85 ? 3.0 : conviction >= 70 ? 2.0 : conviction >= 55 ? 1.2 : 0;
+
+      if (rugRisk === 'HIGH' || conviction < 50) {
+        suggestedAllocation = 0; // Autonomous rejection
+      }
+
+      let strategyProfile: 'VIRAL_RUNNER' | 'BALANCED_MOMENTUM' | 'FAST_SCALP' = 'BALANCED_MOMENTUM';
+      if (['VIRAL_RUNNER', 'BALANCED_MOMENTUM', 'FAST_SCALP'].includes(result.strategyProfile)) {
+        strategyProfile = result.strategyProfile;
+      } else if (conviction >= 80) {
+        strategyProfile = 'VIRAL_RUNNER';
+      } else if (conviction < 65) {
+        strategyProfile = 'FAST_SCALP';
+      }
+
+      const targetMultiplier = typeof result.targetMultiplier === 'number'
+        ? Math.max(2, Math.min(20, Math.round(result.targetMultiplier)))
+        : strategyProfile === 'VIRAL_RUNNER' ? 10 : strategyProfile === 'BALANCED_MOMENTUM' ? 3 : 2;
+
       return {
         convictionScore: conviction,
         metaCategory: result.metaCategory || 'Meme Trend',
@@ -317,6 +366,9 @@ Respond with a strictly formatted JSON object:
           devSafety: result.devSafety || 50,
         },
         providerUsed: provider,
+        suggestedAllocationPct: suggestedAllocation,
+        strategyProfile,
+        targetMultiplier,
       };
     }
   } catch (err: any) {
@@ -325,6 +377,198 @@ Respond with a strictly formatted JSON object:
 
   // Graceful fallback to Heuristic SLM
   return evaluateHeuristicSLM(token);
+}
+
+/**
+ * 100% Free / Zero-Cost Deterministic Heuristic SLM Quality Gate
+ * Evaluates organic community engagement vs raid noise, volume velocity alignment, and dev state.
+ */
+export function evaluateHeuristicSlmQualityGate(bundle: CommunityIntelligenceBundle): SlmEvaluationResult {
+  const { onChainMetrics, telegram, twitter } = bundle;
+  const riskFlags: string[] = [];
+
+  // 1. Organic Hype Assessment
+  let organicHype = 7;
+  if (telegram.isRaidSpam) {
+    organicHype = 3;
+    riskFlags.push('Coordinated bot raid / repetitive shilling detected');
+  } else if (telegram.hasPublicChannel && telegram.messageCount > 0) {
+    organicHype = Math.max(1, Math.min(10, Math.round(telegram.organicRatio * 10)));
+  } else if (!telegram.hasPublicChannel) {
+    organicHype = 5; // Neutral
+  }
+
+  // 2. Twitter Legitimacy Assessment
+  if (twitter.isSuspiciousHandle) {
+    organicHype = Math.max(1, organicHype - 2);
+    riskFlags.push('Suspicious disposable Twitter handle pattern');
+  }
+
+  // 3. Volume & Velocity Alignment
+  let volumeAlignment = 7;
+  if (onChainMetrics.buySellRatio >= 1.5 && onChainMetrics.volume5m >= 2_000) {
+    volumeAlignment = 9;
+  } else if (onChainMetrics.buySellRatio < 0.8) {
+    volumeAlignment = 4;
+    riskFlags.push('Weak buy pressure / sellers dominating order flow');
+  }
+
+  // 4. Dev State Check
+  if (onChainMetrics.devSoldPct > 15) {
+    riskFlags.push(`Dev dumped ${onChainMetrics.devSoldPct.toFixed(0)}% of supply`);
+  }
+  if (onChainMetrics.devHoldingPct > 15) {
+    riskFlags.push(`Dev holds dangerous ${onChainMetrics.devHoldingPct.toFixed(0)}% of supply`);
+  }
+
+  // 5. Narrative Strength
+  let narrativeStrength = 7;
+  const combined = `${bundle.tokenName} ${bundle.tokenSymbol}`.toLowerCase();
+  if (/ai|agent|cat|dog|trump|pepe|cult|giga/i.test(combined)) {
+    narrativeStrength = 8;
+  }
+  if (bundle.websiteTextSnippet && bundle.websiteTextSnippet.length > 100) {
+    narrativeStrength = Math.min(10, narrativeStrength + 1);
+  }
+
+  // 6. Final Viability Gate
+  const isGo = organicHype >= 6 && volumeAlignment >= 6 && onChainMetrics.devSoldPct <= 15 && onChainMetrics.devHoldingPct <= 15 && !telegram.isRaidSpam;
+  const viabilitySignal: 'GO' | 'NO_GO' = isGo ? 'GO' : 'NO_GO';
+
+  const justification = isGo
+    ? `Strong organic community dynamics (${Math.round(telegram.organicRatio * 100)}% human dialogue) aligning with healthy on-chain volume ($${Math.round(onChainMetrics.volume5m)} in 5m, ${onChainMetrics.buySellRatio.toFixed(1)} buy/sell ratio). Clean dev state.`
+    : `Quality gate rejected: ${riskFlags.join(', ') || 'Insufficient organic velocity or elevated manipulation risk.'}`;
+
+  return {
+    viabilitySignal,
+    narrativeStrength,
+    organicHypeScore: organicHype,
+    volumeVelocityAlignment: volumeAlignment,
+    justificationSummary: justification,
+    recommendedMultiples: isGo ? [2, 4, 7] : [2, 3, 5],
+    trailingStopLossPct: isGo ? 15 : 25,
+    riskFlags,
+    verdictReason: isGo ? 'Confirmed organic breakout alignment.' : 'Blocked by SLM risk mitigation guardrails.',
+    telegramAnalyzed: telegram.hasPublicChannel,
+    twitterAnalyzed: Boolean(twitter.handle),
+  };
+}
+
+/**
+ * SLM Quality Gate: Acts as the final mandatory quality gate reviewing quantitative signals
+ * Deeply analyzes community sentiment, interaction patterns, and narrative velocity.
+ * Operating cost is strictly $0.00 (using Gemini Flash Free Tier or Heuristic SLM).
+ */
+export async function evaluateSlmQualityGate(params: {
+  tokenSymbol: string;
+  tokenName: string;
+  tokenMint: string;
+  ageMinutes: number;
+  marketCap: number;
+  liquidityUsd: number;
+  volume1h: number;
+  volume5m: number;
+  buySellRatio: number;
+  buys5m: number;
+  sells5m: number;
+  holderCount: number;
+  devHoldingPct: number;
+  devSoldPct: number;
+  twitterUrl?: string;
+  telegramUrl?: string;
+  websiteUrl?: string;
+  websiteTextSnippet?: string;
+}): Promise<SlmEvaluationResult> {
+  // 1. Autonomous zero-cost social & on-chain data gathering ($0.00 cost)
+  const bundle = await aggregateCommunityIntelligence(params);
+
+  // Check if neural API keys are available
+  const hasGemini = Boolean(env.GEMINI_API_KEY && !env.GEMINI_API_KEY.includes('dummy'));
+  const hasGroq = Boolean(env.GROQ_API_KEY && !env.GROQ_API_KEY.includes('dummy'));
+
+  if (!hasGemini && !hasGroq) {
+    return evaluateHeuristicSlmQualityGate(bundle);
+  }
+
+  const prompt = `
+YOU ARE AN INTELLIGENT, CRITICAL-THINKING DIGITAL GATEKEEPER & MEME COIN ANALYST.
+Your sole purpose is to evaluate newly listed or trending Solana meme coins by deeply analyzing community sentiment, interaction patterns, and narrative velocity.
+You are the FINAL MANDATORY QUALITY GATE reviewing quantitative buy signals generated by the mathematical bot before confirming a trade execution.
+
+OPERATIONAL RULES & GUARDRAILS:
+1. Organic vs. Artificial Noise Filtering:
+   - Rigorously filter out bot-generated noise, automated shilling, coordinated raids, and spam.
+   - Analyze Telegram messages: Are they repetitive raid commands (/raid, "smash raid", copy-paste shills) or authentic human dialogue?
+2. Volume & Velocity Validation:
+   - Does social media hype actively convert into actionable on-chain buy volume?
+   - Correlate social velocity with liquidity movement / order flow (buy/sell ratio, 5m buys).
+3. Risk Mitigation & Manipulation Flags:
+   - Flag tokens with manipulative narratives, forced hype, or insincere marketing lacking community staying power.
+   - Flag dev dumps (dev sold > 15%, dev holding > 15%, suspicious burner accounts).
+4. Output Expectations:
+   - Viability Signal: "GO" or "NO_GO".
+   - ONLY output "GO" if:
+     * Organic human engagement is confirmed (organicHypeScore >= 7).
+     * Narrative strength is genuine (narrativeStrength >= 7).
+     * Dev has not dumped (dev sold <= 15%) and contract is secure.
+   - Otherwise, strictly output "NO_GO".
+
+COMMUNITY & ON-CHAIN DATA BRIEFING:
+${bundle.rawBriefing}
+
+Respond ONLY with a strictly formatted JSON object:
+{
+  "viabilitySignal": "GO" or "NO_GO",
+  "narrativeStrength": <number 1 to 10>,
+  "organicHypeScore": <number 1 to 10 measuring real human engagement vs bot raids>,
+  "volumeVelocityAlignment": <number 1 to 10 assessing social-to-volume conversion>,
+  "justificationSummary": "<crisp, analytical summary explaining the rationale, balancing social sentiment against quantitative indicators>",
+  "recommendedMultiples": [2, 4, 7],
+  "trailingStopLossPct": <number e.g. 15 or 20>,
+  "riskFlags": ["<list any flags e.g. 'Coordinated raid bot noise', 'Dev sold 20%', etc.>"],
+  "verdictReason": "<one sentence trader conclusion>"
+}
+`.trim();
+
+  try {
+    let result: any = null;
+    if (env.AI_PROVIDER === 'groq' || (!hasGemini && hasGroq)) {
+      result = await callGroqNarrative(prompt);
+    } else {
+      result = await callGeminiNarrative(prompt);
+    }
+
+    if (result && typeof result.viabilitySignal === 'string') {
+      const viabilitySignal: 'GO' | 'NO_GO' = result.viabilitySignal.toUpperCase() === 'GO' ? 'GO' : 'NO_GO';
+      const narrativeStrength = Math.max(1, Math.min(10, Math.round(result.narrativeStrength || 6)));
+      const organicHypeScore = Math.max(1, Math.min(10, Math.round(result.organicHypeScore || 6)));
+      const volumeVelocityAlignment = Math.max(1, Math.min(10, Math.round(result.volumeVelocityAlignment || 6)));
+      const recommendedMultiples = Array.isArray(result.recommendedMultiples) && result.recommendedMultiples.length > 0
+        ? result.recommendedMultiples.map((n: any) => Math.max(2, Math.round(Number(n))))
+        : [2, 4, 7];
+      const trailingStopLossPct = typeof result.trailingStopLossPct === 'number'
+        ? Math.max(10, Math.min(40, Math.round(result.trailingStopLossPct)))
+        : 15;
+
+      return {
+        viabilitySignal,
+        narrativeStrength,
+        organicHypeScore,
+        volumeVelocityAlignment,
+        justificationSummary: result.justificationSummary || 'Evaluation complete.',
+        recommendedMultiples,
+        trailingStopLossPct,
+        riskFlags: Array.isArray(result.riskFlags) ? result.riskFlags : [],
+        verdictReason: result.verdictReason || (viabilitySignal === 'GO' ? 'Passed quality gate.' : 'Rejected by quality gate.'),
+        telegramAnalyzed: bundle.telegram.hasPublicChannel,
+        twitterAnalyzed: Boolean(bundle.twitter.handle),
+      };
+    }
+  } catch (err: any) {
+    console.warn(`[SLM Quality Gate Notice]: ${err.message}. Falling back to Heuristic SLM.`);
+  }
+
+  return evaluateHeuristicSlmQualityGate(bundle);
 }
 
 /**
@@ -501,12 +745,12 @@ async function buildComprehensiveTradingContext(): Promise<ComprehensiveTradingC
     yesterdayWorstFlop: yesterdayWorst
       ? `$${yesterdayWorst.tokenSymbol} (${(((yesterdayWorst.lastAlertedPriceUsd - yesterdayWorst.entryPriceUsd) / yesterdayWorst.entryPriceUsd) * 100).toFixed(1)}%)`
       : undefined,
-    weeklyWinRate: weeklyStats?.winRatePercent || 49,
-    weeklyGrossSolWon: weeklyStats?.grossSolMade || 6.636,
-    weeklyGrossSolLost: weeklyStats?.grossSolLost || 1.343,
-    weeklyNetSolPnL: weeklyStats?.netSolPnL || 5.294,
-    weeklySignalsCount: weeklyStats?.totalSignals || 68,
-    stopLossSavingsSol: Number((weeklyStats?.flopsCount ? weeklyStats.flopsCount * 0.25 : 13.5).toFixed(1)),
+    weeklyWinRate: weeklyStats?.winRatePercent || 0,
+    weeklyGrossSolWon: weeklyStats?.grossSolMade || 0,
+    weeklyGrossSolLost: weeklyStats?.grossSolLost || 0,
+    weeklyNetSolPnL: weeklyStats?.netSolPnL || 0,
+    weeklySignalsCount: weeklyStats?.totalSignals || 0,
+    stopLossSavingsSol: Number((weeklyStats?.flopsCount ? weeklyStats.flopsCount * 0.25 : 0).toFixed(1)),
     activeMetas: ['Cat / Animal Meta', 'AI Agent / Compute', 'Cult Meme'],
   };
 }
@@ -1516,11 +1760,88 @@ export async function askTradingCoPilot(userQuestion: string): Promise<string> {
 
   // 1b. Check if user is asking about the Adaptive Loss-Learning Feedback Engine
   const isLossLearningQuery =
-    /(learn|learning|loss|losses|flop|flops|memory|feedback loop|adapt|rugs)/i.test(q) &&
-    /(bot|engine|ai|system|how|does|pick|better|avoid|work|prevent)/i.test(q);
+    /\b(learn|learning|loss learner|feedback loop|adapt|loss memory)\b/i.test(q) &&
+    /\b(bot|engine|ai|system|how|does|pick|better|avoid|work|prevent)\b/i.test(q);
 
   if (isLossLearningQuery) {
     return getLearnedLossDashboard();
+  }
+
+  // 1c. Check if user is asking for Weekly Report
+  if (/(weekly report|weekly recap|weekly performance|week recap|week report)/i.test(q)) {
+    try {
+      const { calculateWeeklyStats, renderWeeklyReportText } = await import('./weeklyReport.js');
+      const stats = await calculateWeeklyStats(0);
+      if (!stats || stats.totalSignals === 0) {
+        return `🗓️ <b>WEEKLY PERFORMANCE RECAP</b> 📊\n\n⚠️ <b>No report found.</b>\n<i>No alerted token signals or performance records found for this week.</i>`;
+      }
+      return renderWeeklyReportText(stats);
+    } catch {
+      return `🗓️ <b>WEEKLY PERFORMANCE RECAP</b> 📊\n\n⚠️ <b>No report found.</b>\n<i>No alerted token signals or performance records found for this week.</i>`;
+    }
+  }
+
+  // 1d. Check if user is asking for Top Gainers
+  if (/(top gainers?|best performers?|biggest winners?|top profits?|hall of fame)/i.test(q)) {
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const { prisma } = await import('./db.js');
+      const tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: today },
+        orderBy: { lastMilestonePct: 'desc' },
+        take: 25,
+      });
+      const gainers = tokens.filter((t) => {
+        const mult = t.peakPriceUsd && t.entryPriceUsd && t.entryPriceUsd > 0
+          ? t.peakPriceUsd / t.entryPriceUsd
+          : (1 + (t.lastMilestonePct || 0) / 100);
+        return mult > 1.0 || (t.lastMilestonePct && t.lastMilestonePct > 0);
+      });
+      if (tokens.length === 0 || gainers.length === 0) {
+        return `🏆 <b>Top Early Trending</b> 💸\n\n⚠️ <b>No report found.</b>\n<i>No top gainers recorded yet for today (${today}). Background radar is actively scanning!</i>`;
+      }
+      const { renderTopLeaderboardText } = await import('./telegram.js');
+      return renderTopLeaderboardText(gainers.slice(0, 15), today);
+    } catch {
+      return `🏆 <b>Top Early Trending</b> 💸\n\n⚠️ <b>No report found.</b>\n<i>No top gainers recorded yet for today.</i>`;
+    }
+  }
+
+  // 1e. Check if user is asking for Flops
+  if (/(daily flops?|worst drops?|flopped coins?|biggest losers?|dumped coins?|^flops?$)/i.test(q) && !q.includes('avoid') && !q.includes('how')) {
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const { prisma } = await import('./db.js');
+      const tokens = await prisma.earlyTrendingToken.findMany({
+        where: { alertDate: today },
+        orderBy: { createdAt: 'desc' },
+      });
+      const flops = tokens.filter((t) => {
+        const drop = t.entryPriceUsd > 0 ? ((t.lastAlertedPriceUsd - t.entryPriceUsd) / t.entryPriceUsd) * 100 : 0;
+        return drop <= -20;
+      });
+      if (flops.length === 0) {
+        return `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🩸\n\n⚠️ <b>No report found.</b>\n<i>No flopped coins or dips recorded for today (${today}). All alerted gems are holding strong or currently in profit.</i>`;
+      }
+    } catch {
+      return `📉 <b>DAILY FLOPPED COINS &amp; DIPS</b> 🩸\n\n⚠️ <b>No report found.</b>\n<i>No flopped coins or dips recorded for today.</i>`;
+    }
+  }
+
+  // 1f. Check if user is asking for Price Milestones
+  if (/(price milestones?|milestones? tracker|active milestones?|^milestones?$)/i.test(q)) {
+    try {
+      const { prisma } = await import('./db.js');
+      const tokens = await prisma.earlyTrendingToken.findMany({
+        where: { status: 'ACTIVE' },
+        take: 15,
+      });
+      if (tokens.length === 0) {
+        return `📈 <b>Price Milestone Trackers</b> 🎯\n\n⚠️ <b>No report found.</b>\n<i>No tokens are currently in active milestone tracking (+50% pumps / -50% dips).</i>`;
+      }
+    } catch {
+      return `📈 <b>Price Milestone Trackers</b> 🎯\n\n⚠️ <b>No report found.</b>\n<i>No tokens are currently in active milestone tracking.</i>`;
+    }
   }
 
   // 2. Check if user is asking about a specific token (mint address, $TICKER, narrative of <token>, or "about <token>")

@@ -2,8 +2,8 @@
   "wallet": {
     "initialBalanceUsd": 100,
     "liquidCashUsd": 100,
-    "solPriceUsd": 118.61,
-    "liquidCashSol": 0.8431,
+    "solPriceUsd": 145,
+    "liquidCashSol": 0.6897,
     "totalInvestedUsd": 0,
     "totalRealizedPnlUsd": 0,
     "totalFeesPaidSol": 0,
@@ -15,8 +15,9 @@
     "maxConcurrentPositions": 20,
     "tradeSizePercent": 3,
     "tradeSizeUsd": 3,
-    "startedAt": "2026-09-29T00:39:44.895Z",
-    "lastUpdated": "2026-09-29T00:39:44.895Z"
+    "consecutiveLosses": 0,
+    "startedAt": "2026-10-08T00:00:00.000Z",
+    "lastUpdated": "2026-10-08T00:00:00.000Z"
   },
   "positions": [],
   "history": []

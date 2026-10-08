@@ -323,17 +323,17 @@ export async function executeSnipeSell(
 
 export interface TpSlActionTriggered {
   position: SnipedPosition;
-  action: 'TAKE_PROFIT_2X' | 'TRAILING_STOP' | 'HARD_STOP';
+  action: 'TAKE_PROFIT_2X' | 'TAKE_PROFIT_5X' | 'TRAILING_STOP' | 'HARD_STOP';
   gainPercent: number;
   solAmount: number;
   message: string;
 }
 
 /**
- * Autonomous Take-Profit & Stop-Loss Engine
+ * Autonomous Moon or Dust Engine (Zero Stop-Loss • No Pullback Selling)
  * 1. At +100% (2X): Sells 50% to return original principal risk-free.
- * 2. On Moonbag: Trailing stop-loss if price drops 25% from peak.
- * 3. Capital Protection: Hard stop-loss at -25% from entry.
+ * 2. At +400% (5X): Sells remaining 50% moonbag for massive 5X profit.
+ * 3. Pullbacks & Dips: Zero selling on pullbacks/dips. The stake is the max risk.
  */
 export async function checkActivePositionsTpSl(
   tokenMint: string,
@@ -346,7 +346,6 @@ export async function checkActivePositionsTpSl(
   pos.peakPriceUsd = Math.max(pos.peakPriceUsd, currentPriceUsd);
 
   const gainFromEntryPct = ((currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
-  const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
 
   // 1. Take Profit at +100% (2X) - Sell 50% of tokens to secure original SOL!
   if (pos.status === 'OPEN' && gainFromEntryPct >= 100.0) {
@@ -364,19 +363,23 @@ export async function checkActivePositionsTpSl(
       action: 'TAKE_PROFIT_2X',
       gainPercent: gainFromEntryPct,
       solAmount: solSecured,
-      message: `🎯 <b>[AUTONOMOUS 2X TAKE-PROFIT HIT]</b> 🚀\n\n` +
+      message: `🎯 <b>[AUTONOMOUS 2X DE-RISKING HIT]</b> 🚀\n\n` +
         `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
         `📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (2.0X Multiplier)</b>\n` +
         `💰 Action: <b>Sold 50% of position</b>\n` +
         `💵 SOL Secured: <code>+${solSecured.toFixed(3)} SOL</code> (Original principal returned!)\n` +
-        `🌙 Moonbag: <b>Remaining 50% riding risk-free</b> with a trailing stop-loss!`,
+        `💎 Moonbag: <b>Remaining 50% riding UNCAPPED with adaptive trailing stop</b> (No ceiling cap • Rides indefinitely until market trails down by -18%)!`,
     };
   }
 
-  // 2. Trailing Stop-Loss on remaining Moonbag: If price falls 40% from peak
-  // Allows 5X-20X runners breathing room for normal consolidation waves
-  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= 40.0) {
-    console.log(`🛑 [TRAILING STOP-LOSS] $${pos.tokenSymbol} retraced -${dropFromPeakPct.toFixed(1)}% from peak. Liquidating remaining 50% moonbag...`);
+  // 2. Uncapped Moonbag Trailing Stop: Sells remaining 50% moonbag ONLY when the market trails down from peak!
+  // No fixed 3X or 5X ceiling. As long as the market doesn't trail down, we keep going up with the market!
+  const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
+  const trailingStopPct = 18.0;
+
+  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
+    const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
+    console.log(`🛡️ [AUTONOMOUS TRAILING STOP] $${pos.tokenSymbol} trailed down -${dropFromPeakPct.toFixed(1)}% from peak ($${pos.peakPriceUsd.toFixed(6)} / ${peakMultiplier}X). Liquidating remaining 50% moonbag...`);
 
     const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
     const moonbagSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd) * 0.5);
@@ -392,64 +395,46 @@ export async function checkActivePositionsTpSl(
       action: 'TRAILING_STOP',
       gainPercent: gainFromEntryPct,
       solAmount: moonbagSol,
-      message: `🛑 <b>[TRAILING STOP-LOSS EXECUTED]</b> 📉\n\n` +
+      message: `🛡️ <b>[UNCAPPED RUNNER TRAILING STOP EXECUTED]</b> 🛑\n\n` +
         `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-        `📉 Retraced: <b>-${dropFromPeakPct.toFixed(1)}% from peak</b>\n` +
+        `🔝 Peak Reached: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (<b>${peakMultiplier}X Peak</b>)\n` +
+        `📉 Trailing Pullback: <b>-${dropFromPeakPct.toFixed(1)}% from Highs</b> (Stop Trigger: -${trailingStopPct}%)\n` +
         `💰 Action: <b>Sold remaining moonbag</b>\n` +
         `💵 SOL Harvested: <code>+${moonbagSol.toFixed(3)} SOL</code>\n` +
         `🏆 Total Net Realized Profit: <code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>!`,
     };
   }
 
-  // 3. Smart Shakeout Capital Protection Stop-Loss on un-profited tokens
-  // - Emergency Rug Cut: If price collapses <= -65%, cut immediately with 0s delay
-  // - Standard Stop-Loss: If price dips <= -35%, initiate a 45-second wick confirmation buffer
-  if (pos.status === 'OPEN') {
-    const isEmergencyRug = gainFromEntryPct <= -65.0;
+  // Also protect runners that surged significantly before 2X (e.g. >= 1.6X) if they begin trailing down
+  if (pos.status === 'OPEN' && (pos.peakPriceUsd / pos.entryPriceUsd) >= 1.6 && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
+    const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
+    console.log(`🛡️ [AUTONOMOUS TRAILING STOP PRE-2X] $${pos.tokenSymbol} peaked at ${peakMultiplier}X and trailed down -${dropFromPeakPct.toFixed(1)}%. Liquidating to lock profit...`);
 
-    if (gainFromEntryPct <= -35.0) {
-      if (!pos.firstUnderStopLossAt) {
-        pos.firstUnderStopLossAt = Date.now();
-        console.log(
-          `⏳ [SNIPER SHAKEOUT DEFENSE] $${pos.tokenSymbol} dipped ${gainFromEntryPct.toFixed(1)}%. Initiating 45s confirmation buffer...`
-        );
-      }
+    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
+    const harvestSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd));
 
-      const elapsedUnderSlMs = Date.now() - (pos.firstUnderStopLossAt || Date.now());
-      const isConfirmed = isEmergencyRug || elapsedUnderSlMs >= 45_000;
+    pos.status = 'CLOSED';
+    pos.closedAt = Date.now();
+    pos.remainingTokens = 0;
+    pos.realizedSolProfit += (harvestSol - pos.solInvested);
+    pos.exitReason = 'TRAILING_STOP';
 
-      if (!isConfirmed) {
-        return null; // Hold through momentary micro-wick
-      }
-
-      console.log(`🛡️ [CAPITAL PROTECTION SL] $${pos.tokenSymbol} confirmed sustained breakdown (${gainFromEntryPct.toFixed(1)}%). Exiting to preserve capital...`);
-
-      const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
-      const solRecovered = sellRes.solAmount || (pos.solInvested * 0.65);
-
-      pos.status = 'CLOSED';
-      pos.closedAt = Date.now();
-      pos.remainingTokens = 0;
-      pos.realizedSolProfit += solRecovered;
-      pos.exitReason = isEmergencyRug ? 'EMERGENCY_RUG_CUT' : 'HARD_STOP_35';
-
-      return {
-        position: pos,
-        action: 'HARD_STOP',
-        gainPercent: gainFromEntryPct,
-        solAmount: solRecovered,
-        message: `🛡️ <b>[CAPITAL PROTECTION STOP-LOSS]</b> ⚠️\n\n` +
-          `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-          `📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry (${isEmergencyRug ? 'Emergency Cut' : 'Sustained 45s Breakdown'})</b>\n` +
-          `💰 Action: <b>Cut-loss execution</b>\n` +
-          `💵 SOL Preserved: <code>${solRecovered.toFixed(3)} SOL</code> (Protected ~65% of capital).`,
-      };
-    } else if (pos.firstUnderStopLossAt) {
-      console.log(`🛡️ [SNIPER SHAKEOUT AVOIDED] $${pos.tokenSymbol} bounced back to ${gainFromEntryPct.toFixed(1)}%! Stop timer cleared.`);
-      pos.firstUnderStopLossAt = undefined;
-    }
+    return {
+      position: pos,
+      action: 'TRAILING_STOP',
+      gainPercent: gainFromEntryPct,
+      solAmount: harvestSol,
+      message: `🛡️ <b>[RUNNER TRAILING STOP EXECUTED]</b> 🛑\n\n` +
+        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
+        `🔝 Peak Reached: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (<b>${peakMultiplier}X Peak</b>)\n` +
+        `📉 Trailing Pullback: <b>-${dropFromPeakPct.toFixed(1)}% from Highs</b>\n` +
+        `💰 Action: <b>Position closed in profit</b>\n` +
+        `💵 SOL Harvested: <code>+${harvestSol.toFixed(3)} SOL</code>\n` +
+        `🏆 Net Realized Profit: <code>+${(harvestSol - pos.solInvested).toFixed(3)} SOL</code>!`,
+    };
   }
 
+  // MOON OR DUST: No stop-loss selling on pullbacks/dips. The stake is the maximum risk.
   return null;
 }
 

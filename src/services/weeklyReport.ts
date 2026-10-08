@@ -1,5 +1,6 @@
 import { prisma } from './db.js';
 import { env } from '../config/env.js';
+import { getTokensForPastDays } from './earlyTokenStore.js';
 
 export interface DayHighlight {
   date: string;
@@ -139,12 +140,21 @@ export async function calculateWeeklyStats(weekOffset = 0, baseTradeSol = 0.1, s
   const startDateStr = dates[0];
   const endDateStr = dates[dates.length - 1];
 
-  const tokens = await prisma.earlyTrendingToken.findMany({
-    where: {
-      alertDate: { in: dates },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+  let tokens: any[] = [];
+  try {
+    tokens = await prisma.earlyTrendingToken.findMany({
+      where: {
+        alertDate: { in: dates },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  } catch {}
+
+  if (!tokens || tokens.length === 0) {
+    const allWeekly = await getTokensForPastDays(14);
+    const dateSet = new Set(dates);
+    tokens = allWeekly.filter((t) => dateSet.has(t.alertDate));
+  }
 
   const totalSignals = tokens.length;
   let winsCount = 0;
@@ -399,6 +409,15 @@ export async function calculateWeeklyStats(weekOffset = 0, baseTradeSol = 0.1, s
 export function renderWeeklyReportText(stats: WeeklyStats): string {
   const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
   const headerLink = `https://t.me/${botUsername}`;
+
+  if (!stats || stats.totalSignals === 0) {
+    return (
+      `🗓️ <a href="${headerLink}"><b>WEEKLY PERFORMANCE RECAP</b></a> 📊\n` +
+      `📅 <b>Period:</b> <code>${stats?.weekLabel || 'Current Week'}</code>\n\n` +
+      `⚠️ <b>No report found.</b>\n` +
+      `<i>No alerted token signals or performance records found for this week.</i>`
+    );
+  }
 
   const isNetPositive = stats.netSolPnL >= 0;
   const netEmoji = isNetPositive ? '🟢' : '🔴';
