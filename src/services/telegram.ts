@@ -33,6 +33,34 @@ export function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
+/**
+ * Safely sends Telegram messages without hitting the 4,096 character limit.
+ * Automatically splits long text into chunks if needed.
+ */
+export async function safeSendTelegramMessage(chatId: number | string, text: string, options?: any): Promise<any> {
+  const MAX_CHUNK = 3800;
+  if (text.length <= MAX_CHUNK) {
+    return bot.sendMessage(chatId, text, options);
+  }
+  const lines = text.split('\n');
+  let currentChunk = '';
+  let lastResult: any = null;
+  for (const line of lines) {
+    if ((currentChunk + '\n' + line).length > MAX_CHUNK) {
+      if (currentChunk.trim().length > 0) {
+        lastResult = await bot.sendMessage(chatId, currentChunk.trim(), { ...options, reply_markup: undefined });
+      }
+      currentChunk = line;
+    } else {
+      currentChunk += (currentChunk ? '\n' : '') + line;
+    }
+  }
+  if (currentChunk.trim().length > 0) {
+    lastResult = await bot.sendMessage(chatId, currentChunk.trim(), options);
+  }
+  return lastResult;
+}
+
 export function formatTokenQuantity(amount: number): string {
   if (!amount || amount <= 0) return 'Tokens';
   if (amount >= 1_000_000_000) return `${(amount / 1_000_000_000).toFixed(2)}B`;
@@ -2231,7 +2259,8 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
     if (active.length === 0) {
       report += `ℹ️ <i>No currently OPEN positions. (All previous positions closed at profit/stop).</i>\n\n`;
     } else {
-      active.forEach((pos, idx) => {
+      const maxToShow = 10;
+      active.slice(0, maxToShow).forEach((pos, idx) => {
         const gainPct = (((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100).toFixed(1);
         const isUp = Number(gainPct) >= 0;
         const emoji = isUp ? '🟢' : '🔴';
@@ -2244,6 +2273,9 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
         report += `   🔝 Peak: <code>${formatUnitPrice(pos.peakPriceUsd)}</code> | Realized: <code>+${pos.realizedSolProfit.toFixed(2)} SOL</code>\n`;
         report += `   🔗 <a href="${chartUrl}">[DexScreener Live Chart]</a>\n\n`;
       });
+      if (active.length > maxToShow) {
+        report += `<i>... and ${active.length - maxToShow} more active positions</i>\n\n`;
+      }
     }
 
     const closed = all.filter((p) => p.status === 'CLOSED').slice(-3);
@@ -2271,7 +2303,7 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
-    await bot.sendMessage(chatId, report.trim(), {
+    await safeSendTelegramMessage(chatId, report.trim(), {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
       reply_markup: { inline_keyboard: posButtons },
@@ -2532,6 +2564,11 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
     const pnlEmoji = summary.totalPnlUsd >= 0 ? '💸' : '🩸';
     const statusColor = summary.totalPnlUsd >= 0 ? '🟢' : '🔴';
 
+    const isReserveLocked = w.liquidCashUsd <= 20.0 && summary.activePositions.length > 0;
+    const reserveStatusLine = isReserveLocked
+      ? `⏸️ <b>Reserve Floor:</b> <b>$20 Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
+      : '';
+
     let msg = `
 💼 <b>[PAPER TRADING: $100 LIVE PORTFOLIO]</b> ${pnlEmoji}
 <i>100% Real Market Dynamics • Real Gas &amp; Slippage Deductions</i>
@@ -2539,7 +2576,7 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
 🏦 <b>NET EQUITY:</b> <b>$${summary.netWorthUsd.toFixed(2)} USD</b> (<code>${summary.netWorthSol.toFixed(4)} SOL</code>)
 ${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)} (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)</b>
 💵 <b>Liquid Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)} USD</code> (<code>${w.liquidCashSol.toFixed(4)} SOL</code>)
-🔒 <b>In Active Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)} USD</code>
+${reserveStatusLine}${(w.autoRefillCount && w.autoRefillCount > 0) ? `🔄 <b>Auto-Refills:</b> <b>${w.autoRefillCount} time${w.autoRefillCount === 1 ? '' : 's'}</b> (<code>+$${((w.totalRefilledUsd || 0)).toFixed(2)} USD</code> added to restore $100 baseline when depleted with zero profit)\n` : ''}🔒 <b>In Active Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)} USD</code>
 ⛽ <b>Total Real Gas Paid:</b> <code>-${w.totalFeesPaidSol.toFixed(4)} SOL</code> (<b>-$${w.totalFeesPaidUsd.toFixed(2)}</b>)
 🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L • ${w.totalTrades} Total)
 
@@ -2549,18 +2586,47 @@ ${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)}
     if (summary.activePositions.length === 0) {
       msg += `<i>No active open positions right now. Standing by for radar gems!</i>\n`;
     } else {
-      for (const pos of summary.activePositions) {
-        const gainPct = ((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+      // Sort: Moonbags first, then highest percentage gain
+      const sortedPositions = [...summary.activePositions].sort((a, b) => {
+        const isMoonA = a.status === 'PARTIAL_TP_2X' ? 1 : 0;
+        const isMoonB = b.status === 'PARTIAL_TP_2X' ? 1 : 0;
+        if (isMoonA !== isMoonB) return isMoonB - isMoonA;
+        const gainA = (a.currentPriceUsd - a.entryPriceUsd) / Math.max(0.00000001, a.entryPriceUsd);
+        const gainB = (b.currentPriceUsd - b.entryPriceUsd) / Math.max(0.00000001, b.entryPriceUsd);
+        return gainB - gainA;
+      });
+
+      const maxPositionsToShow = 15;
+      let displayedCount = 0;
+
+      for (const pos of sortedPositions) {
+        if (displayedCount >= maxPositionsToShow) break;
+        const gainPct = ((pos.currentPriceUsd - pos.entryPriceUsd) / Math.max(0.00000001, pos.entryPriceUsd)) * 100;
         const sign = gainPct >= 0 ? '+' : '';
-        const badge = pos.status === 'PARTIAL_TP_2X' ? '🌙 MOONBAG (50%)' : '🟢 OPEN (100%)';
-        const mult = (pos.currentPriceUsd / pos.entryPriceUsd).toFixed(2);
-        msg += `\n• <b>$${pos.tokenSymbol}</b> [${badge}]\n` +
-          `  Entry: <code>$${pos.entryPriceUsd.toFixed(6)}</code> ➔ Now: <code>$${pos.currentPriceUsd.toFixed(6)}</code> (${sign}${gainPct.toFixed(1)}% | ${mult}X)\n` +
-          `  Peak: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (${pos.peakMultiplier}X) • Initial: $${pos.investedUsd.toFixed(2)}\n`;
+        const badge = pos.status === 'PARTIAL_TP_2X' ? '🌙 MOONBAG' : '🟢 OPEN';
+        const mult = (pos.currentPriceUsd / Math.max(0.00000001, pos.entryPriceUsd)).toFixed(2);
+        const chartUrl = pos.dexUrl || `https://dexscreener.com/solana/${pos.tokenMint}`;
+        
+        const line = `• <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a> [${badge}]: <b>${sign}${gainPct.toFixed(1)}%</b> (<code>${mult}X</code>) • Peak: <b>${pos.peakMultiplier}X</b> (Pos: $${pos.investedUsd.toFixed(2)})\n`;
+
+        // Strict buffer guard against 4096 character limit
+        if ((msg + line).length > 3400) {
+          break;
+        }
+        msg += line;
+        displayedCount++;
+      }
+
+      if (sortedPositions.length > displayedCount) {
+        msg += `\n<i>... and ${sortedPositions.length - displayedCount} more active runner(s) (Total: ${summary.activePositions.length}/${w.maxConcurrentPositions} slots active)</i>\n`;
       }
     }
 
-    msg += `\n🛡️ <i>Trailing Stop (-40% off peak) + 2X Take-Profit + -35% SL (45s buffer) active.</i>`;
+    msg += `\n🛡️ <i>Uncapped Trailing Runner System • Principal secured at 2X • Trailing Stop active.</i>`;
+    if (w.autoRefillCount && w.autoRefillCount > 0) {
+      msg += `\n💡 <i>Auto-refilled ${w.autoRefillCount} time${w.autoRefillCount === 1 ? '' : 's'} (+$${((w.totalRefilledUsd || 0)).toFixed(2)} USD) to restore $100 baseline when all positions closed with zero profit.</i>`;
+    }
+    msg += `\n🛡️ <i>$20 Safety Reserve: Cash cannot be spent below $20. When reached, entries pause until profit enters. Only when zero positions remain is money added back to $100.</i>`;
 
     const inlineKeyboard = [
       [
@@ -2573,7 +2639,7 @@ ${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)}
       ],
     ];
 
-    await bot.sendMessage(chatId, msg.trim(), {
+    await safeSendTelegramMessage(chatId, msg.trim(), {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
       reply_markup: { inline_keyboard: inlineKeyboard },

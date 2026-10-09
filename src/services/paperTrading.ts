@@ -12,6 +12,16 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '../../data');
 const BACKUP_FILE = path.join(DATA_DIR, 'paper_trading.json');
 
+function escapeHtml(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 export interface PaperWalletState {
   initialBalanceUsd: number;
   liquidCashUsd: number;
@@ -31,6 +41,8 @@ export interface PaperWalletState {
   consecutiveLosses: number;
   circuitBreakerUntilMs?: number;
   circuitBreakerReason?: string;
+  autoRefillCount: number;
+  totalRefilledUsd: number;
   startedAt: string;
   lastUpdated: string;
 }
@@ -85,6 +97,8 @@ export interface PaperPortfolioSummary {
   unrealizedPnlUsd: number;
   totalPnlUsd: number;
   totalPnlPercent: number;
+  autoRefillCount: number;
+  totalRefilledUsd: number;
   activePositions: PaperPosition[];
   closedPositions: PaperPosition[];
 }
@@ -92,6 +106,10 @@ export interface PaperPortfolioSummary {
 const REDIS_KEY_WALLET = 'soul:paper_wallet:state';
 const REDIS_KEY_POSITIONS = 'soul:paper_wallet:positions';
 const REDIS_KEY_HISTORY = 'soul:paper_wallet:history';
+
+export const PAPER_RESERVE_FLOOR_USD = 20.0;
+export const PAPER_TARGET_BALANCE_USD = 100.0;
+let lastReserveAlertTimeMs = 0;
 
 // In-memory state with persistence fallback
 let cachedWallet: PaperWalletState = {
@@ -107,10 +125,12 @@ let cachedWallet: PaperWalletState = {
   winningTrades: 0,
   losingTrades: 0,
   winRatePercent: 0,
-  maxConcurrentPositions: 20,
+  maxConcurrentPositions: 200,
   tradeSizePercent: 3.0,
   tradeSizeUsd: 3.0,
   consecutiveLosses: 0,
+  autoRefillCount: 0,
+  totalRefilledUsd: 0,
   startedAt: new Date().toISOString(),
   lastUpdated: new Date().toISOString(),
 };
@@ -245,6 +265,8 @@ export async function initPaperTradingEngine(): Promise<void> {
 
     if (rawWallet) {
       cachedWallet = JSON.parse(rawWallet);
+      cachedWallet.autoRefillCount = cachedWallet.autoRefillCount || 0;
+      cachedWallet.totalRefilledUsd = cachedWallet.totalRefilledUsd || 0;
       if (rawPositions) {
         const arr: PaperPosition[] = JSON.parse(rawPositions);
         activePaperPositions.clear();
@@ -259,7 +281,7 @@ export async function initPaperTradingEngine(): Promise<void> {
       }
       loaded = true;
       console.log(
-        `✅ [Paper Trading Engine] Loaded from Redis: Liquid $${cachedWallet.liquidCashUsd.toFixed(2)} | Active Positions: ${activePaperPositions.size}`
+        `✅ [Paper Trading Engine] Loaded from Redis: Liquid $${cachedWallet.liquidCashUsd.toFixed(2)} | Active Positions: ${activePaperPositions.size} | Refills: ${cachedWallet.autoRefillCount}x`
       );
     }
   } catch {}
@@ -270,6 +292,8 @@ export async function initPaperTradingEngine(): Promise<void> {
       const data = JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf8'));
       if (data.wallet) {
         cachedWallet = data.wallet;
+        cachedWallet.autoRefillCount = cachedWallet.autoRefillCount || 0;
+        cachedWallet.totalRefilledUsd = cachedWallet.totalRefilledUsd || 0;
         activePaperPositions.clear();
         for (const p of data.positions || []) {
           activePaperPositions.set(p.tokenMint, p);
@@ -277,7 +301,7 @@ export async function initPaperTradingEngine(): Promise<void> {
         closedPaperHistory.length = 0;
         closedPaperHistory.push(...(data.history || []));
         console.log(
-          `✅ [Paper Trading Engine] Loaded from Disk: Liquid $${cachedWallet.liquidCashUsd.toFixed(2)} | Active Positions: ${activePaperPositions.size}`
+          `✅ [Paper Trading Engine] Loaded from Disk: Liquid $${cachedWallet.liquidCashUsd.toFixed(2)} | Active Positions: ${activePaperPositions.size} | Refills: ${cachedWallet.autoRefillCount}x`
         );
         loaded = true;
       }
@@ -308,12 +332,14 @@ export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
     winningTrades: 0,
     losingTrades: 0,
     winRatePercent: 0,
-    maxConcurrentPositions: 20,
+    maxConcurrentPositions: 200,
     tradeSizePercent: 3.0,
     tradeSizeUsd: 3.0,
     consecutiveLosses: 0,
     circuitBreakerUntilMs: undefined,
     circuitBreakerReason: undefined,
+    autoRefillCount: 0,
+    totalRefilledUsd: 0,
     startedAt: new Date().toISOString(),
     lastUpdated: new Date().toISOString(),
   };
@@ -324,6 +350,105 @@ export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
 
   console.log('🔄 [Paper Trading Engine] Wallet successfully reset to $100.00 USD.');
   return cachedWallet;
+}
+
+/**
+ * Throttled alert for Telegram when liquid cash reaches the $20 reserve floor
+ * and pauses new trade entries to wait for active position profits.
+ */
+function maybeSendReserveAlert(currentCash: number, activePositionsCount: number): void {
+  const now = Date.now();
+  if (now - lastReserveAlertTimeMs < 5 * 60 * 1000) {
+    return; // 5-minute cooldown to prevent spam
+  }
+  lastReserveAlertTimeMs = now;
+
+  if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    try {
+      const lockAlert = `
+⏸️ <b>[PAPER TRADING: $20 RESERVE LOCK]</b> 🛡️
+<i>Liquid paper cash has reached the $20.00 safety floor ($${currentCash.toFixed(2)} USD).</i>
+
+🚫 <b>New entries paused:</b> Capital protected at $20 floor (system will not remove funds).
+⏳ <b>Waiting for profit:</b> <b>${activePositionsCount} active open position(s)</b> are running in the market.
+📈 <b>Auto-Resume:</b> As soon as active positions take profit (2X scale-out or trailing stop), profits will restore wallet and new entries will resume automatically!
+      `.trim();
+      bot.sendMessage(env.TELEGRAM_CHAT_ID, lockAlert, { parse_mode: 'HTML' }).catch(() => {});
+    } catch {}
+  }
+}
+
+/**
+ * Automatically tops up paper wallet back to $100.00 ONLY when:
+ * 1. Liquid cash is at or below the $20.00 reserve floor (or insufficient to trade above $20)
+ * 2. There is NO PROFIT AT ALL to wait for (i.e. zero active open positions remaining)
+ *
+ * Adds money to the existing balance (e.g. existing $20.00 + $80.00 = $100.00).
+ * Increments autoRefillCount and records totalRefilledUsd.
+ */
+export async function checkAndRefillIfNoProfit(
+  triggerContext: string,
+  candidateSymbol?: string
+): Promise<boolean> {
+  // If liquid cash is comfortably above $20 floor, no refill needed
+  if (cachedWallet.liquidCashUsd > PAPER_RESERVE_FLOOR_USD) {
+    return false;
+  }
+
+  // Count active open positions
+  const openPositions = Array.from(activePaperPositions.values()).filter(
+    (p) => p.status !== 'CLOSED'
+  );
+
+  // If there are open positions, we MUST wait for profit to enter! Do NOT refill yet!
+  if (openPositions.length > 0) {
+    return false;
+  }
+
+  // "only when theres no profit at all then can it add money to the existing one to take our paper money back to $100"
+  const topUpAmount = Number(
+    Math.max(0, PAPER_TARGET_BALANCE_USD - cachedWallet.liquidCashUsd).toFixed(2)
+  );
+  if (topUpAmount <= 0) return false;
+
+  const solPrice = cachedWallet.solPriceUsd || (await fetchLiveSolPrice());
+  const previousCash = cachedWallet.liquidCashUsd;
+
+  cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + topUpAmount).toFixed(2));
+  cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+  cachedWallet.autoRefillCount = (cachedWallet.autoRefillCount || 0) + 1;
+  cachedWallet.totalRefilledUsd = Number(
+    ((cachedWallet.totalRefilledUsd || 0) + topUpAmount).toFixed(2)
+  );
+  cachedWallet.lastUpdated = new Date().toISOString();
+
+  await persistPaperTradingState();
+
+  console.log(
+    `💵 [PAPER MONEY AUTO-REFILL #${cachedWallet.autoRefillCount}] Zero active positions remaining ("no profit at all") & balance reached $20 floor ($${previousCash.toFixed(2)} USD). Added +$${topUpAmount.toFixed(2)} USD to existing balance -> Restored paper wallet back to $${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD! (Refilled ${cachedWallet.autoRefillCount}x total • Cumulative Refilled: +$${cachedWallet.totalRefilledUsd.toFixed(2)} USD)`
+  );
+
+  if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    try {
+      const safeSym = candidateSymbol ? escapeHtml(candidateSymbol) : '';
+      const refillAlert = `
+🔄 <b>[PAPER MONEY AUTO-REFILLED TO $100]</b> ⚡
+<i>All open positions concluded with no profit remaining, and cash reached the $20 reserve floor!</i>
+
+💵 <b>Added to Existing Balance:</b> <code>+$${topUpAmount.toFixed(2)} USD</code> (from $${previousCash.toFixed(2)})
+💰 <b>Restored Paper Wallet:</b> <code>$${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD</code> (<code>${cachedWallet.liquidCashSol.toFixed(3)} SOL</code>)
+🔢 <b>Auto-Refill Event:</b> <b>${cachedWallet.autoRefillCount} time${cachedWallet.autoRefillCount === 1 ? '' : 's'}</b>
+📊 <b>Total Cumulative Refilled:</b> <code>+$${cachedWallet.totalRefilledUsd.toFixed(2)} USD</code>
+🎯 <b>Context:</b> ${escapeHtml(triggerContext)}${safeSym ? ` (Ready to trade <b>$${safeSym}</b>)` : ''}
+      `.trim();
+
+      bot.sendMessage(env.TELEGRAM_CHAT_ID, refillAlert, { parse_mode: 'HTML' }).catch(() => {});
+    } catch (tgErr: any) {
+      console.warn('⚠️ Could not dispatch paper refill alert to Telegram:', tgErr.message);
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -349,95 +474,45 @@ export async function processPaperTradeBuy(
   const isForceBuy = Boolean(candidate.forceBuy || options?.forceBuy);
   const solPrice = await fetchLiveSolPrice();
 
-  // 1. Check Circuit Breaker (Iron Cage Invariant - bypassed on user forced buy)
-  if (!isForceBuy && cachedWallet.circuitBreakerUntilMs) {
-    if (Date.now() < cachedWallet.circuitBreakerUntilMs) {
-      const remainingMins = Math.ceil((cachedWallet.circuitBreakerUntilMs - Date.now()) / 60000);
-      console.log(
-        `🛡️ [Circuit Breaker Active] New paper trade entries paused for ${remainingMins}m (${cachedWallet.circuitBreakerReason}). Skipping $${candidate.tokenSymbol}.`
-      );
-      return null;
-    } else {
-      // Cooldown ended: automatically restore trading
-      cachedWallet.circuitBreakerUntilMs = undefined;
-      cachedWallet.circuitBreakerReason = undefined;
-      cachedWallet.consecutiveLosses = 0;
-      console.log('✅ [Circuit Breaker Cleared] 30m cooling off ended. Paper trading resumed.');
-    }
-  }
-
-  // 1b. Informational SLM Quality Gate Log: Never vetoes paper trades (trades instantly regardless of NO_GO)
-  if (candidate.slmVerdict) {
+  // 1. Informational Circuit Breaker Log (never blocks paper trades)
+  if (cachedWallet.circuitBreakerUntilMs && Date.now() < cachedWallet.circuitBreakerUntilMs) {
+    const remainingMins = Math.ceil((cachedWallet.circuitBreakerUntilMs - Date.now()) / 60000);
     console.log(
-      `ℹ️ [Paper Trading SLM Gate] $${candidate.tokenSymbol} signal: ${candidate.slmVerdict.viabilitySignal}. Paper trade proceeds instantly regardless of verdict.`
+      `ℹ️ [Circuit Breaker Note] Real-snipe cooldown active (${remainingMins}m remaining). Paper trading continues unconditionally entering every coin.`
     );
   }
 
-  // 2. Autonomous AI Veto: If AI conviction is low or rug risk is high (bypassed on user forced buy)
-  if (!isForceBuy && candidate.aiScore) {
-    if (candidate.aiScore.convictionScore < 50) {
-      console.log(
-        `🤖 [AI Bounded Autonomy: REJECTED] $${candidate.tokenSymbol} skipped. Conviction ${candidate.aiScore.convictionScore}/100 < 50. AI chose not to deploy capital. (${candidate.aiScore.thesis})`
-      );
-      return null;
-    }
-    if (candidate.aiScore.rugRisk === 'HIGH') {
-      console.log(
-        `🤖 [AI Bounded Autonomy: REJECTED] $${candidate.tokenSymbol} skipped. High rug risk detected by AI.`
-      );
-      return null;
-    }
+  // 1b. Informational SLM Quality Gate Log (never vetoes paper trades)
+  if (candidate.slmVerdict) {
+    console.log(
+      `ℹ️ [Paper Trading SLM Gate] $${candidate.tokenSymbol} signal: ${candidate.slmVerdict.viabilitySignal}. Paper trade entering immediately.`
+    );
   }
 
-  // 3. Learned Flop Memory Veto (bypassed on user forced buy)
-  if (!isForceBuy && candidate.learnedRisk) {
-    if (candidate.learnedRisk.verdict === 'REJECTED_FLOP_SIGNATURE' || candidate.learnedRisk.flopRiskScore > 75) {
-      console.log(
-        `🧠 [Flop Learner Veto] $${candidate.tokenSymbol} rejected. High flop risk (${candidate.learnedRisk.flopRiskScore}/100).`
-      );
-      return null;
-    }
+  // 2. Informational AI Evaluation Log (never vetoes paper trades - enters every coin provided by AI)
+  if (candidate.aiScore) {
+    console.log(
+      `🤖 [AI Evaluation] $${candidate.tokenSymbol}: Conviction ${candidate.aiScore.convictionScore}/100 | Risk: ${candidate.aiScore.rugRisk} | Profile: ${candidate.aiScore.strategyProfile}. Paper trade entering immediately.`
+    );
   }
 
-  // 4. Check if already actively holding this token
+  // 3. Informational Learned Flop Risk Log (never vetoes paper trades)
+  if (candidate.learnedRisk) {
+    console.log(
+      `🧠 [Flop Learner Note] $${candidate.tokenSymbol}: Flop risk score ${candidate.learnedRisk.flopRiskScore}/100. Paper trade tracking live performance.`
+    );
+  }
+
+  // 4. Check if already actively holding this token (prevent duplicate simultaneous buys of same mint)
   const existingPos = activePaperPositions.get(candidate.tokenMint);
   if (existingPos && existingPos.status !== 'CLOSED') {
     return existingPos;
   }
 
-  // 4b. Smart Re-Trade Rule (bypassed on user forced buy):
-  // If a coin was previously traded and closed at a loss:
-  // Block re-entry if it is still low / dumping.
-  // Allow re-entry ONLY if it has proven profitable OR has recovered and broken out above previous entry price!
-  if (!isForceBuy) {
-    const pastTrades = closedPaperHistory.filter((p) => p.tokenMint === candidate.tokenMint);
-    if (pastTrades.length > 0) {
-      const hasMadeProfit = pastTrades.some((p) => p.realizedPnlUsd > 0);
-      const isBreakoutRecovery = pastTrades.every((p) => candidate.priceUsd >= p.entryPriceUsd * 1.05);
-      if (!hasMadeProfit && !isBreakoutRecovery) {
-        console.log(
-          `🛡️ [Paper Trading Gate] Blocked re-trade for $${candidate.tokenSymbol}: Previous trade closed at a loss (-$${Math.abs(pastTrades[0].realizedPnlUsd).toFixed(2)}). Price must break out above previous entry ($${pastTrades[0].entryPriceUsd.toFixed(6)}) to re-qualify.`
-        );
-        return null;
-      }
-      if (!hasMadeProfit && isBreakoutRecovery) {
-        console.log(
-          `🚀 [Paper Trading Breakout Recovery] Re-entering $${candidate.tokenSymbol}: Recovered above previous entry price ($${candidate.priceUsd.toFixed(6)} > $${pastTrades[0].entryPriceUsd.toFixed(6)}). Breakout wave active!`
-        );
-      }
-    }
-  }
-
-  // 5. Count active open positions (bypassed on user forced buy)
+  // 5. Count active open positions
   const openCount = Array.from(activePaperPositions.values()).filter(
     (p) => p.status !== 'CLOSED'
   ).length;
-  if (!isForceBuy && openCount >= cachedWallet.maxConcurrentPositions) {
-    console.log(
-      `💼 [Paper Trading] Max concurrent positions (${cachedWallet.maxConcurrentPositions}) reached. Skipping $${candidate.tokenSymbol}.`
-    );
-    return null;
-  }
 
   // 6. Compute dynamic capital allocation:
   // Bounded Autonomy: AI determines sizing between 1.0% and 3.0% (hard Iron Cage ceiling)
@@ -469,29 +544,75 @@ export async function processPaperTradeBuy(
   // 7. Compute real network friction
   const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
 
-  // If forceBuy (user submitted) and liquid cash is low, scale trade to available cash or top up minimally
-  if (isForceBuy && cachedWallet.liquidCashUsd < dynamicTradeSize + feeUsd) {
-    if (cachedWallet.liquidCashUsd >= 1.5) {
-      dynamicTradeSize = Math.max(1.0, Number((cachedWallet.liquidCashUsd - feeUsd).toFixed(2)));
+  // 8. $20 Safety Reserve Floor & Conditional Refill Engine:
+  // User Rule:
+  // "if our money should reach $20 the system shouldn't remove money to trade again
+  // and it should wait till profit enters, on;y when theres no profit at all then
+  // can it add money to the exsisting one to take our paper money back to $100"
+  let didAutoRefill = false;
+  let refilledAmount = 0;
+  const minRequiredCash = 1.0 + feeUsd;
+  const cashAboveReserve = cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD;
+
+  // Check if liquid cash has reached the $20 floor, or cannot even fund the minimum $1 trade without breaching $20
+  if (cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD || cashAboveReserve < minRequiredCash) {
+    const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
+      (p) => p.status !== 'CLOSED'
+    );
+    const activeCount = activeOpenPositions.length;
+
+    if (activeCount > 0) {
+      // Rule Part 1: Money has reached $20 -> System MUST NOT remove money to trade again, and MUST wait till profit enters!
+      console.log(
+        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD (<= $20.00 floor). New trade entries locked to preserve $20 capital. Waiting for profit to enter from ${activeCount} active position(s)...`
+      );
+      maybeSendReserveAlert(cachedWallet.liquidCashUsd, activeCount);
+      return null;
     } else {
-      // Free up minimal buffer for user-submitted paper trade
-      cachedWallet.liquidCashUsd = 10.0;
-      cachedWallet.liquidCashSol = Number((10.0 / solPrice).toFixed(4));
-      dynamicTradeSize = 3.0;
+      // Rule Part 2: "only when theres no profit at all then can it add money to the exsisting one to take our paper money back to $100"
+      // Zero active positions left. No profit can enter from existing trades. Refill back to $100.00!
+      const preRefillCash = cachedWallet.liquidCashUsd;
+      const refilled = await checkAndRefillIfNoProfit(`Depletion with 0 active positions remaining`, candidate.tokenSymbol);
+      if (refilled) {
+        didAutoRefill = true;
+        refilledAmount = Number((cachedWallet.liquidCashUsd - preRefillCash).toFixed(2));
+      }
     }
   }
 
+  // Ensure dynamicTradeSize does NOT dip into the $20 reserve floor
+  const safeCashBudget = Math.max(0, cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd);
+  if (safeCashBudget < 1.0) {
+    const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
+      (p) => p.status !== 'CLOSED'
+    );
+    if (activeOpenPositions.length > 0) {
+      console.log(
+        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD. Available above reserve ($${safeCashBudget.toFixed(2)}) is below $1 minimum trade. Waiting for profit to enter from ${activeOpenPositions.length} active position(s)...`
+      );
+      maybeSendReserveAlert(cachedWallet.liquidCashUsd, activeOpenPositions.length);
+      return null;
+    } else {
+      const preRefillCash = cachedWallet.liquidCashUsd;
+      const refilled = await checkAndRefillIfNoProfit(`Zero active positions and available cash < $1`, candidate.tokenSymbol);
+      if (refilled) {
+        didAutoRefill = true;
+        refilledAmount = Number((cachedWallet.liquidCashUsd - preRefillCash).toFixed(2));
+      }
+    }
+  }
+
+  if (didAutoRefill) {
+    const updatedNetWorth = cachedWallet.liquidCashUsd + currentOpenValue;
+    dynamicTradeSize = Math.max(1.0, Number((updatedNetWorth * (effectiveAllocationPct / 100)).toFixed(2)));
+  }
+
+  // Clamp dynamicTradeSize to never breach $20 floor
+  const maxAllowedTradeSize = Math.max(1.0, Number((cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd).toFixed(2)));
+  dynamicTradeSize = Math.max(1.0, Math.min(dynamicTradeSize, maxAllowedTradeSize));
   const tradeSizeUsd = dynamicTradeSize;
   cachedWallet.tradeSizeUsd = dynamicTradeSize;
-  const totalRequiredCash = tradeSizeUsd + feeUsd;
-
-  // 8. Verify liquid cash availability
-  if (cachedWallet.liquidCashUsd < totalRequiredCash) {
-    console.log(
-      `💼 [Paper Trading] Insufficient liquid cash ($${cachedWallet.liquidCashUsd.toFixed(2)} < $${totalRequiredCash.toFixed(2)}). Skipping $${candidate.tokenSymbol}.`
-    );
-    return null;
-  }
+  const effectiveCashDeduction = tradeSizeUsd + feeUsd;
 
   // 9. Compute real slippage & price impact
   const slippagePct = calculateRealSlippage(candidate.liquidityUsd || 25_000);
@@ -500,7 +621,8 @@ export async function processPaperTradeBuy(
   const investedSol = Number((tradeSizeUsd / solPrice).toFixed(4));
 
   // 10. Deduct from liquid cash
-  cachedWallet.liquidCashUsd -= totalRequiredCash;
+  const cashToDeduct = tradeSizeUsd + feeUsd;
+  cachedWallet.liquidCashUsd = Math.max(0, cachedWallet.liquidCashUsd - cashToDeduct);
   cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
   cachedWallet.totalFeesPaidSol += feeSol;
   cachedWallet.totalFeesPaidUsd += feeUsd;
@@ -573,14 +695,18 @@ export async function processPaperTradeBuy(
           `• 🔥 Organic Hype: <code>${candidate.slmVerdict.organicHypeScore}/10</code> (bot raid passed)\n` +
           `• 🧠 Narrative Velocity: <code>${candidate.slmVerdict.narrativeStrength}/10</code>\n` +
           `• 🎯 Ladder Exits: <code>${multDisplay}</code> | Moonbag Stop: <code>-${slmTrailingStopPct}%</code>\n` +
-          `• ⚖️ <i>${candidate.slmVerdict.justificationSummary}</i>`;
+          `• ⚖️ <i>${escapeHtml(candidate.slmVerdict.justificationSummary)}</i>`;
       }
+
+      const safeSymbol = escapeHtml(candidate.tokenSymbol);
+      const safeName = escapeHtml(candidate.tokenName || candidate.tokenSymbol);
+      const safeThesis = escapeHtml(aiThesis);
 
       const receiptCard = `
 💼 <b>[PAPER TRADE EXECUTED: BOUNDED AUTONOMY]</b> ⚡
 <i>Simulating 100% Real Market Conditions &amp; Network Fees</i>
 
-🪙 Token: <b>$${candidate.tokenSymbol}</b> (${candidate.tokenName})
+🪙 Token: <b>$${safeSymbol}</b> (${safeName})
 💰 Entry Price: <code>$${candidate.priceUsd.toFixed(6)}</code>
 📊 Market Cap: <code>$${(candidate.marketCap / 1000).toFixed(1)}K</code>
 💵 Position Size: <b>$${tradeSizeUsd.toFixed(2)}</b> (<b>${effectiveAllocationPct}%</b> of capital • <code>${investedSol} SOL</code>)
@@ -590,15 +716,15 @@ export async function processPaperTradeBuy(
 🤖 <b>AI AUTONOMOUS DISCRETION:</b>
 • 🎯 Conviction: <b>${aiConviction}/100</b> (${aiConviction >= 80 ? '🔥 Ultra High' : '⚡ Strong'})
 • 🧭 Strategy Profile: <b>${strategyProfile}</b> (Mode: <code>Uncapped Trailing Runner</code>)
-• 💡 Thesis: <i>${aiThesis}</i>
+• 💡 Thesis: <i>${safeThesis}</i>
 
 💎 <b>UNCAPPED RUNNER MODE (NO CEILING CAP):</b>
 • 🛑 <b>Hard Allocation Cap:</b> Max 3.0% capital staked per trade ($1 - $3)
 • 🚀 <b>Infinite Upside:</b> Zero profit ceiling (No 3X/5X cap) — rides the market up indefinitely!
 • 🛡️ <b>Principal De-risking:</b> 100% initial principal secured on first double (2X)
-• 🛑 <b>Trailing Stop:</b> Remaining moonbag exits ONLY when market trails down from peak!
+• 🛑 <b>Trailing Stop:</b> Remaining moonbag exits ONLY when market trails down from peak!${didAutoRefill ? `\n\n🔄 <b>AUTO-REFILL ACTIVATED:</b> +$${refilledAmount.toFixed(2)} USD added (Refill Event #${cachedWallet.autoRefillCount} • Total refilled: $${cachedWallet.totalRefilledUsd.toFixed(2)})` : ''}
 
-💼 <b>Paper Wallet:</b> <code>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</code> available (${openCount + 1}/${cachedWallet.maxConcurrentPositions} slots)
+💼 <b>Paper Wallet:</b> <code>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</code> available (${openCount + 1}/${cachedWallet.maxConcurrentPositions} slots${cachedWallet.autoRefillCount > 0 ? ` • 🔄 <b>Refilled: ${cachedWallet.autoRefillCount}x</b>` : ''})
       `.trim();
 
       await bot.sendMessage(env.TELEGRAM_CHAT_ID, receiptCard, {
@@ -670,6 +796,14 @@ async function executePaperTrailingStopExit(
   closedPaperHistory.unshift(pos);
   await persistPaperTradingState();
 
+  // User Rule: "only when theres no profit at all then can it add money to the exsisting one to take our paper money back to $100"
+  const remainingActive = Array.from(activePaperPositions.values()).filter(
+    (p) => p.status !== 'CLOSED'
+  ).length;
+  if (remainingActive === 0 && cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD) {
+    await checkAndRefillIfNoProfit('Last Active Position Concluded via Trailing Stop - Zero Profit Remaining');
+  }
+
   console.log(
     `🛡️ [UNCAPPED RUNNER TRAILING STOP] $${pos.tokenSymbol} (${profileLabel}) peaked at ${pos.peakMultiplier}X and trailed down -${dropFromPeakPct.toFixed(1)}% (Stop: -${trailingStopPct}%). Sold remaining bag for +$${netReturnUsd.toFixed(2)}. Total Net Profit: +$${pos.realizedPnlUsd.toFixed(2)}`
   );
@@ -687,10 +821,84 @@ async function executePaperTrailingStopExit(
 🏆 <b>Total Net Trade Profit:</b> <b>+$${pos.realizedPnlUsd.toFixed(2)} USD</b> (<code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>) 💸
 ⛽ Sell Gas: <code>${feeSol} SOL</code> | Slippage: <code>${(sellSlippage * 100).toFixed(1)}%</code>
 
-💼 <b>Total Paper Portfolio:</b> <code>$${(cachedWallet.liquidCashUsd + cachedWallet.totalInvestedUsd).toFixed(2)} USD</code>
+💼 <b>Total Paper Portfolio:</b> <code>$${(cachedWallet.liquidCashUsd + cachedWallet.totalInvestedUsd).toFixed(2)} USD</code>${cachedWallet.autoRefillCount > 0 ? ` • 🔄 <b>Refills: ${cachedWallet.autoRefillCount}x</b>` : ''}
       `.trim();
       await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
     } catch {}
+  }
+}
+
+/**
+ * Executes an emergency capital-protection stop-loss sale when an un-profited token suffers sustained breakdown or rug dump.
+ */
+async function executePaperStopLossExit(
+  pos: PaperPosition,
+  currentPriceUsd: number,
+  solPrice: number,
+  pairData: any,
+  gainFromEntryPct: number,
+  isEmergencyRug: boolean
+): Promise<void> {
+  const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+  const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 20_000);
+
+  const tokensToSell = pos.remainingTokens;
+  const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
+  const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
+  const remainingFraction = pos.initialTokens > 0 ? tokensToSell / pos.initialTokens : 1.0;
+  const costBasisUsd = pos.investedUsd * remainingFraction;
+
+  pos.status = 'CLOSED';
+  pos.closedAt = Date.now();
+  pos.remainingTokens = 0;
+  pos.exitReason = isEmergencyRug ? 'EMERGENCY_RUG_CUT' : 'HARD_STOP_35';
+  pos.sellGasFeeSol = feeSol;
+  pos.sellGasFeeUsd = feeUsd;
+  pos.sellSlippagePct = Number((sellSlippage * 100).toFixed(2));
+  pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
+  pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * remainingFraction;
+
+  cachedWallet.liquidCashUsd += netReturnUsd;
+  cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+  cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
+  cachedWallet.totalFeesPaidSol += feeSol;
+  cachedWallet.totalFeesPaidUsd += feeUsd;
+  cachedWallet.losingTrades += 1;
+  cachedWallet.consecutiveLosses += 1;
+
+  activePaperPositions.delete(pos.tokenMint);
+  closedPaperHistory.unshift(pos);
+  await persistPaperTradingState();
+
+  const lossUsd = costBasisUsd - netReturnUsd;
+  const reasonLabel = isEmergencyRug ? 'EMERGENCY RUG CUT (-65%)' : 'CONFIRMED BREAKDOWN (-35%)';
+  console.log(
+    `🛡️ [PAPER HARD STOP-LOSS: ${reasonLabel}] $${pos.tokenSymbol} closed. Loss: -$${Math.abs(lossUsd).toFixed(2)}. Capital preserved: $${netReturnUsd.toFixed(2)}`
+  );
+
+  if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    try {
+      const cutCard = `
+🛡️ <b>[PAPER TRADING: CAPITAL PROTECTION STOP-LOSS]</b> 🛑
+<i>${isEmergencyRug ? '🚨 Emergency Cut on Catastrophic Dump' : '📉 Sustained -35% Breakdown Confirmed (45s Buffer)'}</i>
+
+🪙 Token: <b>$${pos.tokenSymbol}</b>
+📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry</b>
+💵 Capital Preserved: <code>+$${netReturnUsd.toFixed(2)} USD</code> (from $${pos.investedUsd.toFixed(2)} position)
+🩸 Loss Incurred: <code>-$${Math.abs(lossUsd).toFixed(2)} USD</code>
+⛽ Sell Gas: <code>${feeSol} SOL</code> | Slippage: <code>${(sellSlippage * 100).toFixed(1)}%</code>
+💼 <b>Liquid Cash:</b> <code>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</code>
+      `.trim();
+      bot.sendMessage(env.TELEGRAM_CHAT_ID, cutCard, { parse_mode: 'HTML' }).catch(() => {});
+    } catch {}
+  }
+
+  // User Rule: "only when theres no profit at all then can it add money to the exsisting one to take our paper money back to $100"
+  const remainingActive = Array.from(activePaperPositions.values()).filter(
+    (p) => p.status !== 'CLOSED'
+  ).length;
+  if (remainingActive === 0 && cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD) {
+    await checkAndRefillIfNoProfit('Last Active Position Concluded via Stop-Loss - Zero Profit Remaining');
   }
 }
 
@@ -716,6 +924,32 @@ export async function checkPaperPositionsTpSl(
   const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
 
   const profile = pos.strategyProfile || 'BALANCED_MOMENTUM';
+
+  // --- Smart Shakeout Capital Protection Stop-Loss on un-profited tokens ---
+  // - Emergency Rug Cut: If price collapses <= -65%, cut immediately with 0s delay
+  // - Standard Stop-Loss: If price dips <= -35%, 45-second wick confirmation buffer
+  if (pos.status === 'OPEN') {
+    const isEmergencyRug = gainFromEntryPct <= -65.0;
+    if (gainFromEntryPct <= -35.0) {
+      if (!pos.firstUnderStopLossAt) {
+        pos.firstUnderStopLossAt = Date.now();
+        console.log(
+          `⏳ [PAPER SHAKEOUT DEFENSE] $${pos.tokenSymbol} dipped ${gainFromEntryPct.toFixed(1)}%. Initiating 45s confirmation buffer...`
+        );
+      }
+
+      const elapsedUnderSlMs = Date.now() - (pos.firstUnderStopLossAt || Date.now());
+      const isConfirmed = isEmergencyRug || elapsedUnderSlMs >= 45_000;
+
+      if (isConfirmed) {
+        await executePaperStopLossExit(pos, currentPriceUsd, solPrice, pairData, gainFromEntryPct, isEmergencyRug);
+        return;
+      }
+    } else if (pos.firstUnderStopLossAt) {
+      console.log(`🛡️ [PAPER SHAKEOUT AVOIDED] $${pos.tokenSymbol} bounced back to ${gainFromEntryPct.toFixed(1)}%! Wiping stop-loss timer.`);
+      pos.firstUnderStopLossAt = undefined;
+    }
+  }
 
   // =========================================================================
   // UNCAPPED TRAILING RUNNER SYSTEM (NO 3X/5X/10X CEILING CAP)
@@ -1086,13 +1320,24 @@ export async function getPaperPortfolioSummary(): Promise<PaperPortfolioSummary>
       liquidCashUsd: Number(cachedWallet.liquidCashUsd.toFixed(2)),
       liquidCashSol: Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4)),
       totalInvestedUsd: Number(currentOpenValue.toFixed(2)),
+      autoRefillCount: cachedWallet.autoRefillCount || 0,
+      totalRefilledUsd: cachedWallet.totalRefilledUsd || 0,
     },
     netWorthUsd,
     netWorthSol: Number((netWorthUsd / solPrice).toFixed(4)),
     unrealizedPnlUsd: Number(unrealizedPnl.toFixed(2)),
     totalPnlUsd,
     totalPnlPercent,
+    autoRefillCount: cachedWallet.autoRefillCount || 0,
+    totalRefilledUsd: cachedWallet.totalRefilledUsd || 0,
     activePositions: activeList,
     closedPositions: closedPaperHistory.slice(0, 20),
   };
+}
+
+/**
+ * Test helper to simulate specific cash levels for automated verification
+ */
+export function setPaperWalletCashForTesting(cashUsd: number): void {
+  cachedWallet.liquidCashUsd = cashUsd;
 }

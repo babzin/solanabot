@@ -992,6 +992,10 @@
                 <span>Win Rate:</span>
                 <b id="paper-winrate">0.0% (0/0)</b>
               </div>
+              <div class="audit-row" id="paper-refill-row" style="display: none;">
+                <span>Auto-Refills:</span>
+                <b id="paper-refills" style="color: var(--cyan);">0 times (+$0.00)</b>
+              </div>
             </div>
 
             <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 4px; display: flex; justify-content: space-between;">
@@ -1390,6 +1394,19 @@
 
         const winrateEl = document.getElementById('paper-winrate');
         if (winrateEl) winrateEl.innerText = `${w.winRatePercent.toFixed(1)}% (${w.winningTrades}W/${w.losingTrades}L)`;
+
+        const refillRow = document.getElementById('paper-refill-row');
+        const refillEl = document.getElementById('paper-refills');
+        if (refillRow && refillEl) {
+          const refills = data.autoRefillCount || w.autoRefillCount || 0;
+          const refilledAmount = data.totalRefilledUsd || w.totalRefilledUsd || 0;
+          if (refills > 0) {
+            refillRow.style.display = 'flex';
+            refillEl.innerText = `${refills} time${refills === 1 ? '' : 's'} (+$${refilledAmount.toFixed(2)})`;
+          } else {
+            refillRow.style.display = 'none';
+          }
+        }
 
         const countEl = document.getElementById('paper-active-count');
         if (countEl) countEl.innerText = data.activePositions.length;
