@@ -109,6 +109,7 @@ const REDIS_KEY_HISTORY = 'soul:paper_wallet:history';
 
 export const PAPER_RESERVE_FLOOR_USD = 20.0;
 export const PAPER_TARGET_BALANCE_USD = 100.0;
+export const MAX_PAPER_TRADE_SIZE_USD = 1.0; // Strictly max $1.00 USD per trade
 let lastReserveAlertTimeMs = 0;
 
 // In-memory state with persistence fallback
@@ -126,8 +127,8 @@ let cachedWallet: PaperWalletState = {
   losingTrades: 0,
   winRatePercent: 0,
   maxConcurrentPositions: 200,
-  tradeSizePercent: 3.0,
-  tradeSizeUsd: 3.0,
+  tradeSizePercent: 1.0,
+  tradeSizeUsd: 1.0,
   consecutiveLosses: 0,
   autoRefillCount: 0,
   totalRefilledUsd: 0,
@@ -333,8 +334,8 @@ export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
     losingTrades: 0,
     winRatePercent: 0,
     maxConcurrentPositions: 200,
-    tradeSizePercent: 3.0,
-    tradeSizeUsd: 3.0,
+    tradeSizePercent: 1.0,
+    tradeSizeUsd: 1.0,
     consecutiveLosses: 0,
     circuitBreakerUntilMs: undefined,
     circuitBreakerReason: undefined,
@@ -366,12 +367,9 @@ function maybeSendReserveAlert(currentCash: number, activePositionsCount: number
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
       const lockAlert = `
-⏸️ <b>[PAPER TRADING: $20 RESERVE LOCK]</b> 🛡️
-<i>Liquid paper cash has reached the $20.00 safety floor ($${currentCash.toFixed(2)} USD).</i>
-
-🚫 <b>New entries paused:</b> Capital protected at $20 floor (system will not remove funds).
-⏳ <b>Waiting for profit:</b> <b>${activePositionsCount} active open position(s)</b> are running in the market.
-📈 <b>Auto-Resume:</b> As soon as active positions take profit (2X scale-out or trailing stop), profits will restore wallet and new entries will resume automatically!
+⏸️ <b>CAPITAL RESERVE LOCK ($20 FLOOR)</b>
+🛡️ Cash at <code>$${currentCash.toFixed(2)} USD</code> • Entries paused to protect capital.
+⏳ <b>${activePositionsCount} active trend(s) running.</b> New entries resume on profit!
       `.trim();
       bot.sendMessage(env.TELEGRAM_CHAT_ID, lockAlert, { parse_mode: 'HTML' }).catch(() => {});
     } catch {}
@@ -425,21 +423,16 @@ export async function checkAndRefillIfNoProfit(
   await persistPaperTradingState();
 
   console.log(
-    `💵 [PAPER MONEY AUTO-REFILL #${cachedWallet.autoRefillCount}] Zero active positions remaining ("no profit at all") & balance reached $20 floor ($${previousCash.toFixed(2)} USD). Added +$${topUpAmount.toFixed(2)} USD to existing balance -> Restored paper wallet back to $${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD! (Refilled ${cachedWallet.autoRefillCount}x total • Cumulative Refilled: +$${cachedWallet.totalRefilledUsd.toFixed(2)} USD)`
+    `💵 [PAPER MONEY AUTO-REFILL #${cachedWallet.autoRefillCount}] Zero active positions remaining & balance reached $20 floor. Added +$${topUpAmount.toFixed(2)} USD -> Restored to $${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD`
   );
 
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
       const safeSym = candidateSymbol ? escapeHtml(candidateSymbol) : '';
       const refillAlert = `
-🔄 <b>[PAPER MONEY AUTO-REFILLED TO $100]</b> ⚡
-<i>All open positions concluded with no profit remaining, and cash reached the $20 reserve floor!</i>
-
-💵 <b>Added to Existing Balance:</b> <code>+$${topUpAmount.toFixed(2)} USD</code> (from $${previousCash.toFixed(2)})
-💰 <b>Restored Paper Wallet:</b> <code>$${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD</code> (<code>${cachedWallet.liquidCashSol.toFixed(3)} SOL</code>)
-🔢 <b>Auto-Refill Event:</b> <b>${cachedWallet.autoRefillCount} time${cachedWallet.autoRefillCount === 1 ? '' : 's'}</b>
-📊 <b>Total Cumulative Refilled:</b> <code>+$${cachedWallet.totalRefilledUsd.toFixed(2)} USD</code>
-🎯 <b>Context:</b> ${escapeHtml(triggerContext)}${safeSym ? ` (Ready to trade <b>$${safeSym}</b>)` : ''}
+🔄 <b>CAPITAL RESTORED ($100 BASELINE)</b>
+💰 Cash: <b>$${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD</b> (<code>+$${topUpAmount.toFixed(2)} added</code>)
+🎯 Context: Zero active trades remaining${safeSym ? ` • Ready for <b>$${safeSym}</b>` : ''}
       `.trim();
 
       bot.sendMessage(env.TELEGRAM_CHAT_ID, refillAlert, { parse_mode: 'HTML' }).catch(() => {});
@@ -514,8 +507,8 @@ export async function processPaperTradeBuy(
     (p) => p.status !== 'CLOSED'
   ).length;
 
-  // 6. Compute dynamic capital allocation:
-  // Bounded Autonomy: AI determines sizing between 1.0% and 3.0% (hard Iron Cage ceiling)
+  // 6. Compute capital allocation:
+  // User Rule: "the amount used to trade shouldn't be more than a dollar (charges per trade can be added to the dollar)"
   let currentOpenValue = 0;
   for (const pos of activePaperPositions.values()) {
     if (pos.status !== 'CLOSED') {
@@ -524,24 +517,11 @@ export async function processPaperTradeBuy(
   }
   const currentNetWorth = cachedWallet.liquidCashUsd + currentOpenValue;
 
-  let targetPct = 3.0;
-  if (candidate.aiScore && typeof candidate.aiScore.suggestedAllocationPct === 'number') {
-    targetPct = candidate.aiScore.suggestedAllocationPct;
-  } else if (candidate.aiScore) {
-    const conviction = candidate.aiScore.convictionScore || 70;
-    if (conviction >= 85 && candidate.aiScore.rugRisk === 'LOW') {
-      targetPct = 3.0;
-    } else if (conviction >= 70) {
-      targetPct = 2.0;
-    } else {
-      targetPct = 1.2;
-    }
-  }
-  // Hard Iron Cage Clamp: Never exceed 3.0%, never allocate less than 1.0% for valid trades
-  const effectiveAllocationPct = Math.min(3.0, Math.max(1.0, Number(targetPct.toFixed(1))));
-  let dynamicTradeSize = Math.max(1.0, Number((currentNetWorth * (effectiveAllocationPct / 100)).toFixed(2)));
+  // The base trade amount used to buy tokens is strictly capped at $1.00 USD
+  let dynamicTradeSize = MAX_PAPER_TRADE_SIZE_USD;
+  const effectiveAllocationPct = Number(((dynamicTradeSize / Math.max(1, currentNetWorth)) * 100).toFixed(1));
 
-  // 7. Compute real network friction
+  // 7. Compute real network friction (charges per trade added to the dollar)
   const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
 
   // 8. $20 Safety Reserve Floor & Conditional Refill Engine:
@@ -551,10 +531,10 @@ export async function processPaperTradeBuy(
   // can it add money to the exsisting one to take our paper money back to $100"
   let didAutoRefill = false;
   let refilledAmount = 0;
-  const minRequiredCash = 1.0 + feeUsd;
+  const minRequiredCash = dynamicTradeSize + feeUsd;
   const cashAboveReserve = cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD;
 
-  // Check if liquid cash has reached the $20 floor, or cannot even fund the minimum $1 trade without breaching $20
+  // Check if liquid cash has reached the $20 floor, or cannot fund the trade + charges without breaching $20
   if (cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD || cashAboveReserve < minRequiredCash) {
     const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
       (p) => p.status !== 'CLOSED'
@@ -582,19 +562,19 @@ export async function processPaperTradeBuy(
 
   // Ensure dynamicTradeSize does NOT dip into the $20 reserve floor
   const safeCashBudget = Math.max(0, cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd);
-  if (safeCashBudget < 1.0) {
+  if (safeCashBudget < dynamicTradeSize) {
     const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
       (p) => p.status !== 'CLOSED'
     );
     if (activeOpenPositions.length > 0) {
       console.log(
-        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD. Available above reserve ($${safeCashBudget.toFixed(2)}) is below $1 minimum trade. Waiting for profit to enter from ${activeOpenPositions.length} active position(s)...`
+        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD. Available above reserve ($${safeCashBudget.toFixed(2)}) is below trade budget. Waiting for profit to enter from ${activeOpenPositions.length} active position(s)...`
       );
       maybeSendReserveAlert(cachedWallet.liquidCashUsd, activeOpenPositions.length);
       return null;
     } else {
       const preRefillCash = cachedWallet.liquidCashUsd;
-      const refilled = await checkAndRefillIfNoProfit(`Zero active positions and available cash < $1`, candidate.tokenSymbol);
+      const refilled = await checkAndRefillIfNoProfit(`Zero active positions and available cash < trade budget`, candidate.tokenSymbol);
       if (refilled) {
         didAutoRefill = true;
         refilledAmount = Number((cachedWallet.liquidCashUsd - preRefillCash).toFixed(2));
@@ -603,13 +583,12 @@ export async function processPaperTradeBuy(
   }
 
   if (didAutoRefill) {
-    const updatedNetWorth = cachedWallet.liquidCashUsd + currentOpenValue;
-    dynamicTradeSize = Math.max(1.0, Number((updatedNetWorth * (effectiveAllocationPct / 100)).toFixed(2)));
+    dynamicTradeSize = MAX_PAPER_TRADE_SIZE_USD;
   }
 
-  // Clamp dynamicTradeSize to never breach $20 floor
-  const maxAllowedTradeSize = Math.max(1.0, Number((cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd).toFixed(2)));
-  dynamicTradeSize = Math.max(1.0, Math.min(dynamicTradeSize, maxAllowedTradeSize));
+  // Strictly clamp trade size to not exceed $1.00 USD, with safe budget cap
+  const maxAllowedTradeSize = Math.max(0.1, Number((cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd).toFixed(2)));
+  dynamicTradeSize = Math.min(MAX_PAPER_TRADE_SIZE_USD, maxAllowedTradeSize);
   const tradeSizeUsd = dynamicTradeSize;
   cachedWallet.tradeSizeUsd = dynamicTradeSize;
   const effectiveCashDeduction = tradeSizeUsd + feeUsd;
@@ -684,47 +663,17 @@ export async function processPaperTradeBuy(
   // Send Telegram receipt
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
-      let slmReceiptSection = '';
-      if (candidate.slmVerdict) {
-        const multDisplay = slmMultiples.map((m: number) => `${m}X`).join(' • ');
-        const signalDisplay = candidate.slmVerdict.viabilitySignal === 'GO'
-          ? '🟢 <b>CONFIRMED (GO)</b>'
-          : '🔴 <b>NO_GO (Traded with paper money anyway)</b>';
-        slmReceiptSection = `\n\n🛡️ <b>SLM QUALITY GATE (ZERO-COST):</b>\n` +
-          `• 🚦 Signal: ${signalDisplay}\n` +
-          `• 🔥 Organic Hype: <code>${candidate.slmVerdict.organicHypeScore}/10</code> (bot raid passed)\n` +
-          `• 🧠 Narrative Velocity: <code>${candidate.slmVerdict.narrativeStrength}/10</code>\n` +
-          `• 🎯 Ladder Exits: <code>${multDisplay}</code> | Moonbag Stop: <code>-${slmTrailingStopPct}%</code>\n` +
-          `• ⚖️ <i>${escapeHtml(candidate.slmVerdict.justificationSummary)}</i>`;
-      }
-
       const safeSymbol = escapeHtml(candidate.tokenSymbol);
-      const safeName = escapeHtml(candidate.tokenName || candidate.tokenSymbol);
-      const safeThesis = escapeHtml(aiThesis);
+      const mcapText = candidate.marketCap >= 1_000_000
+        ? `$${(candidate.marketCap / 1_000_000).toFixed(2)}M`
+        : `$${Math.round(candidate.marketCap / 1000)}K`;
 
       const receiptCard = `
-💼 <b>[PAPER TRADE EXECUTED: BOUNDED AUTONOMY]</b> ⚡
-<i>Simulating 100% Real Market Conditions &amp; Network Fees</i>
-
-🪙 Token: <b>$${safeSymbol}</b> (${safeName})
-💰 Entry Price: <code>$${candidate.priceUsd.toFixed(6)}</code>
-📊 Market Cap: <code>$${(candidate.marketCap / 1000).toFixed(1)}K</code>
-💵 Position Size: <b>$${tradeSizeUsd.toFixed(2)}</b> (<b>${effectiveAllocationPct}%</b> of capital • <code>${investedSol} SOL</code>)
-📉 Real Slippage: <b>${(slippagePct * 100).toFixed(1)}%</b>
-⛽ Priority Gas Fee: <code>${feeSol} SOL</code> (<b>$${feeUsd.toFixed(2)}</b>)${slmReceiptSection}
-
-🤖 <b>AI AUTONOMOUS DISCRETION:</b>
-• 🎯 Conviction: <b>${aiConviction}/100</b> (${aiConviction >= 80 ? '🔥 Ultra High' : '⚡ Strong'})
-• 🧭 Strategy Profile: <b>${strategyProfile}</b> (Mode: <code>Uncapped Trailing Runner</code>)
-• 💡 Thesis: <i>${safeThesis}</i>
-
-💎 <b>UNCAPPED RUNNER MODE (NO CEILING CAP):</b>
-• 🛑 <b>Hard Allocation Cap:</b> Max 3.0% capital staked per trade ($1 - $3)
-• 🚀 <b>Infinite Upside:</b> Zero profit ceiling (No 3X/5X cap) — rides the market up indefinitely!
-• 🛡️ <b>Principal De-risking:</b> 100% initial principal secured on first double (2X)
-• 🛑 <b>Trailing Stop:</b> Remaining moonbag exits ONLY when market trails down from peak!${didAutoRefill ? `\n\n🔄 <b>AUTO-REFILL ACTIVATED:</b> +$${refilledAmount.toFixed(2)} USD added (Refill Event #${cachedWallet.autoRefillCount} • Total refilled: $${cachedWallet.totalRefilledUsd.toFixed(2)})` : ''}
-
-💼 <b>Paper Wallet:</b> <code>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</code> available (${openCount + 1}/${cachedWallet.maxConcurrentPositions} slots${cachedWallet.autoRefillCount > 0 ? ` • 🔄 <b>Refilled: ${cachedWallet.autoRefillCount}x</b>` : ''})
+🟢 <b>BOUGHT | $${safeSymbol}</b>
+💰 Price: <code>$${candidate.priceUsd.toFixed(6)}</code> • MCap: <b>${mcapText}</b>
+💵 Capital: <b>$${tradeSizeUsd.toFixed(2)}</b> (Gas: <b>$${feeUsd.toFixed(2)}</b>)
+🎯 Plan: <b>Trend Rider (2X de-risk ➔ Moonbag)</b>
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
       `.trim();
 
       await bot.sendMessage(env.TELEGRAM_CHAT_ID, receiptCard, {
@@ -734,7 +683,11 @@ export async function processPaperTradeBuy(
           inline_keyboard: [
             [
               { text: '📊 DexScreener Chart', url: position.dexUrl },
+              { text: `🔴 Exit $${position.tokenSymbol}`, callback_data: `cmd_exit_single_${position.tokenMint}` },
+            ],
+            [
               { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
+              { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
             ],
           ],
         },
@@ -810,18 +763,12 @@ async function executePaperTrailingStopExit(
 
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
+      const pnlSign = pos.realizedPnlUsd >= 0 ? '+' : '';
       const tpCard = `
-🛡️ <b>[UNCAPPED RUNNER: TRAILING STOP EXECUTED]</b> 🛑
-<i>Peak Reversal Triggered -${trailingStopPct}% Trailing Stop • Full Trade Completed</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-🔝 Peak Reached: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (<b>${pos.peakMultiplier}X Peak</b>)
-📉 Trailing Pullback: <b>-${dropFromPeakPct.toFixed(1)}% from Highs</b> (Stop Trigger: <code>-${trailingStopPct}%</code>)
-💰 Final Moonbag Sold: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-🏆 <b>Total Net Trade Profit:</b> <b>+$${pos.realizedPnlUsd.toFixed(2)} USD</b> (<code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>) 💸
-⛽ Sell Gas: <code>${feeSol} SOL</code> | Slippage: <code>${(sellSlippage * 100).toFixed(1)}%</code>
-
-💼 <b>Total Paper Portfolio:</b> <code>$${(cachedWallet.liquidCashUsd + cachedWallet.totalInvestedUsd).toFixed(2)} USD</code>${cachedWallet.autoRefillCount > 0 ? ` • 🔄 <b>Refills: ${cachedWallet.autoRefillCount}x</b>` : ''}
+🛑 <b>TREND EXIT | $${pos.tokenSymbol}</b>
+🔝 Peak: <b>${pos.peakMultiplier}X</b> (Trailed -${dropFromPeakPct.toFixed(0)}%)
+💵 Net Profit: <b>${pnlSign}$${pos.realizedPnlUsd.toFixed(2)} USD</b>
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
       `.trim();
       await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
     } catch {}
@@ -879,15 +826,9 @@ async function executePaperStopLossExit(
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
       const cutCard = `
-🛡️ <b>[PAPER TRADING: CAPITAL PROTECTION STOP-LOSS]</b> 🛑
-<i>${isEmergencyRug ? '🚨 Emergency Cut on Catastrophic Dump' : '📉 Sustained -35% Breakdown Confirmed (45s Buffer)'}</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📉 Dip: <b>${gainFromEntryPct.toFixed(1)}% below entry</b>
-💵 Capital Preserved: <code>+$${netReturnUsd.toFixed(2)} USD</code> (from $${pos.investedUsd.toFixed(2)} position)
-🩸 Loss Incurred: <code>-$${Math.abs(lossUsd).toFixed(2)} USD</code>
-⛽ Sell Gas: <code>${feeSol} SOL</code> | Slippage: <code>${(sellSlippage * 100).toFixed(1)}%</code>
-💼 <b>Liquid Cash:</b> <code>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</code>
+🛡️ <b>STOP-LOSS | $${pos.tokenSymbol}</b>
+🩸 Loss: <b>-$${Math.abs(lossUsd).toFixed(2)} USD</b> (Preserved: +$${netReturnUsd.toFixed(2)})
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
       `.trim();
       bot.sendMessage(env.TELEGRAM_CHAT_ID, cutCard, { parse_mode: 'HTML' }).catch(() => {});
     } catch {}
@@ -959,327 +900,152 @@ export async function checkPaperPositionsTpSl(
   // 3. Trailing Stop: Sells remaining bag ONLY when price trails down from peak.
   // =========================================================================
 
-  // --- Profile SLM: Quality Gate Laddered Take-Profits & Dynamic Moonbag Trailing Stop ---
-  if (pos.slmMultiples && pos.slmMultiples.length >= 2) {
-    const m1 = pos.slmMultiples[0] || 2.0;
-    const m2 = pos.slmMultiples[1] || 4.0;
-    const trailingStopPct = pos.slmTrailingStopPct || 18.0;
+  // =========================================================================
+  // INFINITE TREND RIDER & CAPITAL MANAGEMENT ENGINE
+  // "ride trends till forever so we can maximize profit. understand money management and capitals"
+  // 1. Stage 1 (2.0X / +100%): 50% De-Risking -> Recovers 100% of the invested $1.00 capital!
+  //    Trade is now 100% RISK-FREE. The $1.00 is returned to liquid cash to deploy into new gems.
+  // 2. Stage 2 (5.0X / +400%): Harvests 25% of the remaining bag to bank massive profit to cash.
+  // 3. Stage 3 (10.0X / +900%): Harvests 25% of the remaining bag to bank more profit to cash.
+  // 4. Infinite Moonbag: The core runner bag rides the trend FOREVER.
+  //    No artificial 3X/5X/10X caps. Coins can run to 20X, 50X, 100X, 500X+.
+  // 5. Adaptive Trend Trailing Stop (35% drop from highest peak):
+  //    Avoids premature stop-outs on normal crypto meme wicks while locking in peak gains
+  //    only when the macro trend genuinely breaks down.
+  // =========================================================================
 
-    const target1Gain = (m1 - 1) * 100.0;
-    const target2Gain = (m2 - 1) * 100.0;
+  // Stage 1: Hit 2.0X (+100%) -> De-Risk 50% of tokens to secure 100% principal back
+  if (!pos.tp1Hit && gainFromEntryPct >= 100.0) {
+    const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+    const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 30_000);
 
-    // Stage 1: Target 1 (e.g. 2.0X / +100%) -> Sell 35% of initial tokens (De-risk trade & lock in principal)
-    if (!pos.tp1Hit && gainFromEntryPct >= target1Gain) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 30_000);
+    const tokensToSell = pos.initialTokens * 0.5;
+    const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
+    const netReturnUsd = Math.max(0.01, grossReturnUsd - feeUsd);
+    const costBasisUsd = pos.investedUsd * 0.5;
 
-      const tokensToSell = pos.initialTokens * 0.35;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.35;
+    pos.tp1Hit = true;
+    pos.status = 'PARTIAL_TP_2X';
+    pos.remainingTokens -= tokensToSell;
+    pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
+    pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.5;
 
-      pos.tp1Hit = true;
-      pos.status = 'PARTIAL_TP_2X';
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.35;
+    cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + netReturnUsd).toFixed(2));
+    cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+    cachedWallet.totalRealizedPnlUsd = Number((cachedWallet.totalRealizedPnlUsd + (netReturnUsd - costBasisUsd)).toFixed(2));
+    cachedWallet.totalFeesPaidSol += feeSol;
+    cachedWallet.totalFeesPaidUsd += feeUsd;
 
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
+    await persistPaperTradingState();
 
-      await persistPaperTradingState();
+    console.log(
+      `🎯 [2X DE-RISK] $${pos.tokenSymbol} hit +${gainFromEntryPct.toFixed(0)}%! Sold 50% for +$${netReturnUsd.toFixed(2)}. 100% principal back in cash! Remaining bag riding trend forever!`
+    );
 
-      console.log(
-        `🎯 [SLM LADDER TP1 (${m1}X)] $${pos.tokenSymbol} hit +${gainFromEntryPct.toFixed(1)}%! Sold 35% for +$${netReturnUsd.toFixed(2)}. Remaining 65% riding UNCAPPED with -${trailingStopPct}% trailing stop!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🎯 <b>[SLM QUALITY GATE: TP1 HIT (+${gainFromEntryPct.toFixed(0)}% / ${m1}X)]</b> 🚀
-<i>Tier 1 Scale-Out Executed (35% De-Risking)</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (${m1}X Target)</b>
-💰 Action: <b>Sold 35% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-💎 <b>Uncapped Moonbag:</b> Remaining 65% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (No ceiling cap)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
+    if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+      try {
+        const tpCard = `
+🎯 <b>2X DE-RISKED | $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)</b>
+💵 Returned: <b>+$${netReturnUsd.toFixed(2)} USD</b> (Principal secured!)
+💎 Runner: <b>Remaining bag riding trend forever</b>
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
+        `.trim();
+        await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
+      } catch {}
     }
-
-    // Stage 2: Target 2 (e.g. 4.0X / +300%) -> Sell another 35% of initial tokens (Lock in massive profit)
-    if (pos.tp1Hit && !pos.tp2Hit && gainFromEntryPct >= target2Gain) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 40_000);
-
-      const tokensToSell = pos.initialTokens * 0.35;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.35;
-
-      pos.tp2Hit = true;
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.35;
-
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
-
-      await persistPaperTradingState();
-
-      console.log(
-        `🚀 [SLM LADDER TP2 (${m2}X)] $${pos.tokenSymbol} hit ${m2}X! Sold 35% for +$${netReturnUsd.toFixed(2)}. Remaining 30% riding UNCAPPED with -${trailingStopPct}% trailing stop!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🚀 <b>[SLM QUALITY GATE: TP2 HIT (+${gainFromEntryPct.toFixed(0)}% / ${m2}X)]</b> 🏆
-<i>Tier 2 Scale-Out Executed (35% Mega Profit Harvested)</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (${m2}X Target)</b>
-💰 Action: <b>Sold 35% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-💎 <b>Pure Moonbag:</b> Remaining 30% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (No ceiling cap)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
-    }
-
-    // Dynamic Trailing Stop on Moonbag: Triggered when price trails down from peak
-    if ((pos.tp1Hit || pos.peakMultiplier >= 1.6) && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-      await executePaperTrailingStopExit(pos, currentPriceUsd, solPrice, pairData, trailingStopPct, dropFromPeakPct, 'SLM Quality Gate');
-      return;
-    }
+    return;
   }
 
-  // --- Profile A: VIRAL_RUNNER (Uncapped Trailing Moonshot) ---
-  else if (profile === 'VIRAL_RUNNER') {
-    const trailingStopPct = 20.0;
+  // Stage 2: Hit 5.0X (+400%) -> Harvest 25% of remaining tokens (lock in profit, keep 75% riding!)
+  if (pos.tp1Hit && !pos.tp2Hit && gainFromEntryPct >= 400.0) {
+    const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+    const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 40_000);
 
-    // Stage 1: +100% (2.0X) -> Sell 35% of initial tokens (De-risk trade)
-    if (!pos.tp1Hit && gainFromEntryPct >= 100.0) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 30_000);
+    const tokensToSell = pos.remainingTokens * 0.25;
+    const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
+    const netReturnUsd = Math.max(0.01, grossReturnUsd - feeUsd);
+    const remainingFraction = pos.initialTokens > 0 ? tokensToSell / pos.initialTokens : 0.25;
+    const costBasisUsd = pos.investedUsd * remainingFraction;
 
-      const tokensToSell = pos.initialTokens * 0.35;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.35;
+    pos.tp2Hit = true;
+    pos.remainingTokens -= tokensToSell;
+    pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
+    pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * remainingFraction;
 
-      pos.tp1Hit = true;
-      pos.status = 'PARTIAL_TP_2X';
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.35;
+    cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + netReturnUsd).toFixed(2));
+    cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+    cachedWallet.totalRealizedPnlUsd = Number((cachedWallet.totalRealizedPnlUsd + (netReturnUsd - costBasisUsd)).toFixed(2));
+    cachedWallet.totalFeesPaidSol += feeSol;
+    cachedWallet.totalFeesPaidUsd += feeUsd;
 
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
+    await persistPaperTradingState();
 
-      await persistPaperTradingState();
+    console.log(
+      `🚀 [5X HARVEST] $${pos.tokenSymbol} hit 5X (+${gainFromEntryPct.toFixed(0)}%)! Harvested 25% for +$${netReturnUsd.toFixed(2)}. Remaining 75% riding trend forever!`
+    );
 
-      console.log(
-        `🎯 [VIRAL RUNNER TP1 (+100% / 2.0X)] $${pos.tokenSymbol} hit +${gainFromEntryPct.toFixed(1)}%! Sold 35% for +$${netReturnUsd.toFixed(2)}. Remaining 65% riding UNCAPPED with -${trailingStopPct}% trailing stop!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🎯 <b>[VIRAL RUNNER: TP1 HIT (+100% / 2.0X)]</b> 🚀
-<i>Tier 1 Scale-Out Executed (35% De-Risking)</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (2.0X Multiplier)</b>
-💰 Action: <b>Sold 35% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-💎 <b>Uncapped Runner:</b> Remaining 65% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (No 10X cap • Rides indefinitely until market trails down)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
+    if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+      try {
+        const tpCard = `
+🚀 <b>5X HARVEST | $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)</b>
+💰 Harvested: <b>+$${netReturnUsd.toFixed(2)} USD</b> to cash
+💎 Runner: <b>Core moonbag still riding trend!</b>
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
+        `.trim();
+        await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
+      } catch {}
     }
-
-    // Stage 2: +400% (5.0X) -> Sell another 35% of initial tokens (Lock in massive profit)
-    if (pos.tp1Hit && !pos.tp2Hit && gainFromEntryPct >= 400.0) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 40_000);
-
-      const tokensToSell = pos.initialTokens * 0.35;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.35;
-
-      pos.tp2Hit = true;
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.35;
-
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
-
-      await persistPaperTradingState();
-
-      console.log(
-        `🚀 [VIRAL RUNNER TP2 (+400% / 5.0X)] $${pos.tokenSymbol} hit 5X peak! Sold 35% for +$${netReturnUsd.toFixed(2)}. Remaining 30% riding UNCAPPED with -${trailingStopPct}% trailing stop!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🚀 <b>[VIRAL RUNNER: TP2 HIT (+400% / 5.0X)]</b> 🏆
-<i>Tier 2 Scale-Out Executed (35% Mega Profit Harvested)</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (5.0X Multiplier)</b>
-💰 Action: <b>Sold 35% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-💎 <b>Pure Moonbag:</b> Final 30% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (No 10X cap • Rides indefinitely until market trails down)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
-    }
-
-    // Dynamic Trailing Stop on Moonbag: Sells remaining bag ONLY when market trails down from peak!
-    if ((pos.tp1Hit || pos.peakMultiplier >= 1.6) && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-      await executePaperTrailingStopExit(pos, currentPriceUsd, solPrice, pairData, trailingStopPct, dropFromPeakPct, 'VIRAL_RUNNER');
-      return;
-    }
+    return;
   }
 
-  // --- Profile B: FAST_SCALP (Uncapped Trailing Runner • 3.0X Cap Removed) ---
-  else if (profile === 'FAST_SCALP') {
-    const trailingStopPct = 15.0;
+  // Stage 3: Hit 10.0X (+900%) -> Harvest another 25% of remaining tokens (lock in mega profit!)
+  if (pos.tp1Hit && !pos.tp3Hit && gainFromEntryPct >= 900.0) {
+    const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+    const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 50_000);
 
-    // Stage 1: +75% (1.75X) -> Sell 50% of initial tokens (De-risk trade)
-    if (!pos.tp1Hit && pos.status === 'OPEN' && gainFromEntryPct >= 75.0) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 25_000);
+    const tokensToSell = pos.remainingTokens * 0.25;
+    const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
+    const netReturnUsd = Math.max(0.01, grossReturnUsd - feeUsd);
+    const remainingFraction = pos.initialTokens > 0 ? tokensToSell / pos.initialTokens : 0.25;
+    const costBasisUsd = pos.investedUsd * remainingFraction;
 
-      const tokensToSell = pos.initialTokens * 0.5;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.5;
+    pos.tp3Hit = true;
+    pos.remainingTokens -= tokensToSell;
+    pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
+    pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * remainingFraction;
 
-      pos.tp1Hit = true;
-      pos.status = 'PARTIAL_TP_2X';
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.5;
+    cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + netReturnUsd).toFixed(2));
+    cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+    cachedWallet.totalRealizedPnlUsd = Number((cachedWallet.totalRealizedPnlUsd + (netReturnUsd - costBasisUsd)).toFixed(2));
+    cachedWallet.totalFeesPaidSol += feeSol;
+    cachedWallet.totalFeesPaidUsd += feeUsd;
 
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
+    await persistPaperTradingState();
 
-      await persistPaperTradingState();
+    console.log(
+      `🏆 [10X MEGA HARVEST] $${pos.tokenSymbol} hit 10X (+${gainFromEntryPct.toFixed(0)}%)! Harvested 25% for +$${netReturnUsd.toFixed(2)}. Remaining moonbag riding indefinitely!`
+    );
 
-      console.log(
-        `🎯 [FAST SCALP TP1 HIT (+75% / 1.75X)] $${pos.tokenSymbol} sold 50% for +$${netReturnUsd.toFixed(2)}. Remaining 50% riding UNCAPPED with -${trailingStopPct}% trailing stop!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🎯 <b>[FAST SCALP TAKE-PROFIT HIT]</b> ⚡
-<i>Quick 50% Scale-Out Executed at 1.75X</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (1.75X Multiplier)</b>
-💰 Action: <b>Sold 50% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code>
-💎 <b>Uncapped Runner:</b> Remaining 50% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (3.0X cap removed • Rides indefinitely until market trails down)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
+    if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+      try {
+        const tpCard = `
+🏆 <b>10X MEGA RUNNER | $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)</b>
+💰 Harvested: <b>+$${netReturnUsd.toFixed(2)} USD</b> to cash
+💎 Runner: <b>Moonbag riding indefinitely!</b>
+💼 Liquid Cash: <b>$${cachedWallet.liquidCashUsd.toFixed(2)} USD</b>
+        `.trim();
+        await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
+      } catch {}
     }
-
-    // Dynamic Trailing Stop on Moonbag: Sells remaining bag ONLY when market trails down from peak!
-    if ((pos.tp1Hit || pos.peakMultiplier >= 1.6) && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-      await executePaperTrailingStopExit(pos, currentPriceUsd, solPrice, pairData, trailingStopPct, dropFromPeakPct, 'FAST_SCALP');
-      return;
-    }
+    return;
   }
 
-  // --- Profile C: BALANCED_MOMENTUM & Default (Uncapped Trailing Runner • 5.0X Cap Removed) ---
-  else {
-    const trailingStopPct = 18.0;
-
-    // Stage 1: +100% (2.0X) -> Sell 50% to secure 100% principal back
-    if (!pos.tp1Hit && pos.status === 'OPEN' && gainFromEntryPct >= 100.0) {
-      const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
-      const sellSlippage = calculateRealSlippage(pairData?.liquidity?.usd || 30_000);
-
-      const tokensToSell = pos.initialTokens * 0.5;
-      const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
-      const netReturnUsd = Math.max(0, grossReturnUsd - feeUsd);
-      const costBasisUsd = pos.investedUsd * 0.5;
-
-      pos.tp1Hit = true;
-      pos.status = 'PARTIAL_TP_2X';
-      pos.remainingTokens -= tokensToSell;
-      pos.realizedPnlUsd += netReturnUsd - costBasisUsd;
-      pos.realizedSolProfit += netReturnUsd / solPrice - pos.investedSol * 0.5;
-
-      cachedWallet.liquidCashUsd += netReturnUsd;
-      cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
-      cachedWallet.totalRealizedPnlUsd += netReturnUsd - costBasisUsd;
-      cachedWallet.totalFeesPaidSol += feeSol;
-      cachedWallet.totalFeesPaidUsd += feeUsd;
-
-      await persistPaperTradingState();
-
-      console.log(
-        `🎯 [BALANCED 2X TAKE-PROFIT] $${pos.tokenSymbol} hit +${gainFromEntryPct.toFixed(1)}%! Sold 50% for +$${netReturnUsd.toFixed(2)}. 100% principal back in liquid cash!`
-      );
-
-      if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-        try {
-          const tpCard = `
-🎯 <b>[PAPER TRADING: 2X TAKE-PROFIT HIT]</b> 🚀
-<i>Automated 50% Scale-Out Executed (100% Principal Returned)</i>
-
-🪙 Token: <b>$${pos.tokenSymbol}</b>
-📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (2.0X Multiplier)</b>
-💰 Action: <b>Sold 50% of position</b>
-💵 Net Harvested: <code>+$${netReturnUsd.toFixed(2)} USD</code> (<code>+${(netReturnUsd / solPrice).toFixed(3)} SOL</code>)
-💎 <b>Uncapped Moonbag:</b> Remaining 50% riding <b>UNCAPPED with -${trailingStopPct}% Trailing Stop</b> (5.0X cap removed • Rides indefinitely until market trails down)!
-          `.trim();
-          await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpCard, { parse_mode: 'HTML' });
-        } catch {}
-      }
-      return;
-    }
-
-    // Dynamic Trailing Stop on Moonbag: Sells remaining bag ONLY when market trails down from peak!
-    if ((pos.tp1Hit || pos.peakMultiplier >= 1.6) && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-      await executePaperTrailingStopExit(pos, currentPriceUsd, solPrice, pairData, trailingStopPct, dropFromPeakPct, 'BALANCED_MOMENTUM');
-      return;
-    }
+  // Stage 4: Dynamic Adaptive Trailing Stop for Moonbag Runners (35% pullback from highest peak)
+  // Ensures the trend can breathe and ride indefinitely without premature stop-out on normal 15-20% wicks.
+  const trailingStopPct = 35.0;
+  if ((pos.tp1Hit || pos.peakMultiplier >= 2.0) && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
+    await executePaperTrailingStopExit(pos, currentPriceUsd, solPrice, pairData, trailingStopPct, dropFromPeakPct, 'Infinite Trend Rider');
+    return;
   }
 }
 
@@ -1340,4 +1106,244 @@ export async function getPaperPortfolioSummary(): Promise<PaperPortfolioSummary>
  */
 export function setPaperWalletCashForTesting(cashUsd: number): void {
   cachedWallet.liquidCashUsd = cashUsd;
+}
+
+export interface ExitPaperPositionResult {
+  success: boolean;
+  tokenMint: string;
+  tokenSymbol: string;
+  tokensSold: number;
+  grossReturnUsd: number;
+  netReturnUsd: number;
+  realizedPnlUsd: number;
+  exitPriceUsd: number;
+  newLiquidCashUsd: number;
+  newLiquidCashSol: number;
+  error?: string;
+}
+
+export interface ExitAllPaperPositionsResult {
+  success: boolean;
+  count: number;
+  totalReturnedUsd: number;
+  totalRealizedPnlUsd: number;
+  newLiquidCashUsd: number;
+  newLiquidCashSol: number;
+  exitedPositions: ExitPaperPositionResult[];
+  error?: string;
+}
+
+/**
+ * Exits any individual paper trade and returns the proceeds directly back into the account liquid cash.
+ */
+export async function exitPaperPosition(
+  tokenMintOrSymbol: string,
+  reason: string = 'MANUAL'
+): Promise<ExitPaperPositionResult> {
+  const query = tokenMintOrSymbol.trim();
+  // Find position by mint or ticker symbol
+  let pos = activePaperPositions.get(query);
+  if (!pos) {
+    const cleanSym = query.replace(/^\$/, '').toUpperCase();
+    for (const p of activePaperPositions.values()) {
+      if (p.tokenSymbol.toUpperCase() === cleanSym && p.status !== 'CLOSED') {
+        pos = p;
+        break;
+      }
+    }
+  }
+
+  if (!pos || pos.status === 'CLOSED') {
+    return {
+      success: false,
+      tokenMint: query,
+      tokenSymbol: query,
+      tokensSold: 0,
+      grossReturnUsd: 0,
+      netReturnUsd: 0,
+      realizedPnlUsd: 0,
+      exitPriceUsd: 0,
+      newLiquidCashUsd: cachedWallet.liquidCashUsd,
+      newLiquidCashSol: cachedWallet.liquidCashSol,
+      error: `No active open position found for "${query}"`,
+    };
+  }
+
+  const solPrice = await fetchLiveSolPrice();
+  let currentPriceUsd = pos.currentPriceUsd;
+
+  // Attempt live DexScreener price check
+  try {
+    const res = await axios.get(
+      `https://api.dexscreener.com/latest/dex/tokens/${pos.tokenMint}`,
+      { timeout: 3000 }
+    );
+    const pair = res.data?.pairs?.find((p: any) => p.chainId === 'solana');
+    if (pair?.priceUsd) {
+      const p = parseFloat(pair.priceUsd);
+      if (p > 0) currentPriceUsd = p;
+    }
+  } catch {}
+
+  const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+  const sellSlippage = calculateRealSlippage(30_000);
+
+  const tokensToSell = pos.remainingTokens;
+  const grossReturnUsd = tokensToSell * currentPriceUsd * (1 - sellSlippage);
+  const netReturnUsd = Number(Math.max(0.01, grossReturnUsd - feeUsd).toFixed(2));
+  const remainingFraction = pos.initialTokens > 0 ? tokensToSell / pos.initialTokens : 1.0;
+  const costBasisUsd = pos.investedUsd * remainingFraction;
+
+  pos.status = 'CLOSED';
+  pos.closedAt = Date.now();
+  pos.remainingTokens = 0;
+  pos.exitReason = (reason as any) || 'MANUAL';
+  pos.sellGasFeeSol = feeSol;
+  pos.sellGasFeeUsd = feeUsd;
+  pos.sellSlippagePct = Number((sellSlippage * 100).toFixed(2));
+  const realizedPnlUsd = Number((netReturnUsd - costBasisUsd).toFixed(2));
+  pos.realizedPnlUsd += realizedPnlUsd;
+  pos.realizedSolProfit += (netReturnUsd / solPrice) - (pos.investedSol * remainingFraction);
+
+  // Return money directly back to the account!
+  cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + netReturnUsd).toFixed(2));
+  cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+  cachedWallet.totalRealizedPnlUsd = Number((cachedWallet.totalRealizedPnlUsd + realizedPnlUsd).toFixed(2));
+  cachedWallet.totalFeesPaidSol += feeSol;
+  cachedWallet.totalFeesPaidUsd += feeUsd;
+
+  if (realizedPnlUsd >= 0) {
+    cachedWallet.winningTrades += 1;
+    cachedWallet.consecutiveLosses = 0;
+  } else {
+    cachedWallet.losingTrades += 1;
+    cachedWallet.consecutiveLosses += 1;
+  }
+
+  activePaperPositions.delete(pos.tokenMint);
+  closedPaperHistory.unshift(pos);
+  await persistPaperTradingState();
+
+  // If zero active positions left and liquid cash <= $20, check conditional refill
+  const remainingActive = Array.from(activePaperPositions.values()).filter(p => p.status !== 'CLOSED').length;
+  if (remainingActive === 0 && cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD) {
+    await checkAndRefillIfNoProfit(`Manual exit of $${pos.tokenSymbol} - zero active positions remaining`);
+  }
+
+  console.log(
+    `🚨 [MANUAL TRADE EXIT] $${pos.tokenSymbol} exited. Returned +$${netReturnUsd.toFixed(2)} USD back to account cash. Realized PnL: ${realizedPnlUsd >= 0 ? '+' : ''}$${realizedPnlUsd.toFixed(2)}. New Liquid Cash: $${cachedWallet.liquidCashUsd.toFixed(2)} USD`
+  );
+
+  return {
+    success: true,
+    tokenMint: pos.tokenMint,
+    tokenSymbol: pos.tokenSymbol,
+    tokensSold: tokensToSell,
+    grossReturnUsd: Number(grossReturnUsd.toFixed(2)),
+    netReturnUsd,
+    realizedPnlUsd,
+    exitPriceUsd: currentPriceUsd,
+    newLiquidCashUsd: cachedWallet.liquidCashUsd,
+    newLiquidCashSol: cachedWallet.liquidCashSol,
+  };
+}
+
+/**
+ * Exits ALL active open paper trades simultaneously and credits 100% of proceeds back to the account.
+ */
+export async function exitAllPaperPositions(reason: string = 'MANUAL_EXIT_ALL'): Promise<ExitAllPaperPositionsResult> {
+  const activeList = Array.from(activePaperPositions.values()).filter(p => p.status !== 'CLOSED');
+  if (activeList.length === 0) {
+    return {
+      success: true,
+      count: 0,
+      totalReturnedUsd: 0,
+      totalRealizedPnlUsd: 0,
+      newLiquidCashUsd: cachedWallet.liquidCashUsd,
+      newLiquidCashSol: cachedWallet.liquidCashSol,
+      exitedPositions: [],
+    };
+  }
+
+  const solPrice = await fetchLiveSolPrice();
+  const exitedPositions: ExitPaperPositionResult[] = [];
+  let totalReturnedUsd = 0;
+  let totalRealizedPnlUsd = 0;
+
+  for (const pos of activeList) {
+    const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
+    const sellSlippage = calculateRealSlippage(30_000);
+
+    const tokensToSell = pos.remainingTokens;
+    const grossReturnUsd = tokensToSell * pos.currentPriceUsd * (1 - sellSlippage);
+    const netReturnUsd = Number(Math.max(0.01, grossReturnUsd - feeUsd).toFixed(2));
+    const remainingFraction = pos.initialTokens > 0 ? tokensToSell / pos.initialTokens : 1.0;
+    const costBasisUsd = pos.investedUsd * remainingFraction;
+
+    pos.status = 'CLOSED';
+    pos.closedAt = Date.now();
+    pos.remainingTokens = 0;
+    pos.exitReason = (reason as any) || 'MANUAL';
+    pos.sellGasFeeSol = feeSol;
+    pos.sellGasFeeUsd = feeUsd;
+    pos.sellSlippagePct = Number((sellSlippage * 100).toFixed(2));
+    const pnl = Number((netReturnUsd - costBasisUsd).toFixed(2));
+    pos.realizedPnlUsd += pnl;
+    pos.realizedSolProfit += (netReturnUsd / solPrice) - (pos.investedSol * remainingFraction);
+
+    // Return proceeds directly to account cash!
+    cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + netReturnUsd).toFixed(2));
+    cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+    cachedWallet.totalRealizedPnlUsd = Number((cachedWallet.totalRealizedPnlUsd + pnl).toFixed(2));
+    cachedWallet.totalFeesPaidSol += feeSol;
+    cachedWallet.totalFeesPaidUsd += feeUsd;
+
+    if (pnl >= 0) {
+      cachedWallet.winningTrades += 1;
+      cachedWallet.consecutiveLosses = 0;
+    } else {
+      cachedWallet.losingTrades += 1;
+      cachedWallet.consecutiveLosses += 1;
+    }
+
+    activePaperPositions.delete(pos.tokenMint);
+    closedPaperHistory.unshift(pos);
+
+    totalReturnedUsd += netReturnUsd;
+    totalRealizedPnlUsd += pnl;
+
+    exitedPositions.push({
+      success: true,
+      tokenMint: pos.tokenMint,
+      tokenSymbol: pos.tokenSymbol,
+      tokensSold: tokensToSell,
+      grossReturnUsd: Number(grossReturnUsd.toFixed(2)),
+      netReturnUsd,
+      realizedPnlUsd: pnl,
+      exitPriceUsd: pos.currentPriceUsd,
+      newLiquidCashUsd: cachedWallet.liquidCashUsd,
+      newLiquidCashSol: cachedWallet.liquidCashSol,
+    });
+  }
+
+  await persistPaperTradingState();
+
+  // Check if zero active positions left and cash <= $20 floor
+  if (cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD) {
+    await checkAndRefillIfNoProfit(`Manual exit all completed - zero active positions remaining`);
+  }
+
+  console.log(
+    `🚨 [MANUAL EXIT ALL] Liquidated ${exitedPositions.length} active trade(s). Returned +$${totalReturnedUsd.toFixed(2)} USD back to account cash. New Liquid Cash: $${cachedWallet.liquidCashUsd.toFixed(2)} USD`
+  );
+
+  return {
+    success: true,
+    count: exitedPositions.length,
+    totalReturnedUsd: Number(totalReturnedUsd.toFixed(2)),
+    totalRealizedPnlUsd: Number(totalRealizedPnlUsd.toFixed(2)),
+    newLiquidCashUsd: cachedWallet.liquidCashUsd,
+    newLiquidCashSol: cachedWallet.liquidCashSol,
+    exitedPositions,
+  };
 }

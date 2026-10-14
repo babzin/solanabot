@@ -958,8 +958,9 @@
 
           <!-- $100 REAL-MARKET PAPER TRADING WIDGET (BOUNDED AUTONOMY) -->
           <div class="audit-card" style="border-color: rgba(0, 240, 255, 0.25); background: rgba(0, 240, 255, 0.02); margin-top: 12px;">
-            <div class="audit-title">
-              <span style="color: var(--cyan);">💼 $100 Paper Trading (Bounded Autonomy)</span>
+            <div class="audit-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: var(--cyan);">💼 $100 Paper Trading (Max $1/Trade)</span>
+              <button id="btn-paper-exit-all" onclick="exitAllTradesUI()" style="background: rgba(255, 59, 48, 0.2); border: 1px solid rgba(255, 59, 48, 0.6); color: #ff6b6b; border-radius: 4px; padding: 2px 8px; font-size: 10px; font-weight: 700; cursor: pointer; font-family: 'JetBrains Mono'; transition: all 0.2s ease;">🚨 Exit All</button>
             </div>
 
             <!-- Circuit Breaker Alert Banner -->
@@ -999,8 +1000,8 @@
             </div>
 
             <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 4px; display: flex; justify-content: space-between;">
-              <span>Active Trades (<span id="paper-active-count">0</span>/<span id="paper-max-slots">20</span> slots • AI 1-3%):</span>
-              <span style="color: var(--cyan);">💎 Moon or Dust: Zero Stop-Loss • Multi-Tier TP (2X, 5X, 10X)</span>
+              <span>Active Trades (<span id="paper-active-count">0</span>/<span id="paper-max-slots">200</span> slots • Max $1.00/trade):</span>
+              <span style="color: var(--cyan);">💎 Moon or Dust: Multi-Tier TP (2X, 5X, 10X)</span>
             </div>
 
             <div id="paper-positions-list" style="display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto;">
@@ -1429,7 +1430,7 @@
         const listEl = document.getElementById('paper-positions-list');
         if (listEl) {
           if (data.activePositions.length === 0) {
-            listEl.innerHTML = `<div style="font-size: 11px; color: var(--text-dim); text-align: center; padding: 6px;">No open positions. Scanner auto-allocates 1.0%-3.0% based on AI conviction.</div>`;
+            listEl.innerHTML = `<div style="font-size: 11px; color: var(--text-dim); text-align: center; padding: 6px;">No open positions. Scanner auto-allocates $1.00/trade (+ network gas).</div>`;
           } else {
             listEl.innerHTML = data.activePositions.map(pos => {
               const gainPct = ((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
@@ -1437,24 +1438,60 @@
               const color = gainPct >= 0 ? 'var(--green)' : '#ff6b6b';
               const badge = pos.status === 'PARTIAL_TP_2X' ? '🌙 MOONBAG' : '🟢 OPEN';
               const profileShort = pos.strategyProfile === 'VIRAL_RUNNER' ? '🚀 RUNNER' : pos.strategyProfile === 'FAST_SCALP' ? '⚡ SCALP' : '⚖️ MOMENTUM';
-              const alloc = pos.allocationPercent ? `${pos.allocationPercent.toFixed(1)}%` : '3.0%';
-              const conviction = pos.aiConvictionScore ? `★${pos.aiConvictionScore}` : '';
+              const alloc = `$${pos.investedUsd.toFixed(2)}`;
               return `
                 <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(0,0,0,0.3); padding:4px 6px; border-radius:4px; font-size:10px; font-family:'JetBrains Mono';">
-                  <span>
+                  <span style="display:flex; align-items:center; gap:4px;">
                     <b>$${pos.tokenSymbol}</b>
-                    <span style="font-size:8px; background:rgba(0,240,255,0.1); color:var(--cyan); padding:1px 3px; border-radius:3px; margin-left:2px;">${profileShort}</span>
-                    <span style="font-size:8px; color:var(--text-dim);">${alloc} ${conviction}</span>
+                    <span style="font-size:8px; background:rgba(0,240,255,0.1); color:var(--cyan); padding:1px 3px; border-radius:3px;">${profileShort}</span>
+                    <span style="font-size:8px; color:var(--text-dim);">${alloc}</span>
                     <span style="font-size:8px; color:var(--text-muted);">${badge}</span>
                   </span>
-                  <span style="color:${color}; font-weight:700;">${sign}${gainPct.toFixed(1)}%</span>
-                  <span style="color:var(--text-dim); font-size:9px;">ATH ${pos.peakMultiplier}X</span>
+                  <span style="display:flex; align-items:center; gap:6px;">
+                    <span style="color:${color}; font-weight:700;">${sign}${gainPct.toFixed(1)}%</span>
+                    <span style="color:var(--text-dim); font-size:9px;">${pos.peakMultiplier}X</span>
+                    <button onclick="exitSingleTradeUI('${pos.tokenMint}', '${pos.tokenSymbol}')" style="background:rgba(255,59,48,0.2); border:1px solid rgba(255,59,48,0.5); color:#ff6b6b; border-radius:3px; padding:1px 6px; font-size:9px; cursor:pointer; font-weight:700;">Exit</button>
+                  </span>
                 </div>
               `;
             }).join('');
           }
         }
       } catch (err) {}
+    }
+
+    async function exitAllTradesUI() {
+      if (!confirm('Are you sure you want to exit all active trades and return all money back to your account?')) return;
+      try {
+        const res = await fetch('/api/trade/exit-all', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          const count = (data.paperExited?.count || 0) + (data.snipeExited?.count || 0);
+          const returned = data.paperExited?.totalReturnedUsd || 0;
+          showToast(`🚨 <b>EXIT ALL:</b> Liquidated ${count} trade(s)! Returned <b>+$${returned.toFixed(2)} USD</b> to account cash!`);
+          await loadPaperPortfolio();
+        } else {
+          showToast(`⚠️ Exit notice: ${data.error || 'Failed'}`);
+        }
+      } catch (err) {
+        showToast(`⚠️ Exit error: ${err.message}`);
+      }
+    }
+
+    async function exitSingleTradeUI(tokenMint, symbol) {
+      try {
+        const res = await fetch(`/api/trade/exit/${tokenMint}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          const ret = data.paper?.netReturnUsd || data.snipe?.solAmount || 0;
+          showToast(`🚨 <b>TRADE EXITED:</b> Closed $${symbol}! Returned <b>+$${ret}</b> to account cash!`);
+          await loadPaperPortfolio();
+        } else {
+          showToast(`⚠️ Exit notice: ${data.error || 'Failed'}`);
+        }
+      } catch (err) {
+        showToast(`⚠️ Exit error: ${err.message}`);
+      }
     }
 
     // Refresh paper portfolio every 4 seconds

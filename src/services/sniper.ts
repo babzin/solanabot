@@ -363,23 +363,20 @@ export async function checkActivePositionsTpSl(
       action: 'TAKE_PROFIT_2X',
       gainPercent: gainFromEntryPct,
       solAmount: solSecured,
-      message: `🎯 <b>[AUTONOMOUS 2X DE-RISKING HIT]</b> 🚀\n\n` +
-        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-        `📈 Gain: <b>+${gainFromEntryPct.toFixed(1)}% (2.0X Multiplier)</b>\n` +
-        `💰 Action: <b>Sold 50% of position</b>\n` +
-        `💵 SOL Secured: <code>+${solSecured.toFixed(3)} SOL</code> (Original principal returned!)\n` +
-        `💎 Moonbag: <b>Remaining 50% riding UNCAPPED with adaptive trailing stop</b> (No ceiling cap • Rides indefinitely until market trails down by -18%)!`,
+      message: `🎯 <b>2X DE-RISKED | $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)</b>\n` +
+        `💵 SOL Returned: <b>+${solSecured.toFixed(3)} SOL</b> (Principal secured!)\n` +
+        `💎 Runner: <b>Remaining bag riding trend forever</b>`,
     };
   }
 
-  // 2. Uncapped Moonbag Trailing Stop: Sells remaining 50% moonbag ONLY when the market trails down from peak!
-  // No fixed 3X or 5X ceiling. As long as the market doesn't trail down, we keep going up with the market!
+  // 2. Uncapped Moonbag Trailing Stop (35% pullback from peak)
+  // Allows the trend to breathe and ride indefinitely without premature stop-out on normal wicks.
   const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
-  const trailingStopPct = 18.0;
+  const trailingStopPct = 35.0;
 
   if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
     const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
-    console.log(`🛡️ [AUTONOMOUS TRAILING STOP] $${pos.tokenSymbol} trailed down -${dropFromPeakPct.toFixed(1)}% from peak ($${pos.peakPriceUsd.toFixed(6)} / ${peakMultiplier}X). Liquidating remaining 50% moonbag...`);
+    console.log(`🛡️ [AUTONOMOUS TRAILING STOP] $${pos.tokenSymbol} trailed down -${dropFromPeakPct.toFixed(1)}% from peak (${peakMultiplier}X). Liquidating remaining moonbag...`);
 
     const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
     const moonbagSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd) * 0.5);
@@ -395,42 +392,9 @@ export async function checkActivePositionsTpSl(
       action: 'TRAILING_STOP',
       gainPercent: gainFromEntryPct,
       solAmount: moonbagSol,
-      message: `🛡️ <b>[UNCAPPED RUNNER TRAILING STOP EXECUTED]</b> 🛑\n\n` +
-        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-        `🔝 Peak Reached: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (<b>${peakMultiplier}X Peak</b>)\n` +
-        `📉 Trailing Pullback: <b>-${dropFromPeakPct.toFixed(1)}% from Highs</b> (Stop Trigger: -${trailingStopPct}%)\n` +
-        `💰 Action: <b>Sold remaining moonbag</b>\n` +
-        `💵 SOL Harvested: <code>+${moonbagSol.toFixed(3)} SOL</code>\n` +
-        `🏆 Total Net Realized Profit: <code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>!`,
-    };
-  }
-
-  // Also protect runners that surged significantly before 2X (e.g. >= 1.6X) if they begin trailing down
-  if (pos.status === 'OPEN' && (pos.peakPriceUsd / pos.entryPriceUsd) >= 1.6 && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-    const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
-    console.log(`🛡️ [AUTONOMOUS TRAILING STOP PRE-2X] $${pos.tokenSymbol} peaked at ${peakMultiplier}X and trailed down -${dropFromPeakPct.toFixed(1)}%. Liquidating to lock profit...`);
-
-    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
-    const harvestSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd));
-
-    pos.status = 'CLOSED';
-    pos.closedAt = Date.now();
-    pos.remainingTokens = 0;
-    pos.realizedSolProfit += (harvestSol - pos.solInvested);
-    pos.exitReason = 'TRAILING_STOP';
-
-    return {
-      position: pos,
-      action: 'TRAILING_STOP',
-      gainPercent: gainFromEntryPct,
-      solAmount: harvestSol,
-      message: `🛡️ <b>[RUNNER TRAILING STOP EXECUTED]</b> 🛑\n\n` +
-        `🪙 Token: <b>$${pos.tokenSymbol}</b>\n` +
-        `🔝 Peak Reached: <code>$${pos.peakPriceUsd.toFixed(6)}</code> (<b>${peakMultiplier}X Peak</b>)\n` +
-        `📉 Trailing Pullback: <b>-${dropFromPeakPct.toFixed(1)}% from Highs</b>\n` +
-        `💰 Action: <b>Position closed in profit</b>\n` +
-        `💵 SOL Harvested: <code>+${harvestSol.toFixed(3)} SOL</code>\n` +
-        `🏆 Net Realized Profit: <code>+${(harvestSol - pos.solInvested).toFixed(3)} SOL</code>!`,
+      message: `🛑 <b>TREND EXIT | $${pos.tokenSymbol}</b>\n` +
+        `🔝 Peak: <b>${peakMultiplier}X</b> (Trailed -${dropFromPeakPct.toFixed(0)}%)\n` +
+        `💵 Net Profit: <b>+${pos.realizedSolProfit.toFixed(3)} SOL</b>`,
     };
   }
 
@@ -597,4 +561,71 @@ export async function setUserFilterMode(
 // Backward-compatible alias
 export const getUserAutoSnipeConfig = getUserPreferences;
 export const setUserAutoSnipeConfig = setUserPreferences;
+
+/**
+ * Exits an individual sniped position (live on-chain or simulation)
+ */
+export async function exitSnipedPosition(tokenMintOrSymbol: string): Promise<SnipeResult & { error?: string }> {
+  const query = tokenMintOrSymbol.trim();
+  let pos = activePositions.get(query);
+  if (!pos) {
+    const clean = query.replace(/^\$/, '').toUpperCase();
+    for (const p of activePositions.values()) {
+      if (p.tokenSymbol.toUpperCase() === clean && p.status !== 'CLOSED') {
+        pos = p;
+        break;
+      }
+    }
+  }
+
+  if (!pos || pos.status === 'CLOSED') {
+    return {
+      success: false,
+      simulated: true,
+      signature: '',
+      solAmount: 0,
+      tokenAmount: 0,
+      tokenMint: query,
+      error: `No active open sniped position for "${query}"`,
+    };
+  }
+
+  const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, pos.currentPriceUsd, 100);
+  pos.status = 'CLOSED';
+  pos.closedAt = Date.now();
+  pos.remainingTokens = 0;
+  pos.exitReason = 'MANUAL_EXIT';
+  if (sellRes.solAmount) {
+    pos.realizedSolProfit += sellRes.solAmount - pos.solInvested;
+  }
+  return sellRes;
+}
+
+/**
+ * Exits all active sniped positions (live on-chain or simulation)
+ */
+export async function exitAllSnipedPositions(): Promise<{ count: number; totalSol: number; results: SnipeResult[] }> {
+  const active = getActivePositions();
+  const results: SnipeResult[] = [];
+  let totalSol = 0;
+
+  for (const pos of active) {
+    const res = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, pos.currentPriceUsd, 100);
+    pos.status = 'CLOSED';
+    pos.closedAt = Date.now();
+    pos.remainingTokens = 0;
+    pos.exitReason = 'MANUAL_EXIT_ALL';
+    if (res.solAmount) {
+      pos.realizedSolProfit += res.solAmount - pos.solInvested;
+      totalSol += res.solAmount;
+    }
+    results.push(res);
+  }
+
+  return {
+    count: active.length,
+    totalSol: Number(totalSol.toFixed(4)),
+    results,
+  };
+}
 

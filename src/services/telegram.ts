@@ -297,37 +297,12 @@ export function renderEarlyTrendingCardText(token: any): string {
 
   const { row1, row2 } = buildSolscanHolderMatrix(token);
 
-  let aiSection = '';
-  if (token.aiScore) {
-    const score = token.aiScore.convictionScore;
-    const badgeEmoji = score >= 80 ? '🔥' : score >= 60 ? '⚡' : '⚠️';
-    aiSection = `\n\n🤖 <b>AI Conviction:</b> <code>${score}/100</code> (${badgeEmoji} ${escapeHtml(token.aiScore.metaCategory)})\n` +
-      `💡 <i>${escapeHtml(token.aiScore.thesis)}</i>`;
-  }
-
-  let lossDefenseSection = '';
-  if (token.learnedRisk) {
-    const risk = token.learnedRisk.flopRiskScore;
-    const runner = token.learnedRisk.runnerAffinityScore ?? 50;
-    const shieldEmoji = risk <= 20 ? '🛡️' : risk <= 40 ? '⚖️' : '⚠️';
-    lossDefenseSection = `\n🧠 <b>Loss-Defense:</b> Flop Risk <code>${risk}%</code> ${shieldEmoji} | Runner Match <code>${runner}%</code> 🎯`;
-  }
-
-  let slmSection = '';
-  if (token.slmVerdict) {
-    const verdict = token.slmVerdict;
-    const isGo = verdict.viabilitySignal === 'GO';
-    const gateBadge = isGo ? '🟢 <b>GO (CONFIRMED)</b>' : '🔴 <b>NO_GO (TRADE BLOCKED)</b>';
-    const targets = Array.isArray(verdict.recommendedMultiples) && verdict.recommendedMultiples.length > 0
-      ? verdict.recommendedMultiples.map((m: number) => `${m}X`).join(' • ')
-      : '2X • 4X • 7X';
-    const trailing = verdict.trailingStopLossPct ?? 15;
-    const justSummary = escapeHtml(verdict.justificationSummary || verdict.verdictReason || '');
-
-    slmSection = `\n\n🛡️ <b>SLM Quality Gate:</b> ${gateBadge}\n` +
-      `📊 <b>Organic Hype:</b> <code>${verdict.organicHypeScore}/10</code> | <b>Narrative:</b> <code>${verdict.narrativeStrength}/10</code>\n` +
-      `🎯 <b>Ladder TP:</b> <code>${targets}</code> | <b>Trailing Stop:</b> <code>-${trailing}%</code>\n` +
-      `⚖️ <i>${justSummary}</i>`;
+  let aiSummary = '';
+  if (token.aiScore || token.slmVerdict) {
+    const score = token.aiScore?.convictionScore ?? 75;
+    const isGo = token.slmVerdict ? token.slmVerdict.viabilitySignal === 'GO' : true;
+    const gateBadge = isGo ? '🟢 GO' : '🔴 NO_GO';
+    aiSummary = `\n\n🤖 <b>AI Audit:</b> Conviction <code>${score}/100</code> • Gate: <b>${gateBadge}</b>`;
   }
 
   return `
@@ -349,7 +324,7 @@ ${row2}
 
 <a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
 ┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
-┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSection}${lossDefenseSection}${slmSection}
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSummary}
 `.trim();
 }
 
@@ -556,6 +531,8 @@ export function initTelegramCommands(): void {
     { command: 'slm', description: '🛡️ SLM Quality Gate Sentiment Evaluator' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
     { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
+    { command: 'exitall', description: '🚨 Exit All Active Trades & Return Money to Account' },
+    { command: 'exit', description: '🚨 Exit Specific Trade (/exit <mint or ticker>)' },
     { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
     { command: 'wallet', description: '💰 Wallet Balance & Solscan' },
     { command: 'help', description: '❓ How It Works & Trading Guide' },
@@ -563,13 +540,13 @@ export function initTelegramCommands(): void {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
 
-  // Persistent Keyboard docked at the bottom of phone screen (10 clean buttons)
+  // Persistent Keyboard docked at the bottom of phone screen
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $100 Paper' }, { text: '💎 Daily Coins' }],
-      [{ text: '🏆 Top Gainers' }, { text: '📉 Daily Flops' }],
-      [{ text: '📈 Price Milestones' }, { text: '🗓️ Weekly Report' }],
+      [{ text: '💼 $100 Paper' }, { text: '🚨 Exit All Trades' }],
+      [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
+      [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
     ],
     resize_keyboard: true,
@@ -597,56 +574,42 @@ export function initTelegramCommands(): void {
     }
 
     const welcome = `
-🔥 <b>Solana Early &amp; Whale Trending Radar (@solearlytrending)</b> 💵
-<i>Modeled after @solearlytrending • Built for high-velocity 5X–20X breakouts</i>
+⚡ <b>Solana Trading Bot</b>
+• <b>Auto-Snipe:</b> ${snipeBadge}
+• <b>Allocation:</b> $1.00 max per trade (+ gas)
+• <b>Strategy:</b> Infinite Trend Rider (Max Profit)
+• <b>Coins Alerted Today:</b> <code>${dailyCoinCount}</code>
 
-💎 <b>EARLY &amp; WHALE RADAR:</b>
-• <b>Alerted Today:</b> <code>${dailyCoinCount}/45 Verified Gems</code>
-• 🕒 <b>Age Gate:</b> Fresh 2-minute launches &amp; bonding curve breakouts
-• 🎯 <b>Filtering:</b> Strict RugCheck audit (Mint &amp; Freeze revoked, 100% LP burned, Dev sold/clean)
-• 📈 <b>Price Milestones:</b> Real-time +50% Pumps &amp; -50% Retracement alerts
-• 📊 <b>DexScreener:</b> 1-Tap direct pair chart button on every call
-• 🤖 <b>AI Co-Pilot:</b> Pre-alert meme narrative &amp; rug risk conviction scoring
-
-💼 <b>$100 REAL-MARKET PAPER TRADING:</b>
-• 🏦 <b>Bankroll:</b> $100.00 USD with real-time Solana priority gas &amp; slippage friction
-• 🎯 <b>Position Sizing:</b> 3% compounding capital per trade (Up to 20 concurrent positions)
-• 🛡️ <b>Automated Trailing:</b> 2X Take-Profit + -40% Moonbag Trailing Stop-Loss
-
-⚙️ <b>AUTO-SNIPER &amp; EXIT STRATEGY:</b>
-• <b>Status:</b> ${snipeBadge}
-• 🎯 <b>2X Take-Profit:</b> Sells 50% at +100% to secure initial SOL risk-free!
-• 🛡️ <b>Trailing Stop-Loss:</b> Protects remaining moonbag on deep reversals (-40%)
-
-<i>Tap any button below to view active gems or manage auto-snipe:</i>
+<i>Tap any action below:</i>
     `.trim();
 
     const inlineKeyboard = [
       [
         { text: '💼 $100 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
+      ],
+      [
         { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-      ],
-      [
         { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      ],
+      [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-      ],
-      [
         { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+      ],
+      [
         { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
-      ],
-      [
         { text: '🤖 AI Co-Pilot', callback_data: 'cmd_copilot' },
+      ],
+      [
         { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
-      ],
-      [
         { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      ],
+      [
         { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
-      ],
-      [
         { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
-        { text: '🧠 Loss Learner', callback_data: 'cmd_learner' },
       ],
       [
+        { text: '🧠 Loss Learner', callback_data: 'cmd_learner' },
         { text: '❓ How It Works', callback_data: 'cmd_help' },
       ],
     ];
@@ -692,6 +655,108 @@ export function initTelegramCommands(): void {
   // /paper_reset or /reset_paper (Disabled)
   bot.onText(/\/paper_reset|\/reset_paper/i, async (msg) => {
     await handlePaperResetCommand(msg.chat.id);
+  });
+
+  // /exitall, /closeall, /sellall, "🚨 Exit All Trades", or "Exit All"
+  bot.onText(/\/exitall|\/closeall|\/sellall|🚨 Exit All Trades|Exit All Trades|🚨 Exit All|Exit All/i, async (msg) => {
+    try {
+      const { exitAllPaperPositions } = await import('./paperTrading.js');
+      const { exitAllSnipedPositions } = await import('./sniper.js');
+      const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
+      const snipeExit = await exitAllSnipedPositions();
+
+      let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n`;
+      if (paperExit.count > 0 || snipeExit.count > 0) {
+        const totalCount = paperExit.count + snipeExit.count;
+        exitMsg += `• Closed: <b>${totalCount} trade(s)</b>\n`;
+        if (paperExit.totalReturnedUsd > 0) {
+          exitMsg += `• Returned to Cash: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
+        }
+        if (snipeExit.totalSol > 0) {
+          exitMsg += `• Returned SOL: <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
+        }
+        exitMsg += `💼 <b>Liquid Cash:</b> <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`;
+      } else {
+        exitMsg += `ℹ️ <i>No open trades. Cash balance: $${paperExit.newLiquidCashUsd.toFixed(2)} USD</i>`;
+      }
+
+      await bot.sendMessage(msg.chat.id, exitMsg, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+              { text: '⚡ Scan New Gems', callback_data: 'cmd_scan' },
+            ],
+          ],
+        },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Exit error: ${err.message}`);
+    }
+  });
+
+  // /exit, /close, /sell <mint or ticker>
+  bot.onText(/\/exit(?:\s+(.+))?|\/close(?:\s+(.+))?|\/sell(?:\s+(.+))?/i, async (msg, match) => {
+    const query = (match?.[1] || match?.[2] || match?.[3])?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `🚨 <b>Exit Trade</b>\nUsage: <code>/exit &lt;mint or $SYM&gt;</code> or <code>/exitall</code>`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    if (/^all$/i.test(query)) {
+      try {
+        const { exitAllPaperPositions } = await import('./paperTrading.js');
+        const { exitAllSnipedPositions } = await import('./sniper.js');
+        const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
+        await exitAllSnipedPositions();
+        await bot.sendMessage(
+          msg.chat.id,
+          `🚨 <b>ALL TRADES EXITED</b>\n• Closed: <b>${paperExit.count} trade(s)</b>\n• Returned: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n💼 Cash: <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`,
+          { parse_mode: 'HTML' }
+        );
+      } catch (err: any) {
+        await bot.sendMessage(msg.chat.id, `⚠️ Exit all error: ${err.message}`);
+      }
+      return;
+    }
+
+    try {
+      const { exitPaperPosition } = await import('./paperTrading.js');
+      const { exitSnipedPosition } = await import('./sniper.js');
+      const paperRes = await exitPaperPosition(query);
+      const snipeRes = await exitSnipedPosition(query);
+
+      let replyMsg = `🚨 <b>TRADE EXITED</b>\n`;
+      if (paperRes.success) {
+        replyMsg += `• Token: <b>$${escapeHtml(paperRes.tokenSymbol)}</b>\n`;
+        replyMsg += `• Returned to Cash: <b>+$${paperRes.netReturnUsd.toFixed(2)} USD</b>\n`;
+        replyMsg += `💼 <b>Liquid Cash:</b> <code>$${paperRes.newLiquidCashUsd.toFixed(2)} USD</code>`;
+      } else if (snipeRes.success) {
+        replyMsg += `• Token: <b>$${escapeHtml(snipeRes.tokenSymbol || query)}</b>\n`;
+        replyMsg += `• Returned: <b>+${snipeRes.solAmount.toFixed(3)} SOL</b>`;
+      } else {
+        replyMsg += `⚠️ <i>No active trade found for "${escapeHtml(query)}"</i>`;
+      }
+
+      await bot.sendMessage(msg.chat.id, replyMsg, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
+              { text: '💼 My Positions', callback_data: 'cmd_positions' },
+            ],
+          ],
+        },
+      });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Exit error: ${err.message}`);
+    }
   });
 
   // /daily or /early or "💎 Daily Coins" button
@@ -1073,22 +1138,16 @@ ${flagsText}
   bot.onText(/\/help|❓ Help/i, async (msg) => {
     await bot.sendMessage(
       msg.chat.id,
-      `📖 <b>Solana Early Trending &amp; Sniper Bot Guide</b>\n\n` +
-      `1️⃣ <b>Early Gem Discovery:</b> Scans DexScreener &amp; Pump.fun continuously for 2-minute breakout coins ($20k-$150k MC).\n\n` +
-      `2️⃣ <b>RugCheck Audit:</b> Revoked mint &amp; freeze, 100% burned LP, clean holder distribution.\n\n` +
-      `3️⃣ <b>Automated Price Tracking:</b> Tracks alerted coins every 30s. When a coin hits <b>+50%</b>, <b>2X</b>, <b>5X</b>, up to <b>79X</b>, you receive instant pump alerts with take-profit buttons!\n\n` +
-      `4️⃣ <b>1-Tap Sniping:</b> Tap <code>⚡ Snipe 0.1 SOL</code> on any card to trade immediately, or toggle <code>/autosnipe</code> to snipe automatically.\n\n` +
-      `<b>Commands:</b>\n` +
-      `• /start — Open Main Dashboard\n` +
-      `• /scan — Run Immediate Radar Scan\n` +
-      `• /daily — View Today's Alerted Coins\n` +
-      `• /top — View Daily Top Gainers\n` +
-      `• /flops — View Daily Flopped Coins & Dips\n` +
-      `• /milestones — View Pumps &amp; Retracements\n` +
-      `• /positions — View Active Positions &amp; PnL\n` +
-      `• /autosnipe — Toggle Automated Sniping\n` +
-      `• /wallet — View Connected Wallet &amp; Solscan\n` +
-      `• /learner — Adaptive Loss-Learning Engine &amp; Autopsies`,
+      `📖 <b>SOLANA BOT GUIDE</b>\n\n` +
+      `• <b>Radar:</b> Scans early breakout gems with strict RugCheck security.\n` +
+      `• <b>Money Management:</b> $1.00 base USD cap per trade (+ gas).\n` +
+      `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
+      `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
+      `<b>Quick Commands:</b>\n` +
+      `• /paper — Live $100 Portfolio\n` +
+      `• /positions — Active Trades & Exits\n` +
+      `• /exitall — Sell All & Cash Out\n` +
+      `• /autosnipe — Automated Sniping`,
       { parse_mode: 'HTML' }
     );
   });
@@ -1126,7 +1185,8 @@ ${flagsText}
     const knownButtons = [
       '⚡ scan now', '💎 daily coins', '🏆 top gainers', '📉 daily flops',
       '🗓️ weekly report', '🤖 ai co-pilot', '📈 price milestones', '💼 my positions',
-      '⚙️ auto-snipe', '🟢 auto-snipe on', '🔴 auto-snipe off', '💰 wallet', '❓ help'
+      '⚙️ auto-snipe', '🟢 auto-snipe on', '🔴 auto-snipe off', '💰 wallet', '❓ help',
+      '🚨 exit all trades', 'exit all trades', 'exit all'
     ];
     if (knownButtons.some((b) => b === text.toLowerCase())) return;
 
@@ -1501,6 +1561,70 @@ ${flagsText}
           const sellResult = await executeSnipeSell(mint, undefined, undefined, pct);
           await dispatchSnipeSellNotification(sellResult, chatId);
         }
+      } else if (data === 'cmd_exit_all') {
+        await bot.sendMessage(chatId, '⏳ <i>Liquidating all active trades & returning money to account...</i>', { parse_mode: 'HTML' });
+        const { exitAllPaperPositions } = await import('./paperTrading.js');
+        const { exitAllSnipedPositions } = await import('./sniper.js');
+        const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
+        const snipeExit = await exitAllSnipedPositions();
+
+        let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n`;
+        if (paperExit.count > 0 || snipeExit.count > 0) {
+          const totalCount = paperExit.count + snipeExit.count;
+          exitMsg += `• Closed: <b>${totalCount} trade(s)</b>\n`;
+          if (paperExit.totalReturnedUsd > 0) {
+            exitMsg += `• Returned to Cash: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
+          }
+          if (snipeExit.totalSol > 0) {
+            exitMsg += `• Returned SOL: <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
+          }
+          exitMsg += `💼 <b>Liquid Cash:</b> <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`;
+        } else {
+          exitMsg += `ℹ️ <i>No open trades. Cash balance: $${paperExit.newLiquidCashUsd.toFixed(2)} USD</i>`;
+        }
+
+        await bot.sendMessage(chatId, exitMsg, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+                { text: '⚡ Scan New Gems', callback_data: 'cmd_scan' },
+              ],
+            ],
+          },
+        });
+      } else if (data?.startsWith('cmd_exit_single_')) {
+        const target = data.replace('cmd_exit_single_', '');
+        await bot.sendMessage(chatId, `⏳ <i>Exiting trade <code>${target}</code>...</i>`, { parse_mode: 'HTML' });
+        const { exitPaperPosition } = await import('./paperTrading.js');
+        const { exitSnipedPosition } = await import('./sniper.js');
+        const paperRes = await exitPaperPosition(target);
+        const snipeRes = await exitSnipedPosition(target);
+
+        let replyMsg = `🚨 <b>TRADE EXITED</b>\n`;
+        if (paperRes.success) {
+          replyMsg += `• Token: <b>$${escapeHtml(paperRes.tokenSymbol)}</b>\n`;
+          replyMsg += `• Returned to Cash: <b>+$${paperRes.netReturnUsd.toFixed(2)} USD</b>\n`;
+          replyMsg += `💼 <b>Liquid Cash:</b> <code>$${paperRes.newLiquidCashUsd.toFixed(2)} USD</code>`;
+        } else if (snipeRes.success) {
+          replyMsg += `• Token: <b>$${escapeHtml(snipeRes.tokenSymbol || target)}</b>\n`;
+          replyMsg += `• Returned: <b>+${snipeRes.solAmount.toFixed(3)} SOL</b>`;
+        } else {
+          replyMsg += `⚠️ <i>No active trade found for "${escapeHtml(target)}"</i>`;
+        }
+
+        await bot.sendMessage(chatId, replyMsg, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
+                { text: '💼 My Positions', callback_data: 'cmd_positions' },
+              ],
+            ],
+          },
+        });
       }
     } catch (err: any) {
       console.warn('Callback query error:', err.message);
@@ -2231,12 +2355,7 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
     if (active.length === 0 && all.length === 0) {
       await bot.sendMessage(
         chatId,
-        `💼 <b>Active Positions &amp; Portfolio Tracker (/positions)</b>\n\n` +
-          `No positions are currently tracked.\n\n` +
-          `When <b>Auto-Snipe</b> is enabled or you tap <b>[⚡ Quick Buy]</b> on any alert card, positions are actively managed here:\n` +
-          `• 🎯 <b>2X Take-Profit:</b> Automatically sells 50% at +100% to recoup your initial SOL!\n` +
-          `• 🛡️ <b>Trailing Stop-Loss:</b> Automatically protects the remaining moonbag if price drops 25% from peak!\n` +
-          `• 🛑 <b>Hard Stop-Loss:</b> Limits max drawdown to -25% from entry.`,
+        `💼 <b>POSITIONS</b>\n\nℹ️ <i>No open positions right now. Tap a coin alert or enable Auto-Snipe to trade.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -2253,11 +2372,10 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
       return;
     }
 
-    let report = `💼 <b>PORTFOLIO &amp; SNIPED POSITIONS</b> 📊\n`;
-    report += `<i>Autonomous 2X TP (sell 50%) + Trailing SL (-25% from peak) active:</i>\n\n`;
+    let report = `💼 <b>POSITIONS</b> (${active.length} active)\n\n`;
 
     if (active.length === 0) {
-      report += `ℹ️ <i>No currently OPEN positions. (All previous positions closed at profit/stop).</i>\n\n`;
+      report += `ℹ️ <i>No open positions.</i>\n\n`;
     } else {
       const maxToShow = 10;
       active.slice(0, maxToShow).forEach((pos, idx) => {
@@ -2265,13 +2383,11 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
         const isUp = Number(gainPct) >= 0;
         const emoji = isUp ? '🟢' : '🔴';
         const chartUrl = getDexScreenerUrl(pos as any);
-        const statusBadge = pos.status === 'PARTIAL_TP_2X' ? ' [🎯 50% TP SECURED]' : '';
+        const statusBadge = pos.status === 'PARTIAL_TP_2X' ? ' [🌙 MOONBAG]' : '';
 
-        report += `${emoji} <b>#${idx + 1}.</b> <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a>${statusBadge}\n`;
-        report += `   💰 Allocation: <code>${pos.solInvested.toFixed(2)} SOL</code> | PnL: <b>${isUp ? '+' : ''}${gainPct}%</b>\n`;
-        report += `   💵 Entry: <code>${formatUnitPrice(pos.entryPriceUsd)}</code> ➔ Now: <code>${formatUnitPrice(pos.currentPriceUsd)}</code>\n`;
-        report += `   🔝 Peak: <code>${formatUnitPrice(pos.peakPriceUsd)}</code> | Realized: <code>+${pos.realizedSolProfit.toFixed(2)} SOL</code>\n`;
-        report += `   🔗 <a href="${chartUrl}">[DexScreener Live Chart]</a>\n\n`;
+        report += `${emoji} <b>#${idx + 1}.</b> <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a>${statusBadge} • <b>${isUp ? '+' : ''}${gainPct}%</b>\n`;
+        report += `   Entry: <code>${formatUnitPrice(pos.entryPriceUsd)}</code> ➔ Now: <code>${formatUnitPrice(pos.currentPriceUsd)}</code>\n`;
+        report += `   Peak: <code>${formatUnitPrice(pos.peakPriceUsd)}</code> | Realized: <code>+${pos.realizedSolProfit.toFixed(2)} SOL</code>\n\n`;
       });
       if (active.length > maxToShow) {
         report += `<i>... and ${active.length - maxToShow} more active positions</i>\n\n`;
@@ -2280,10 +2396,10 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
 
     const closed = all.filter((p) => p.status === 'CLOSED').slice(-3);
     if (closed.length > 0) {
-      report += `📜 <b>Recently Closed Positions:</b>\n`;
+      report += `📜 <b>Recently Closed:</b>\n`;
       closed.forEach((p) => {
         const closedDexUrl = getDexScreenerUrl(p as any);
-        report += `• <a href="${closedDexUrl}"><b>$${escapeHtml(p.tokenSymbol)}</b></a>: ${p.exitReason || 'Closed'} (Realized: <code>+${p.realizedSolProfit.toFixed(2)} SOL</code>)\n`;
+        report += `• <a href="${closedDexUrl}"><b>$${escapeHtml(p.tokenSymbol)}</b></a>: ${p.exitReason || 'Closed'} (+${p.realizedSolProfit.toFixed(2)} SOL)\n`;
       });
       report += `\n`;
     }
@@ -2292,11 +2408,12 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
     active.slice(0, 6).forEach((pos) => {
       posButtons.push([
         { text: `📊 $${pos.tokenSymbol} Chart`, url: getDexScreenerUrl(pos as any) },
+        { text: `🔴 Exit $${pos.tokenSymbol}`, callback_data: `cmd_exit_single_${pos.tokenMint}` },
       ]);
     });
     posButtons.push([
+      { text: '🚨 Exit All Positions', callback_data: 'cmd_exit_all' },
       { text: '🔄 Refresh Positions', callback_data: 'cmd_positions' },
-      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
     ]);
     posButtons.push([
       { text: '💎 Daily Coins', callback_data: 'cmd_early' },
@@ -2315,28 +2432,17 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
 
 async function handleSnipeStatus(chatId: number | string, userId: string, messageIdToEdit?: number): Promise<void> {
   const pref = await getUserPreferences(userId);
-  const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE (Auto-Buy Enabled)' : '🔴 DISABLED (Signals Only)';
+  const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE' : '🔴 DISABLED';
   const walletAddr = env.USER_SOLANA_WALLET || '6hb1Nmj9C8xZe5oWAKYBgJcPMZnqxAGTHPBqouuy5NmM';
   const walletTrunc = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
 
   const message = `
-🎯 <b>AI Auto-Trading &amp; Sniper Dashboard</b>
+🎯 <b>AI AUTO-SNIPER</b>
 
-🤖 <b>Auto-Snipe Status:</b> <b>${statusEmoji}</b>
-💰 <b>Snipe Allocation:</b> <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> per coin
-🛡️ <b>Max Slippage:</b> <code>${pref.maxSlippagePercent}%</code>
-💼 <b>Connected Wallet:</b> <code>${walletTrunc}</code>
-
-<b>Autonomous Exit Strategy:</b>
-• 🎯 <b>2X Take-Profit:</b> Automatically sells 50% at +100% to recoup principal risk-free!
-• 🛡️ <b>Trailing Stop-Loss:</b> Automatically locks in gains if token drops 40% from its peak!
-• 🛑 <b>Hard Stop-Loss:</b> Sells position if price sustains -35% drop (with 45s wick buffer).
-
-<b>How it works:</b>
-• <b>DISABLED (Default):</b> You receive 2-minute Early &amp; Whale alerts with 1-tap quick buy buttons. The bot never spends your SOL automatically.
-• <b>ACTIVE:</b> The bot automatically executes buys with <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> on verified @solearlytrending tokens passing strict RugCheck security!
-
-<i>Tap below to adjust allocation or toggle mode:</i>
+Status: <b>${statusEmoji}</b>
+Allocation: <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> • Slippage: <code>${pref.maxSlippagePercent}%</code>
+Strategy: <b>2X De-Risk (Sell 50%) ➔ Infinite Trend Runner</b>
+Wallet: <code>${walletTrunc}</code>
   `.trim();
 
   const keyboard = [
@@ -2569,22 +2675,15 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
       ? `⏸️ <b>Reserve Floor:</b> <b>$20 Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
       : '';
 
-    let msg = `
-💼 <b>[PAPER TRADING: $100 LIVE PORTFOLIO]</b> ${pnlEmoji}
-<i>100% Real Market Dynamics • Real Gas &amp; Slippage Deductions</i>
-
-🏦 <b>NET EQUITY:</b> <b>$${summary.netWorthUsd.toFixed(2)} USD</b> (<code>${summary.netWorthSol.toFixed(4)} SOL</code>)
-${statusColor} <b>Total PnL:</b> <b>${pnlSign}$${summary.totalPnlUsd.toFixed(2)} (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)</b>
-💵 <b>Liquid Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)} USD</code> (<code>${w.liquidCashSol.toFixed(4)} SOL</code>)
-${reserveStatusLine}${(w.autoRefillCount && w.autoRefillCount > 0) ? `🔄 <b>Auto-Refills:</b> <b>${w.autoRefillCount} time${w.autoRefillCount === 1 ? '' : 's'}</b> (<code>+$${((w.totalRefilledUsd || 0)).toFixed(2)} USD</code> added to restore $100 baseline when depleted with zero profit)\n` : ''}🔒 <b>In Active Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)} USD</code>
-⛽ <b>Total Real Gas Paid:</b> <code>-${w.totalFeesPaidSol.toFixed(4)} SOL</code> (<b>-$${w.totalFeesPaidUsd.toFixed(2)}</b>)
-🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L • ${w.totalTrades} Total)
-
-📊 <b>ACTIVE POSITIONS (${summary.activePositions.length}/${w.maxConcurrentPositions}):</b>
-`;
+    let msg = `💼 <b>PAPER PORTFOLIO</b> ${pnlEmoji}\n\n`;
+    msg += `🏦 <b>Equity:</b> <b>$${summary.netWorthUsd.toFixed(2)}</b> (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)\n`;
+    msg += `💵 <b>Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)}</code> | <b>In Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)}</code>\n`;
+    msg += `🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L)\n`;
+    if (reserveStatusLine) msg += reserveStatusLine;
+    msg += `\n📊 <b>Active Positions (${summary.activePositions.length}):</b>\n`;
 
     if (summary.activePositions.length === 0) {
-      msg += `<i>No active open positions right now. Standing by for radar gems!</i>\n`;
+      msg += `<i>No active open positions.</i>\n`;
     } else {
       // Sort: Moonbags first, then highest percentage gain
       const sortedPositions = [...summary.activePositions].sort((a, b) => {
@@ -2607,7 +2706,7 @@ ${reserveStatusLine}${(w.autoRefillCount && w.autoRefillCount > 0) ? `🔄 <b>Au
         const mult = (pos.currentPriceUsd / Math.max(0.00000001, pos.entryPriceUsd)).toFixed(2);
         const chartUrl = pos.dexUrl || `https://dexscreener.com/solana/${pos.tokenMint}`;
         
-        const line = `• <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a> [${badge}]: <b>${sign}${gainPct.toFixed(1)}%</b> (<code>${mult}X</code>) • Peak: <b>${pos.peakMultiplier}X</b> (Pos: $${pos.investedUsd.toFixed(2)})\n`;
+        const line = `• <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a> [${badge}]: <b>${sign}${gainPct.toFixed(1)}%</b> (<code>${mult}X</code>)\n`;
 
         // Strict buffer guard against 4096 character limit
         if ((msg + line).length > 3400) {
@@ -2618,24 +2717,22 @@ ${reserveStatusLine}${(w.autoRefillCount && w.autoRefillCount > 0) ? `🔄 <b>Au
       }
 
       if (sortedPositions.length > displayedCount) {
-        msg += `\n<i>... and ${sortedPositions.length - displayedCount} more active runner(s) (Total: ${summary.activePositions.length}/${w.maxConcurrentPositions} slots active)</i>\n`;
+        msg += `\n<i>... and ${sortedPositions.length - displayedCount} more</i>\n`;
       }
     }
 
-    msg += `\n🛡️ <i>Uncapped Trailing Runner System • Principal secured at 2X • Trailing Stop active.</i>`;
-    if (w.autoRefillCount && w.autoRefillCount > 0) {
-      msg += `\n💡 <i>Auto-refilled ${w.autoRefillCount} time${w.autoRefillCount === 1 ? '' : 's'} (+$${((w.totalRefilledUsd || 0)).toFixed(2)} USD) to restore $100 baseline when all positions closed with zero profit.</i>`;
-    }
-    msg += `\n🛡️ <i>$20 Safety Reserve: Cash cannot be spent below $20. When reached, entries pause until profit enters. Only when zero positions remain is money added back to $100.</i>`;
-
     const inlineKeyboard = [
       [
+        { text: '🚨 Exit All Trades (Sell All)', callback_data: 'cmd_exit_all' },
         { text: '🔄 Refresh Portfolio', callback_data: 'cmd_paper_portfolio' },
-        { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
       ],
       [
+        { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
         { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      ],
+      [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
       ],
     ];
 

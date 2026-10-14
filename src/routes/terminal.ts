@@ -357,5 +357,88 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       error: 'Paper account reset has been permanently disabled to preserve trade history and PnL integrity.',
     });
   });
+
+  /**
+   * Exit All Trades API - Liquidates all active paper and live sniped trades, returning money to accounts
+   */
+  fastify.post('/api/trade/exit-all', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { exitAllPaperPositions } = await import('../services/paperTrading.js');
+      const { exitAllSnipedPositions } = await import('../services/sniper.js');
+
+      const paperExited = await exitAllPaperPositions('MANUAL_EXIT_ALL');
+      const snipeExited = await exitAllSnipedPositions();
+
+      return reply.send({
+        success: true,
+        message: 'All trades exited successfully. Money returned to account.',
+        paperExited,
+        snipeExited,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Exit Specific Trade API - Liquidates an individual trade by mint or symbol
+   */
+  fastify.post('/api/trade/exit/:mint', async (request: FastifyRequest<{ Params: { mint: string } }>, reply: FastifyReply) => {
+    const { mint } = request.params;
+    try {
+      const { exitPaperPosition } = await import('../services/paperTrading.js');
+      const { exitSnipedPosition } = await import('../services/sniper.js');
+
+      const paper = await exitPaperPosition(mint);
+      const snipe = await exitSnipedPosition(mint);
+
+      if (!paper.success && !snipe.success) {
+        return reply.code(404).send({
+          success: false,
+          error: `No open trade found for "${mint}"`,
+        });
+      }
+
+      return reply.send({
+        success: true,
+        message: `Trade ${mint} exited successfully. Money returned to account.`,
+        paper,
+        snipe,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Exit All Paper Positions API
+   */
+  fastify.post('/api/paper/exit-all', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { exitAllPaperPositions } = await import('../services/paperTrading.js');
+      const result = await exitAllPaperPositions('MANUAL_EXIT_ALL');
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Exit Specific Paper Position API
+   */
+  fastify.post('/api/paper/exit/:mint', async (request: FastifyRequest<{ Params: { mint: string } }>, reply: FastifyReply) => {
+    const { mint } = request.params;
+    try {
+      const { exitPaperPosition } = await import('../services/paperTrading.js');
+      const result = await exitPaperPosition(mint);
+      if (!result.success) {
+        return reply.code(404).send(result);
+      }
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
 }
+
 
