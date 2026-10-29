@@ -107,17 +107,17 @@ const REDIS_KEY_WALLET = 'soul:paper_wallet:state';
 const REDIS_KEY_POSITIONS = 'soul:paper_wallet:positions';
 const REDIS_KEY_HISTORY = 'soul:paper_wallet:history';
 
-export const PAPER_RESERVE_FLOOR_USD = 20.0;
-export const PAPER_TARGET_BALANCE_USD = 100.0;
-export const MAX_PAPER_TRADE_SIZE_USD = 1.0; // Strictly max $1.00 USD per trade
+export const PAPER_RESERVE_FLOOR_USD = 200.0;
+export const PAPER_TARGET_BALANCE_USD = 1000.0;
+export const MAX_PAPER_TRADE_SIZE_USD = 10.0; // Strictly max $10.00 USD per trade (1% of $1,000 funds)
 let lastReserveAlertTimeMs = 0;
 
 // In-memory state with persistence fallback
 let cachedWallet: PaperWalletState = {
-  initialBalanceUsd: 100.0,
-  liquidCashUsd: 100.0,
+  initialBalanceUsd: 1000.0,
+  liquidCashUsd: 1000.0,
   solPriceUsd: 145.0,
-  liquidCashSol: 100.0 / 145.0,
+  liquidCashSol: 1000.0 / 145.0,
   totalInvestedUsd: 0,
   totalRealizedPnlUsd: 0,
   totalFeesPaidSol: 0,
@@ -128,7 +128,7 @@ let cachedWallet: PaperWalletState = {
   winRatePercent: 0,
   maxConcurrentPositions: 200,
   tradeSizePercent: 1.0,
-  tradeSizeUsd: 1.0,
+  tradeSizeUsd: 10.0,
   consecutiveLosses: 0,
   autoRefillCount: 0,
   totalRefilledUsd: 0,
@@ -253,7 +253,7 @@ async function persistPaperTradingState(): Promise<void> {
  * Initializes the Paper Trading engine from Redis / Disk
  */
 export async function initPaperTradingEngine(): Promise<void> {
-  console.log('💵 [Paper Trading Engine] Initializing $100 real-market simulator with Bounded Autonomy...');
+  console.log('💵 [Paper Trading Engine] Initializing $1,000 real-market simulator with Bounded Autonomy...');
   await fetchLiveSolPrice();
 
   let loaded = false;
@@ -310,21 +310,21 @@ export async function initPaperTradingEngine(): Promise<void> {
   }
 
   if (!loaded) {
-    console.log('🆕 [Paper Trading Engine] Pristine wallet initialized with $100.00 USD.');
+    console.log('🆕 [Paper Trading Engine] Pristine wallet initialized with $1,000.00 USD.');
     await persistPaperTradingState();
   }
 }
 
 /**
- * Resets the paper wallet back to the pristine $100.00 baseline
+ * Resets the paper wallet back to the pristine $1,000.00 baseline
  */
 export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
   const solPrice = await fetchLiveSolPrice();
   cachedWallet = {
-    initialBalanceUsd: 100.0,
-    liquidCashUsd: 100.0,
+    initialBalanceUsd: 1000.0,
+    liquidCashUsd: 1000.0,
     solPriceUsd: solPrice,
-    liquidCashSol: Number((100.0 / solPrice).toFixed(4)),
+    liquidCashSol: Number((1000.0 / solPrice).toFixed(4)),
     totalInvestedUsd: 0,
     totalRealizedPnlUsd: 0,
     totalFeesPaidSol: 0,
@@ -335,7 +335,7 @@ export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
     winRatePercent: 0,
     maxConcurrentPositions: 200,
     tradeSizePercent: 1.0,
-    tradeSizeUsd: 1.0,
+    tradeSizeUsd: 10.0,
     consecutiveLosses: 0,
     circuitBreakerUntilMs: undefined,
     circuitBreakerReason: undefined,
@@ -349,12 +349,28 @@ export async function resetPaperTradingWallet(): Promise<PaperWalletState> {
   closedPaperHistory.length = 0;
   await persistPaperTradingState();
 
-  console.log('🔄 [Paper Trading Engine] Wallet successfully reset to $100.00 USD.');
+  console.log('🔄 [Paper Trading Engine] Wallet successfully reset to $1,000.00 USD.');
   return cachedWallet;
 }
 
 /**
- * Throttled alert for Telegram when liquid cash reaches the $20 reserve floor
+ * Adds cash to the paper trading wallet balance without wiping existing trades or history
+ */
+export async function topUpPaperTradingWallet(amountUsd: number = 1000.0): Promise<PaperWalletState> {
+  const solPrice = cachedWallet.solPriceUsd || (await fetchLiveSolPrice());
+  cachedWallet.liquidCashUsd = Number((cachedWallet.liquidCashUsd + amountUsd).toFixed(2));
+  cachedWallet.liquidCashSol = Number((cachedWallet.liquidCashUsd / solPrice).toFixed(4));
+  cachedWallet.totalRefilledUsd = Number(((cachedWallet.totalRefilledUsd || 0) + amountUsd).toFixed(2));
+  cachedWallet.autoRefillCount = (cachedWallet.autoRefillCount || 0) + 1;
+  cachedWallet.lastUpdated = new Date().toISOString();
+  await persistPaperTradingState();
+
+  console.log(`💵 [Paper Trading Engine] Wallet topped up with +$${amountUsd.toFixed(2)} USD -> New Cash: $${cachedWallet.liquidCashUsd.toFixed(2)} USD`);
+  return cachedWallet;
+}
+
+/**
+ * Throttled alert for Telegram when liquid cash reaches the $200 reserve floor
  * and pauses new trade entries to wait for active position profits.
  */
 function maybeSendReserveAlert(currentCash: number, activePositionsCount: number): void {
@@ -367,7 +383,7 @@ function maybeSendReserveAlert(currentCash: number, activePositionsCount: number
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
       const lockAlert = `
-⏸️ <b>CAPITAL RESERVE LOCK ($20 FLOOR)</b>
+⏸️ <b>CAPITAL RESERVE LOCK ($200 FLOOR)</b>
 🛡️ Cash at <code>$${currentCash.toFixed(2)} USD</code> • Entries paused to protect capital.
 ⏳ <b>${activePositionsCount} active trend(s) running.</b> New entries resume on profit!
       `.trim();
@@ -377,18 +393,18 @@ function maybeSendReserveAlert(currentCash: number, activePositionsCount: number
 }
 
 /**
- * Automatically tops up paper wallet back to $100.00 ONLY when:
- * 1. Liquid cash is at or below the $20.00 reserve floor (or insufficient to trade above $20)
+ * Automatically tops up paper wallet back to $1,000.00 ONLY when:
+ * 1. Liquid cash is at or below the $200.00 reserve floor (or insufficient to trade above $200)
  * 2. There is NO PROFIT AT ALL to wait for (i.e. zero active open positions remaining)
  *
- * Adds money to the existing balance (e.g. existing $20.00 + $80.00 = $100.00).
+ * Adds money to the existing balance (e.g. existing $200.00 + $800.00 = $1,000.00).
  * Increments autoRefillCount and records totalRefilledUsd.
  */
 export async function checkAndRefillIfNoProfit(
   triggerContext: string,
   candidateSymbol?: string
 ): Promise<boolean> {
-  // If liquid cash is comfortably above $20 floor, no refill needed
+  // If liquid cash is comfortably above $200 floor, no refill needed
   if (cachedWallet.liquidCashUsd > PAPER_RESERVE_FLOOR_USD) {
     return false;
   }
@@ -403,7 +419,7 @@ export async function checkAndRefillIfNoProfit(
     return false;
   }
 
-  // "only when theres no profit at all then can it add money to the existing one to take our paper money back to $100"
+  // "only when theres no profit at all then can it add money to the existing one to take our paper money back to $1,000"
   const topUpAmount = Number(
     Math.max(0, PAPER_TARGET_BALANCE_USD - cachedWallet.liquidCashUsd).toFixed(2)
   );
@@ -423,14 +439,14 @@ export async function checkAndRefillIfNoProfit(
   await persistPaperTradingState();
 
   console.log(
-    `💵 [PAPER MONEY AUTO-REFILL #${cachedWallet.autoRefillCount}] Zero active positions remaining & balance reached $20 floor. Added +$${topUpAmount.toFixed(2)} USD -> Restored to $${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD`
+    `💵 [PAPER MONEY AUTO-REFILL #${cachedWallet.autoRefillCount}] Zero active positions remaining & balance reached $200 floor. Added +$${topUpAmount.toFixed(2)} USD -> Restored to $${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD`
   );
 
   if (env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     try {
       const safeSym = candidateSymbol ? escapeHtml(candidateSymbol) : '';
       const refillAlert = `
-🔄 <b>CAPITAL RESTORED ($100 BASELINE)</b>
+🔄 <b>CAPITAL RESTORED ($1,000 BASELINE)</b>
 💰 Cash: <b>$${PAPER_TARGET_BALANCE_USD.toFixed(2)} USD</b> (<code>+$${topUpAmount.toFixed(2)} added</code>)
 🎯 Context: Zero active trades remaining${safeSym ? ` • Ready for <b>$${safeSym}</b>` : ''}
       `.trim();
@@ -508,7 +524,7 @@ export async function processPaperTradeBuy(
   ).length;
 
   // 6. Compute capital allocation:
-  // User Rule: "the amount used to trade shouldn't be more than a dollar (charges per trade can be added to the dollar)"
+  // User Rule: "the amount used to trade shouldn't be more than $10.00 (charges per trade can be added to the trade size)"
   let currentOpenValue = 0;
   for (const pos of activePaperPositions.values()) {
     if (pos.status !== 'CLOSED') {
@@ -517,24 +533,24 @@ export async function processPaperTradeBuy(
   }
   const currentNetWorth = cachedWallet.liquidCashUsd + currentOpenValue;
 
-  // The base trade amount used to buy tokens is strictly capped at $1.00 USD
+  // The base trade amount used to buy tokens is strictly capped at $10.00 USD
   let dynamicTradeSize = MAX_PAPER_TRADE_SIZE_USD;
   const effectiveAllocationPct = Number(((dynamicTradeSize / Math.max(1, currentNetWorth)) * 100).toFixed(1));
 
-  // 7. Compute real network friction (charges per trade added to the dollar)
+  // 7. Compute real network friction (charges per trade added to the trade size)
   const { feeSol, feeUsd } = calculateRealNetworkGas(solPrice);
 
-  // 8. $20 Safety Reserve Floor & Conditional Refill Engine:
+  // 8. $200 Safety Reserve Floor & Conditional Refill Engine:
   // User Rule:
-  // "if our money should reach $20 the system shouldn't remove money to trade again
-  // and it should wait till profit enters, on;y when theres no profit at all then
-  // can it add money to the exsisting one to take our paper money back to $100"
+  // "if our money should reach $200 the system shouldn't remove money to trade again
+  // and it should wait till profit enters, only when theres no profit at all then
+  // can it add money to the existing one to take our paper money back to $1,000"
   let didAutoRefill = false;
   let refilledAmount = 0;
   const minRequiredCash = dynamicTradeSize + feeUsd;
   const cashAboveReserve = cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD;
 
-  // Check if liquid cash has reached the $20 floor, or cannot fund the trade + charges without breaching $20
+  // Check if liquid cash has reached the $200 floor, or cannot fund the trade + charges without breaching $200
   if (cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD || cashAboveReserve < minRequiredCash) {
     const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
       (p) => p.status !== 'CLOSED'
@@ -542,15 +558,15 @@ export async function processPaperTradeBuy(
     const activeCount = activeOpenPositions.length;
 
     if (activeCount > 0) {
-      // Rule Part 1: Money has reached $20 -> System MUST NOT remove money to trade again, and MUST wait till profit enters!
+      // Rule Part 1: Money has reached $200 -> System MUST NOT remove money to trade again, and MUST wait till profit enters!
       console.log(
-        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD (<= $20.00 floor). New trade entries locked to preserve $20 capital. Waiting for profit to enter from ${activeCount} active position(s)...`
+        `⏸️ [Paper Reserve Lock: $200.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD (<= $200.00 floor). New trade entries locked to preserve $200 capital. Waiting for profit to enter from ${activeCount} active position(s)...`
       );
       maybeSendReserveAlert(cachedWallet.liquidCashUsd, activeCount);
       return null;
     } else {
-      // Rule Part 2: "only when theres no profit at all then can it add money to the exsisting one to take our paper money back to $100"
-      // Zero active positions left. No profit can enter from existing trades. Refill back to $100.00!
+      // Rule Part 2: "only when theres no profit at all then can it add money to the existing one to take our paper money back to $1,000"
+      // Zero active positions left. No profit can enter from existing trades. Refill back to $1,000.00!
       const preRefillCash = cachedWallet.liquidCashUsd;
       const refilled = await checkAndRefillIfNoProfit(`Depletion with 0 active positions remaining`, candidate.tokenSymbol);
       if (refilled) {
@@ -560,7 +576,7 @@ export async function processPaperTradeBuy(
     }
   }
 
-  // Ensure dynamicTradeSize does NOT dip into the $20 reserve floor
+  // Ensure dynamicTradeSize does NOT dip into the $200 reserve floor
   const safeCashBudget = Math.max(0, cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd);
   if (safeCashBudget < dynamicTradeSize) {
     const activeOpenPositions = Array.from(activePaperPositions.values()).filter(
@@ -568,7 +584,7 @@ export async function processPaperTradeBuy(
     );
     if (activeOpenPositions.length > 0) {
       console.log(
-        `⏸️ [Paper Reserve Lock: $20.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD. Available above reserve ($${safeCashBudget.toFixed(2)}) is below trade budget. Waiting for profit to enter from ${activeOpenPositions.length} active position(s)...`
+        `⏸️ [Paper Reserve Lock: $200.00 Floor] Liquid cash is $${cachedWallet.liquidCashUsd.toFixed(2)} USD. Available above reserve ($${safeCashBudget.toFixed(2)}) is below trade budget. Waiting for profit to enter from ${activeOpenPositions.length} active position(s)...`
       );
       maybeSendReserveAlert(cachedWallet.liquidCashUsd, activeOpenPositions.length);
       return null;
@@ -586,7 +602,7 @@ export async function processPaperTradeBuy(
     dynamicTradeSize = MAX_PAPER_TRADE_SIZE_USD;
   }
 
-  // Strictly clamp trade size to not exceed $1.00 USD, with safe budget cap
+  // Strictly clamp trade size to not exceed $10.00 USD, with safe budget cap
   const maxAllowedTradeSize = Math.max(0.1, Number((cachedWallet.liquidCashUsd - PAPER_RESERVE_FLOOR_USD - feeUsd).toFixed(2)));
   dynamicTradeSize = Math.min(MAX_PAPER_TRADE_SIZE_USD, maxAllowedTradeSize);
   const tradeSizeUsd = dynamicTradeSize;

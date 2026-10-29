@@ -749,7 +749,7 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
       broadcastNewTrending(candidate);
     } catch {}
 
-    // 3a. Autonomous $100 Real-Market Paper Trading Engine:
+    // 3a. Autonomous $1,000 Real-Market Paper Trading Engine:
     // ALWAYS executes immediately for every alerted coin, regardless of SLM GO or NO_GO!
     try {
       await processPaperTradeBuy({

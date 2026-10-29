@@ -89,7 +89,7 @@ export async function checkPriceMilestones(): Promise<number> {
           console.warn('⚠️ TP/SL check error:', tpslErr.message);
         }
 
-        // Check autonomous $100 Paper Trading TP/SL and Trailing Stop-Loss
+        // Check autonomous $1,000 Paper Trading TP/SL and Trailing Stop-Loss
         try {
           await checkPaperPositionsTpSl(token.tokenMint, currentPriceUsd, pair);
         } catch (paperTpSlErr: any) {

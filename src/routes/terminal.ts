@@ -336,7 +336,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Paper Trading Portfolio & Telemetry API ($100 Real-Market Fidelity)
+   * Paper Trading Portfolio & Telemetry API ($1,000 Real-Market Fidelity)
    */
   fastify.get('/api/paper/portfolio', async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
@@ -349,13 +349,38 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Reset Paper Trading Wallet (Disabled)
+   * Reset Paper Trading Wallet - Resets to fresh $1,000.00 USD starting balance
    */
   fastify.post('/api/paper/reset', async (_request: FastifyRequest, reply: FastifyReply) => {
-    return reply.status(403).send({
-      success: false,
-      error: 'Paper account reset has been permanently disabled to preserve trade history and PnL integrity.',
-    });
+    try {
+      const { resetPaperTradingWallet } = await import('../services/paperTrading.js');
+      const wallet = await resetPaperTradingWallet();
+      return reply.send({
+        success: true,
+        message: 'Paper trading wallet successfully reset to a fresh $1,000.00 USD balance.',
+        wallet,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * Fund / Top-up Paper Trading Wallet with custom or default amount
+   */
+  fastify.post('/api/paper/fund', async (request: FastifyRequest<{ Body: { amountUsd?: number } }>, reply: FastifyReply) => {
+    try {
+      const amountUsd = Number(request.body?.amountUsd) || 1000.0;
+      const { topUpPaperTradingWallet } = await import('../services/paperTrading.js');
+      const wallet = await topUpPaperTradingWallet(amountUsd);
+      return reply.send({
+        success: true,
+        message: `Paper trading wallet topped up with +$${amountUsd.toFixed(2)} USD.`,
+        wallet,
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, error: err.message });
+    }
   });
 
   /**

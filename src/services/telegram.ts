@@ -518,7 +518,7 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
-    { command: 'paper', description: '💼 $100 Paper Portfolio & Live PnL' },
+    { command: 'paper', description: '💼 $1,000 Paper Portfolio & Live PnL' },
     { command: 'buy', description: '💼 Instant Paper Buy Any Solana Mint' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
@@ -544,7 +544,7 @@ export function initTelegramCommands(): void {
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $100 Paper' }, { text: '🚨 Exit All Trades' }],
+      [{ text: '💼 $1,000 Paper' }, { text: '🚨 Exit All Trades' }],
       [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
       [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
@@ -576,7 +576,7 @@ export function initTelegramCommands(): void {
     const welcome = `
 ⚡ <b>Solana Trading Bot</b>
 • <b>Auto-Snipe:</b> ${snipeBadge}
-• <b>Allocation:</b> $1.00 max per trade (+ gas)
+• <b>Allocation:</b> $10.00 max per trade (+ gas)
 • <b>Strategy:</b> Infinite Trend Rider (Max Profit)
 • <b>Coins Alerted Today:</b> <code>${dailyCoinCount}</code>
 
@@ -585,7 +585,7 @@ export function initTelegramCommands(): void {
 
     const inlineKeyboard = [
       [
-        { text: '💼 $100 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '💼 $1,000 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
@@ -642,8 +642,8 @@ export function initTelegramCommands(): void {
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-  // /paper or /portfolio or "💼 $100 Paper" button (supports /paper <mint or ticker>)
-  bot.onText(/💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
+  // /paper or /portfolio or "💼 $1,000 Paper" button (supports /paper <mint or ticker>)
+  bot.onText(/💼 \$1,?000 Paper|💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
     const target = match?.[1]?.trim();
     if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
       await handleUserSubmittedToken(msg.chat.id, target);
@@ -652,9 +652,28 @@ export function initTelegramCommands(): void {
     await handlePaperPortfolioCommand(msg.chat.id);
   });
 
-  // /paper_reset or /reset_paper (Disabled)
-  bot.onText(/\/paper_reset|\/reset_paper/i, async (msg) => {
+  // /paper_reset, /reset_paper, or /resetpaper
+  bot.onText(/\/paper_reset|\/reset_paper|\/resetpaper/i, async (msg) => {
     await handlePaperResetCommand(msg.chat.id);
+  });
+
+  // /fund or /topup (Funds paper wallet with $1,000 or specified amount)
+  bot.onText(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
+    const amount = parseFloat(match?.[1] || match?.[2] || '1000');
+    try {
+      const { topUpPaperTradingWallet } = await import('./paperTrading.js');
+      const wallet = await topUpPaperTradingWallet(amount);
+      await bot.sendMessage(
+        msg.chat.id,
+        `💵 <b>[PAPER WALLET FUNDED]</b> 💸\n\n` +
+        `Added: <b>+$${amount.toFixed(2)} USD</b>\n` +
+        `💰 <b>New Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n\n` +
+        `<i>Ready for upcoming radar entries!</i>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Error funding paper wallet: ${err.message}`);
+    }
   });
 
   // /exitall, /closeall, /sellall, "🚨 Exit All Trades", or "Exit All"
@@ -1140,11 +1159,11 @@ ${flagsText}
       msg.chat.id,
       `📖 <b>SOLANA BOT GUIDE</b>\n\n` +
       `• <b>Radar:</b> Scans early breakout gems with strict RugCheck security.\n` +
-      `• <b>Money Management:</b> $1.00 base USD cap per trade (+ gas).\n` +
+      `• <b>Money Management:</b> $10.00 base USD cap per trade (+ gas).\n` +
       `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
       `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
       `<b>Quick Commands:</b>\n` +
-      `• /paper — Live $100 Portfolio\n` +
+      `• /paper — Live $1,000 Portfolio\n` +
       `• /positions — Active Trades & Exits\n` +
       `• /exitall — Sell All & Cash Out\n` +
       `• /autosnipe — Automated Sniping`,
@@ -2658,11 +2677,11 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
 }
 
 /**
- * Handles /paper and /portfolio command displaying live $100 bankroll & active positions
+ * Handles /paper and /portfolio command displaying live $1,000 bankroll & active positions
  */
 export async function handlePaperPortfolioCommand(chatId: number | string): Promise<void> {
   try {
-    const { getPaperPortfolioSummary } = await import('./paperTrading.js');
+    const { getPaperPortfolioSummary, PAPER_RESERVE_FLOOR_USD } = await import('./paperTrading.js');
     const summary = await getPaperPortfolioSummary();
     const w = summary.wallet;
 
@@ -2670,9 +2689,9 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
     const pnlEmoji = summary.totalPnlUsd >= 0 ? '💸' : '🩸';
     const statusColor = summary.totalPnlUsd >= 0 ? '🟢' : '🔴';
 
-    const isReserveLocked = w.liquidCashUsd <= 20.0 && summary.activePositions.length > 0;
+    const isReserveLocked = w.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD && summary.activePositions.length > 0;
     const reserveStatusLine = isReserveLocked
-      ? `⏸️ <b>Reserve Floor:</b> <b>$20 Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
+      ? `⏸️ <b>Reserve Floor:</b> <b>$${PAPER_RESERVE_FLOOR_USD.toFixed(0)} Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
       : '';
 
     let msg = `💼 <b>PAPER PORTFOLIO</b> ${pnlEmoji}\n\n`;
@@ -2747,18 +2766,25 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
 }
 
 /**
- * Informs the user that /paper_reset has been permanently disabled
+ * Resets the paper trading wallet to a fresh $1,000.00 USD balance
  */
 export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
-  await bot.sendMessage(
-    chatId,
-    `🔒 <b>[PAPER ACCOUNT RESET PERMANENTLY DISABLED]</b>\n\n` +
-      `Paper account reset has been disabled to preserve your historical trade records, cumulative PnL, win-rate metrics, and streak analytics!\n\n` +
-      `• All closed trades remain permanently archived.\n` +
-      `• Liquid capital auto-replenishes as positions hit TP (+100%) or Trailing Stop-Loss.\n\n` +
-      `<i>Your $100 bankroll will continue compounding naturally from live trading performance.</i>`,
-    { parse_mode: 'HTML' }
-  );
+  try {
+    const { resetPaperTradingWallet } = await import('./paperTrading.js');
+    const wallet = await resetPaperTradingWallet();
+    await bot.sendMessage(
+      chatId,
+      `🔄 <b>[PAPER TRADING WALLET RESET TO $1,000]</b> 💸\n\n` +
+        `💰 <b>Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n` +
+        `🏦 <b>Initial Balance:</b> <code>$1,000.00 USD</code>\n` +
+        `📊 <b>Active Trades:</b> 0 (Clean Slate)\n` +
+        `🎯 <b>Stats & Streaks:</b> Freshly re-initialized\n\n` +
+        `<i>The engine is armed and ready to execute $10.00 base conviction trades from radar breakout alerts.</i>`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `⚠️ Error resetting paper wallet: ${err.message}`);
+  }
 }
 
 

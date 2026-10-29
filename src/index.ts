@@ -37,7 +37,7 @@ async function main() {
   // 3. Initialize Adaptive Loss-Learning Feedback Engine (Pre-computes flop signatures & danger zones)
   await initLossLearningEngine();
 
-  // 4. Initialize $100 Real-Market Paper Trading Engine
+  // 4. Initialize $1,000 Real-Market Paper Trading Engine
   await initPaperTradingEngine();
 
   // 5. Initialize Early Trending Discovery Engine (12s cycle)
