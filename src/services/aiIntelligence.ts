@@ -1047,10 +1047,10 @@ function getSmartHeuristicAdvice(q: string, ctx: ComprehensiveTradingContext, ra
       `How our sniper bot integrates with and compares to specialized terminals:\n\n` +
       `⚡ <b>1. Our Bot's Primary Edge (Discovery &amp; Auto-Snipe):</b>\n` +
       `• Scans 2-minute breakout gems before they trend on public leaderboards.\n` +
-      `• Enforces automated contract safety (revoked mint/freeze, 100% LP burnt) + AI Conviction scoring.\n` +
+      `• Enforces automated contract safety (revoked mint/freeze, 100% LP burnt) + AI safety scoring.\n` +
       `• Integrates 1-tap quick buy/sell buttons directly inside Telegram.\n\n` +
       `🚀 <b>2. Web Terminals (Photon &amp; Trojan):</b>\n` +
-      `• Excellent for rapid manual scalping and keyboard hotkeys. You can link your referral codes in <code>.env</code> to launch tokens directly into Trojan or Photon charts with 1 click.`;
+      `• Web terminals are great for manual charting, whereas our bot is fully automated for instant in-chat execution and auto-sniping directly within Telegram.`;
   }
 
   // Intent 14: Starting with Small Capital / Budget (0.1–1 SOL)
@@ -1171,7 +1171,7 @@ function getSmartHeuristicAdvice(q: string, ctx: ComprehensiveTradingContext, ra
       `The mathematical anatomy of an early breakout snipe:\n\n` +
       `1️⃣ <b>Pool Age:</b> Enter between <b>1 and 5 minutes</b> from launch. Tokens older than 30 minutes that haven't pumped already have stale momentum.\n` +
       `2️⃣ <b>Liquidity &amp; MC Sweet Spot:</b> Enter at <b>$30K – $65K Market Cap</b>. This provides enough proof of life to avoid instant rugs, with room to run to $500K+.\n` +
-      `3️⃣ <b>Automated Discovery:</b> Our bot scans DexScreener &amp; Pump.fun every 12 seconds with strict authority checks. When an alert arrives, check the AI Conviction score and tap <code>⚡ Snipe 0.1 SOL</code> immediately!`;
+      `3️⃣ <b>Automated Discovery:</b> Our bot scans DexScreener &amp; Pump.fun every 12 seconds with strict authority checks. When an alert arrives, tap <code>⚡ Snipe 0.1 SOL</code> immediately!`;
   }
 
   // Dynamic Contextual AI Synthesizer (Fallback for ANY general question)
@@ -1537,7 +1537,7 @@ export async function lookupTokenAnalytics(query: string): Promise<AiAuditResult
       liquidityBurntPct: 100,
     },
     recommendation,
-    summary: `${recommendation.replace('_', ' ')} • Conviction ${aiScore.convictionScore}/100 (${aiScore.metaCategory}). ${aiScore.thesis}`,
+    summary: `${recommendation.replace('_', ' ')} (${aiScore.metaCategory}). ${aiScore.thesis}`,
     reasonsToBuy,
     reasonsNotToBuy,
     dexId: pair?.dexId || 'Raydium',
@@ -1589,7 +1589,7 @@ export function renderTokenAnalyticsCard(audit: AiAuditResult): string {
     `• 💰 <b>Price:</b> <code>${priceFmt}</code> (24h: <code>${changeFmt}</code>)\n` +
     `• 🏦 <b>Market Cap:</b> <code>${mcFmt}</code>\n` +
     `• 💧 <b>Liquidity:</b> <code>${liqFmt}</code> | 📊 <b>24h Vol:</b> <code>${volFmt}</code>\n` +
-    `• 🎯 <b>Verdict:</b> ${recEmoji} <b>${audit.recommendation.replace(/_/g, ' ')}</b> (Conviction: <code>${audit.score.convictionScore}/100</code>)\n` +
+    `• 🎯 <b>Verdict:</b> ${recEmoji} <b>${audit.recommendation.replace(/_/g, ' ')}</b>\n` +
     `• 🛡️ <b>Rug Risk:</b> <code>${audit.score.rugRisk}</code> | <b>Theme:</b> <i>${escapeHtml(audit.score.metaCategory)}</i>\n\n` +
     `🟢 <b>Reasons to Buy:</b>\n${buyLines}\n\n` +
     `🔴 <b>Reasons NOT to Buy:</b>\n${riskLines}\n\n` +
@@ -1878,7 +1878,7 @@ Live On-Chain & Web Narrative Data for $${audit.symbol} (${audit.name}):
 - Official Socials: Twitter: ${audit.webNarrative?.twitterHandle || 'N/A'}, Telegram: ${audit.webNarrative?.telegramUrl || 'N/A'}, Website: ${audit.webNarrative?.websiteUrl || 'N/A'}
 - Reasons to Buy: ${audit.reasonsToBuy?.join('; ')}
 - Reasons NOT to Buy: ${audit.reasonsNotToBuy?.join('; ')}
-- Verdict: ${audit.recommendation} (Conviction: ${audit.score.convictionScore}/100)`;
+- Verdict: ${audit.recommendation}`;
 
       const reply = await callNeuralTrader(tokenPrompt, userQuestion);
       if (reply) {

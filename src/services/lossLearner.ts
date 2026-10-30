@@ -451,7 +451,7 @@ export function getLearnedLossDashboard(): string {
     `• 👨‍💻 <b>Dev Holding Ceiling:</b> Max <code>${dangerZones.maxSafeDevHoldingPct}%</code> (protects against dev dumps)\n` +
     `• 🌐 <b>Mandatory Website:</b> Enforced when concentration > 35%\n\n` +
     `💡 <b>Empirical Loss Takeaways:</b>\n${insightLines}\n\n` +
-    `⚡ <i>Every single loss tightens our scanner's filters so you only receive high-conviction runners!</i>`;
+    `⚡ <i>Every single loss tightens our scanner's filters so you only receive high-performing breakout runners!</i>`;
 }
 
 /**

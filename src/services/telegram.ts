@@ -111,6 +111,38 @@ export async function refreshGroupAdminsCache(): Promise<void> {
 }
 
 /**
+ * Locks the public group so regular users cannot send any messages.
+ * Telegram natively replaces their message input bar with "MUTE".
+ * Only the owner and group administrators retain permission to send messages.
+ */
+export async function enforceGroupChatPermissions(): Promise<void> {
+  const groupChatId = env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId || groupChatId === '0' || !env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    return;
+  }
+  try {
+    await bot.setChatPermissions(groupChatId, {
+      can_send_messages: false,
+      can_send_audios: false,
+      can_send_documents: false,
+      can_send_photos: false,
+      can_send_videos: false,
+      can_send_video_notes: false,
+      can_send_voice_notes: false,
+      can_send_polls: false,
+      can_send_other_messages: false,
+      can_add_web_page_previews: false,
+      can_change_info: false,
+      can_invite_users: false,
+      can_pin_messages: false,
+    } as any);
+    console.log(`🔒 [Group Permissions] MUTE mode successfully enforced for group ${groupChatId}. Only admins/owner can post.`);
+  } catch (err: any) {
+    console.warn(`⚠️ [Group Permissions] Could not set chat permissions for ${groupChatId}:`, err?.message);
+  }
+}
+
+/**
  * Determines whether a user is either the bot owner (env.TELEGRAM_CHAT_ID)
  * or a group administrator/creator in the specified chat.
  */
@@ -420,14 +452,6 @@ export function renderEarlyTrendingCardText(token: any): string {
 
   const { row1, row2 } = buildSolscanHolderMatrix(token);
 
-  let aiSummary = '';
-  if (token.aiScore || token.slmVerdict) {
-    const score = token.aiScore?.convictionScore ?? 75;
-    const isGo = token.slmVerdict ? token.slmVerdict.viabilitySignal === 'GO' : true;
-    const gateBadge = isGo ? '🟢 GO' : '🔴 NO_GO';
-    aiSummary = `\n\n🤖 <b>AI Audit:</b> Conviction <code>${score}/100</code> • Gate: <b>${gateBadge}</b>`;
-  }
-
   return `
 🔥 <a href="${dexscreenerUrl}"><b>&lrm;${escapeHtml(token.tokenName || token.tokenSymbol)}</b></a><b> New </b><a href="https://t.me/solearlytrending"><b>Trending</b></a>
 🕒 <b>Age</b>: ${escapeHtml(ageText)} | <b>Security</b>: ✅
@@ -447,7 +471,7 @@ ${row2}
 
 <a href="https://solscan.io/account/${devAddr}"><b>🛠️ Dev:</b></a> ${devSol} SOL | ${devHoldingPct}%
 ┣ Bundled: ${devBundledPct}% 🤍 | Sold: ${devSoldPct}% ${soldIcon}
-┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥${aiSummary}
+┗ Airdrops: ${airdropPct}% 🤍 | Burnt: ${burntPct}% 🔥
 `.trim();
 }
 
@@ -461,13 +485,6 @@ export async function dispatchEarlyTrendingAlert(
   const targetGroupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
   const dexscreenerUrl = getDexScreenerUrl(candidate);
   const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
-  const trojanUrl = env.TROJAN_REF_CODE
-    ? `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}-${candidate.tokenMint}`
-    : `https://t.me/solana_trojanbot?start=${candidate.tokenMint}`;
-
-  const photonUrl = env.PHOTON_REF_CODE
-    ? `https://photon-sol.tinyastro.io/en/lp/${candidate.pairAddress || candidate.tokenMint}?ref=${env.PHOTON_REF_CODE}`
-    : `https://photon-sol.tinyastro.io/en/lp/${candidate.pairAddress || candidate.tokenMint}`;
 
   const message = renderEarlyTrendingCardText(candidate);
 
@@ -483,10 +500,6 @@ export async function dispatchEarlyTrendingAlert(
     [
       { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${candidate.tokenMint}` },
       { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${candidate.tokenMint}` },
-    ],
-    [
-      { text: '🦄 Buy on Trojan', url: trojanUrl },
-      { text: '⚡ Buy on Photon', url: photonUrl },
     ],
   ];
 
@@ -857,6 +870,10 @@ export function initTelegramCommands(): void {
   refreshGroupAdminsCache().catch(() => {});
   setInterval(refreshGroupAdminsCache, 15 * 60 * 1000);
 
+  // Enforce MUTE mode in public group so regular members cannot type/send messages
+  enforceGroupChatPermissions().catch(() => {});
+  setInterval(enforceGroupChatPermissions, 15 * 60 * 1000);
+
   // Group admin guard wrapper for command listeners
   const onTextCmd = (regexp: RegExp, handler: (msg: any, match?: any) => Promise<void> | void) => {
     bot.onText(regexp, async (msg, match) => {
@@ -1125,6 +1142,27 @@ ${capitalLine}
       await bot.sendMessage(msg.chat.id, '📌 <b>[PINNED DASHBOARD]</b> Performance briefing posted and pinned in the group!', { parse_mode: 'HTML' });
     } catch (err: any) {
       await bot.sendMessage(msg.chat.id, `⚠️ Error updating pinned dashboard: ${err.message}`);
+    }
+  });
+
+  // /pinguide (Forces auto-healing, re-posting and pinning the constant bot operating guide in the public group)
+  onTextCmd(/\/pinguide|\/ping_guide/i, async (msg) => {
+    try {
+      const { ensureConstantBotGuidePinned } = await import('./groupPinnedDashboard.js');
+      await ensureConstantBotGuidePinned(true);
+      await bot.sendMessage(msg.chat.id, '📌 <b>[BOT GUIDE]</b> Constant Operating Guide freshly posted and pinned in the group!', { parse_mode: 'HTML' });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Error pinning guide: ${err.message}`);
+    }
+  });
+
+  // /lockgroup or /muteall (Enforces MUTE permissions on the public group)
+  onTextCmd(/\/lockgroup|\/muteall|\/mutegroup/i, async (msg) => {
+    try {
+      await enforceGroupChatPermissions();
+      await bot.sendMessage(msg.chat.id, '🔒 <b>[GROUP LOCKED]</b> Public group permissions set to MUTE mode. Only admins/owner can post.', { parse_mode: 'HTML' });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Error locking group: ${err.message}`);
     }
   });
 
@@ -2797,12 +2835,6 @@ export async function handleTokenDeepLink(chatId: number | string, tokenMint: st
     if (token) {
       const card = renderEarlyTrendingCardText(token);
       const dexscreenerUrl = getDexScreenerUrl(token);
-      const trojanUrl = env.TROJAN_REF_CODE
-        ? `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}-${token.tokenMint}`
-        : `https://t.me/solana_trojanbot?start=${token.tokenMint}`;
-      const photonUrl = env.PHOTON_REF_CODE
-        ? `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || token.tokenMint}?ref=${env.PHOTON_REF_CODE}`
-        : `https://photon-sol.tinyastro.io/en/lp/${token.pairAddress || token.tokenMint}`;
 
       const inlineKeyboard = [
         [
@@ -2812,10 +2844,6 @@ export async function handleTokenDeepLink(chatId: number | string, tokenMint: st
         [
           { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${token.tokenMint}` },
           { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${token.tokenMint}` },
-        ],
-        [
-          { text: '🦄 Buy on Trojan', url: trojanUrl },
-          { text: '⚡ Buy on Photon', url: photonUrl },
         ],
       ];
 
@@ -3673,7 +3701,7 @@ export async function handlePaperResetCommand(chatId: number | string): Promise<
         `🏦 <b>Initial Balance:</b> <code>$1,000.00 USD</code>\n` +
         `📊 <b>Active Trades:</b> 0 (Clean Slate)\n` +
         `🎯 <b>Stats & Streaks:</b> Freshly re-initialized\n\n` +
-        `<i>The engine is armed and ready to execute $10.00 base conviction trades from radar breakout alerts.</i>`,
+        `<i>The engine is armed and ready to execute $10.00 base trades from radar breakout alerts.</i>`,
       { parse_mode: 'HTML' }
     );
   } catch (err: any) {

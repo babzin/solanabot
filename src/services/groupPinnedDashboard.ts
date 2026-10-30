@@ -265,8 +265,9 @@ export function buildPrivateDashboardKeyboard(): any {
 /**
  * Ensures the constant Bot Guide message is posted and permanently pinned in the public group.
  * It does NOT get unpinned on 6-hour cycles.
+ * If chat is cleared or message is deleted, auto-restores a brand new message and pins it immediately.
  */
-export async function ensureConstantBotGuidePinned(): Promise<void> {
+export async function ensureConstantBotGuidePinned(forceFresh: boolean = false): Promise<void> {
   const targetChatId = env.TELEGRAM_GROUP_CHAT_ID;
   if (!targetChatId || targetChatId === '0' || !env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     return;
@@ -275,40 +276,58 @@ export async function ensureConstantBotGuidePinned(): Promise<void> {
   const guideText = buildConstantBotGuideText();
   const guideKeyboard = buildConstantBotGuideKeyboard();
 
-  if (cachedState.guideMessageId && cachedState.chatId === targetChatId) {
+  let needsFreshPost = forceFresh || !cachedState.guideMessageId || cachedState.chatId !== targetChatId;
+
+  if (!needsFreshPost && cachedState.guideMessageId) {
     try {
+      // 1. Verify message still exists in Telegram (if chat was cleared, edit will throw message not found)
       await bot.editMessageText(guideText, {
         chat_id: targetChatId,
         message_id: cachedState.guideMessageId,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
         reply_markup: guideKeyboard,
+      }).catch((editErr: any) => {
+        const errMsg = editErr?.message || '';
+        if (errMsg.includes('message is not modified')) {
+          return;
+        }
+        throw editErr;
       });
+
+      // 2. Ensure it is actively pinned
+      await bot.pinChatMessage(targetChatId, cachedState.guideMessageId, { disable_notification: true }).catch((pinErr: any) => {
+        const pinMsg = pinErr?.message || '';
+        if (pinMsg.includes('not found') || pinMsg.includes('deleted') || pinMsg.includes('MESSAGE_ID_INVALID')) {
+          throw pinErr;
+        }
+      });
+
       return;
     } catch (err: any) {
-      if (err?.message?.includes('message is not modified')) return;
-      console.warn(`⚠️ [Constant Bot Guide] Edit failed (${err.message}). Posting fresh guide...`);
+      console.warn(`⚠️ [Constant Bot Guide] Existing guide #${cachedState.guideMessageId} missing or deleted (${err.message}). Auto-restoring fresh guide...`);
+      needsFreshPost = true;
+      cachedState.guideMessageId = undefined;
     }
   }
 
-  try {
-    const sentMsg = await bot.sendMessage(targetChatId, guideText, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      reply_markup: guideKeyboard,
-    });
+  if (needsFreshPost) {
+    try {
+      const sentMsg = await bot.sendMessage(targetChatId, guideText, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: guideKeyboard,
+      });
 
-    cachedState.chatId = targetChatId;
-    cachedState.guideMessageId = sentMsg.message_id;
-    persistState();
+      cachedState.chatId = targetChatId;
+      cachedState.guideMessageId = sentMsg.message_id;
+      persistState();
 
-    await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true }).catch((pinErr: any) => {
-      console.warn('⚠️ [Constant Bot Guide] Could not pin guide message:', pinErr.message);
-    });
-
-    console.log(`📌 [Constant Bot Guide] Successfully posted and pinned guide #${sentMsg.message_id} in ${targetChatId}`);
-  } catch (err: any) {
-    console.error('❌ [Constant Bot Guide] Failed to send guide to group:', err.message);
+      await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true });
+      console.log(`📌 [Constant Bot Guide] Auto-sent & pinned brand new guide #${sentMsg.message_id} in ${targetChatId}`);
+    } catch (err: any) {
+      console.error('❌ [Constant Bot Guide] Failed to send & pin guide to group:', err.message);
+    }
   }
 }
 
@@ -340,8 +359,10 @@ export async function postOrUpdatePerformanceReport(forceNew: boolean = false): 
       persistState();
       return;
     } catch (err: any) {
-      if (err?.message?.includes('message is not modified')) return;
-      console.warn(`⚠️ [Performance Report] Edit failed (${err.message}). Re-posting newest performance report...`);
+      const errMsg = err?.message || '';
+      if (errMsg.includes('message is not modified')) return;
+      console.warn(`⚠️ [Performance Report] Edit failed (${errMsg}). Re-posting newest performance report...`);
+      cachedState.performanceMessageId = undefined;
     }
   }
 
@@ -481,5 +502,14 @@ export function initGroupPinnedDashboardScheduler(): void {
     }
   }, SIX_HOURS_MS);
 
-  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (Constant Guide Pinned + 6h Rotating PnL Pin).');
+  // Continuous 60-second watchdog: ensures Bot Guide is pinned. If chat is cleared, auto-sends and re-pins immediately!
+  setInterval(async () => {
+    try {
+      await ensureConstantBotGuidePinned();
+    } catch (err: any) {
+      // transient network issue suppressed
+    }
+  }, 60 * 1000);
+
+  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (Constant Guide Pinned + 60s Clear-Chat Auto-Heal + 6h Rotating PnL Pin).');
 }
