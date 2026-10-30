@@ -1185,7 +1185,7 @@ function getSmartHeuristicAdvice(q: string, ctx: ComprehensiveTradingContext, ra
     `• <b>Risk/Reward math:</b> You don't need an 80% win rate. With our <b>${ctx.weeklyWinRate}% win rate</b>, cutting losers fast at -25% while letting winners scale to 2x-5x is what keeps net profits compounding (+${ctx.weeklyNetSolPnL} SOL this week).\n` +
     `• <b>Safety checklist:</b> Before buying, always make sure mint authority is revoked, LP is burnt, and the dev holds under 5%.\n` +
     `• <b>Execution:</b> Keep slippage reasonable and use a small Jito tip (0.002-0.005 SOL) so you don't get sandwiched by bots.\n\n` +
-    `Tap <b>⚡ Scan Now</b> or <b>💎 Daily Coins</b> to see active verified setups.`;
+    `Tap <b>🏆 Top Gainers</b> to see active verified setups.`;
 }
 
 /**
@@ -1624,7 +1624,7 @@ export async function predictTopGemsToBuy(): Promise<{ text: string, tokens: any
   if (topGems.length === 0) {
     return {
       text: `📡 <b>Radar Scanning Active:</b> Looking for fresh 5x-20x breakout setups right now.\n` +
-        `No tokens currently meet our strict volume and dev-retention criteria this second. Tap <b>⚡ Scan Now</b> to trigger a real-time on-chain sweep!`,
+        `No tokens currently meet our strict volume and dev-retention criteria this second. Radar is scanning continuously!`,
       tokens: [],
     };
   }

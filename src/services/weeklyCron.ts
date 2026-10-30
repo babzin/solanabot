@@ -37,10 +37,9 @@ export function initWeeklyReportCron(): void {
                 inline_keyboard: [
                   [
                     { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-                    { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                    { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
                   ],
                   [
-                    { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
                     { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
                   ],
                 ],

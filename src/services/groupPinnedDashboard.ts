@@ -21,7 +21,8 @@ try {
 
 interface PinnedDashboardState {
   chatId: string;
-  messageId?: number;
+  guideMessageId?: number;
+  performanceMessageId?: number;
   lastCycleTimeMs?: number;
   lastUpdatedTimeMs?: number;
 }
@@ -49,13 +50,55 @@ function persistState(): void {
 }
 
 /**
- * Builds the comprehensive dashboard text including:
- * 1. Bot operating instructions
- * 2. 6-hour performance & PnL report (wins, losses, win rate, realized PnL)
- * 3. Hypothetical $1,000 baseline simulation
- * 4. Active trades and daily discoveries
+ * Builds the constant Bot Operating Guide.
+ * This message is pinned once and stays permanently pinned in the public group.
  */
-export async function buildGroupDashboardText(userId?: string): Promise<string> {
+export function buildConstantBotGuideText(): string {
+  const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+  return `
+📖 <b>SOLANA ALPHA BREAKOUT RADAR • OPERATING GUIDE</b>
+⚡ <i>Automated 24/7 Inception Momentum &amp; Micro-Cap Sniper</i>
+
+🛡️ <b>CORE OPERATING PRINCIPLES:</b>
+• <b>Breakout Radar:</b> Continuously scans Raydium &amp; Pump.fun for newly launched tokens (&lt; 2 mins old) at inception momentum.
+• <b>RugCheck Armor:</b> Mandatory safety gate enforces 100% LP burned, Mint Authority Revoked, Freeze Authority Revoked, and &lt;3% dev retention.
+• <b>Universal $10 Rule:</b> Strictly sizes trade allocations at $10.00 USD (+ gas) — completely eliminates reckless overexposure.
+• <b>2X De-Risk Runner Strategy:</b> At 2X (+100%), the initial $10 capital is pulled back to cash. The remaining tokens ("moonbag") ride expansions (5X, 10X, 20X, 50X+) risk-free.
+• <b>Wallet Mirroring:</b> Connect your personal sniper wallet via private direct message to mirror trades automatically.
+
+👤 <b>PORTFOLIO &amp; TRADING MODES:</b>
+• <b>Unfunded Accounts:</b> Automatically track the <b>$1,000 Model Portfolio</b> with zero deposit required.
+• <b>Funded Accounts:</b> Deposit SOL to your sniper wallet. If Auto-Snipe is <b>ON</b>, deposited funds are deployed on verified alerts ($10/trade). If <b>OFF</b>, zero funds are touched unless you manually trigger a buy.
+
+👇 <i>Tap <b>[💬 Open Private DM ➔]</b> below to open direct chat with the bot and view your live dashboard:</i>
+  `.trim();
+}
+
+/**
+ * Keyboard for the constant Bot Operating Guide
+ */
+export function buildConstantBotGuideKeyboard(): any {
+  const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+  return {
+    inline_keyboard: [
+      [
+        { text: '💬 Open Private DM ➔', url: `https://t.me/${botUsername}?start=dashboard` },
+      ],
+      [
+        { text: '🔐 Connect Sniper Wallet', url: `https://t.me/${botUsername}?start=connect` },
+      ],
+    ],
+  };
+}
+
+/**
+ * Builds the 6-Hour Community Performance & PnL Report text.
+ * Displays:
+ * 1. Wins, losses, win rate, realized PnL
+ * 2. Hypothetical $1,000 baseline starting capital simulation
+ * 3. Personalized live status (if viewed in private DM)
+ */
+export async function buildPerformanceReportText(userId?: string): Promise<string> {
   const summary = await getPaperPortfolioSummary();
   const wallet = summary.wallet;
 
@@ -154,17 +197,10 @@ export async function buildGroupDashboardText(userId?: string): Promise<string> 
   }
 
   return `
-📌 <b>COMMUNITY PERFORMANCE BRIEFING &amp; BOT GUIDE</b>
+📊 <b>COMMUNITY PERFORMANCE &amp; PnL BRIEFING</b>
 ⚡ <i>Solana Early Trending Breakout Radar • 24/7 Autopilot</i>
 
-${userPersonalStatus}📖 <b>HOW TO UTILIZE THIS BOT:</b>
-• <b>Breakout Radar:</b> Scans Raydium &amp; Pump.fun 24/7 for brand new tokens (&lt; 2 mins old) at inception momentum.
-• <b>RugCheck Armor:</b> Mandatory safety gate enforces 100% LP burned, Mint Authority Revoked, Freeze Authority Revoked, and &lt;3% dev retention.
-• <b>Universal $10 Rule:</b> Strictly sizes trade allocations at $10.00 USD (+ gas) — completely eliminates reckless overexposure.
-• <b>2X De-Risk Runner Strategy:</b> At 2X (+100%), the initial $10 capital is pulled back to cash. The remaining tokens ("moonbag") ride expansions (5X, 10X, 20X, 50X+) risk-free.
-• <b>Wallet Mirroring:</b> Connect your personal sniper wallet via private direct message to mirror trades automatically.
-
-📊 <b>PERFORMANCE &amp; PnL METRICS:</b>
+${userPersonalStatus}📈 <b>PERFORMANCE &amp; PnL METRICS:</b>
 • <b>Closed Trades:</b> <code>${totalTrades}</code>
 • <b>Win / Loss Record:</b> <code>${winningTrades}W</code> - <code>${losingTrades}L</code> (<b>${winRate}% Win Rate</b>)
 • <b>Realized PnL:</b> <b>${realizedText}</b>
@@ -178,17 +214,20 @@ ${userPersonalStatus}📖 <b>HOW TO UTILIZE THIS BOT:</b>
 • <b>Net Cumulative Return:</b> <b>${totalReturnText}</b>
 • <b>Liquid Cash Reserve:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (Capital floor secured)
 
-<i>Tap <b>[💬 Open Private DM ➔]</b> below to jump directly into private chat with the bot and view your live trading dashboard.</i>
+<i>Tap <b>[💬 Open Private DM ➔]</b> below to jump into private chat with the bot and view your live trading dashboard.</i>
 
 🔄 <i>Auto-updated live on new trade data • Fresh cycle pinned every 6 hours</i>
 🕒 <i>Last Sync: ${timestamp} UTC</i>
   `.trim();
 }
 
+// Backwards-compatible export
+export const buildGroupDashboardText = buildPerformanceReportText;
+
 /**
- * Builds the inline interactive keyboard for the group dashboard
+ * Builds the inline interactive keyboard for the performance report
  */
-export function buildGroupDashboardKeyboard(): any {
+export function buildPerformanceReportKeyboard(): any {
   const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
   return {
     inline_keyboard: [
@@ -199,12 +238,11 @@ export function buildGroupDashboardKeyboard(): any {
         { text: '📬 Send Copy to My DM', callback_data: 'send_pinned_to_dm' },
         { text: '🔄 Refresh Stats', callback_data: 'refresh_pinned_dashboard' },
       ],
-      [
-        { text: '🔐 Connect Sniper Wallet', url: `https://t.me/${botUsername}?start=connect` },
-      ],
     ],
   };
 }
+
+export const buildGroupDashboardKeyboard = buildPerformanceReportKeyboard;
 
 /**
  * Builds keyboard specifically for private direct messages
@@ -217,10 +255,7 @@ export function buildPrivateDashboardKeyboard(): any {
         { text: '⚙️ Auto-Snipe Config', callback_data: 'cmd_autosnipe' },
       ],
       [
-        { text: '💎 Daily Gems', callback_data: 'cmd_early' },
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-      ],
-      [
         { text: '🔄 Refresh Stats', callback_data: 'refresh_pinned_dashboard' },
       ],
     ],
@@ -228,43 +263,99 @@ export function buildPrivateDashboardKeyboard(): any {
 }
 
 /**
- * Posts or updates the pinned dashboard in the public community group.
- * If forceNew is true or editing fails, sends a new message and pins it.
+ * Ensures the constant Bot Guide message is posted and permanently pinned in the public group.
+ * It does NOT get unpinned on 6-hour cycles.
  */
-export async function postOrUpdateGroupPinnedDashboard(forceNew: boolean = false): Promise<void> {
+export async function ensureConstantBotGuidePinned(): Promise<void> {
   const targetChatId = env.TELEGRAM_GROUP_CHAT_ID;
   if (!targetChatId || targetChatId === '0' || !env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
     return;
   }
 
-  const text = await buildGroupDashboardText();
-  const keyboard = buildGroupDashboardKeyboard();
+  const guideText = buildConstantBotGuideText();
+  const guideKeyboard = buildConstantBotGuideKeyboard();
 
-  // Try editing existing message in place if not forced to post a new one
-  if (!forceNew && cachedState.messageId && cachedState.chatId === targetChatId) {
+  if (cachedState.guideMessageId && cachedState.chatId === targetChatId) {
+    try {
+      await bot.editMessageText(guideText, {
+        chat_id: targetChatId,
+        message_id: cachedState.guideMessageId,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: guideKeyboard,
+      });
+      return;
+    } catch (err: any) {
+      if (err?.message?.includes('message is not modified')) return;
+      console.warn(`⚠️ [Constant Bot Guide] Edit failed (${err.message}). Posting fresh guide...`);
+    }
+  }
+
+  try {
+    const sentMsg = await bot.sendMessage(targetChatId, guideText, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: guideKeyboard,
+    });
+
+    cachedState.chatId = targetChatId;
+    cachedState.guideMessageId = sentMsg.message_id;
+    persistState();
+
+    await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true }).catch((pinErr: any) => {
+      console.warn('⚠️ [Constant Bot Guide] Could not pin guide message:', pinErr.message);
+    });
+
+    console.log(`📌 [Constant Bot Guide] Successfully posted and pinned guide #${sentMsg.message_id} in ${targetChatId}`);
+  } catch (err: any) {
+    console.error('❌ [Constant Bot Guide] Failed to send guide to group:', err.message);
+  }
+}
+
+/**
+ * Posts or updates the Community Performance Report in the public group.
+ * - In-place updates (forceNew = false) for live trades
+ * - 6-hour cycles (forceNew = true) unpin the old performance report and pin the newest one.
+ */
+export async function postOrUpdatePerformanceReport(forceNew: boolean = false): Promise<void> {
+  const targetChatId = env.TELEGRAM_GROUP_CHAT_ID;
+  if (!targetChatId || targetChatId === '0' || !env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    return;
+  }
+
+  const text = await buildPerformanceReportText();
+  const keyboard = buildPerformanceReportKeyboard();
+
+  // Try in-place edit if not a fresh 6-hour cycle
+  if (!forceNew && cachedState.performanceMessageId && cachedState.chatId === targetChatId) {
     try {
       await bot.editMessageText(text, {
         chat_id: targetChatId,
-        message_id: cachedState.messageId,
+        message_id: cachedState.performanceMessageId,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
         reply_markup: keyboard,
       });
       cachedState.lastUpdatedTimeMs = Date.now();
       persistState();
-      console.log(`📌 [Group Pinned Dashboard] Updated message #${cachedState.messageId} in ${targetChatId}`);
       return;
     } catch (err: any) {
-      const errMsg = err?.message || '';
-      if (errMsg.includes('message is not modified')) {
-        // Content has not changed, nothing more to do
-        return;
-      }
-      console.warn(`⚠️ [Group Pinned Dashboard] Edit failed (${errMsg}). Re-posting and pinning fresh message...`);
+      if (err?.message?.includes('message is not modified')) return;
+      console.warn(`⚠️ [Performance Report] Edit failed (${err.message}). Re-posting newest performance report...`);
     }
   }
 
-  // Send a fresh message and pin it
+  // If forceNew (fresh 6-hour cycle), unpin the old performance report
+  if (cachedState.performanceMessageId && cachedState.chatId === targetChatId) {
+    try {
+      await bot.unpinChatMessage(targetChatId, { message_id: cachedState.performanceMessageId } as any);
+      console.log(`📌 [Performance Report] Unpinned old performance report #${cachedState.performanceMessageId}`);
+    } catch (unpinErr: any) {
+      console.warn(`⚠️ [Performance Report] Could not unpin old message #${cachedState.performanceMessageId}:`, unpinErr.message);
+    }
+  }
+
+  // Send the new performance report and pin it
   try {
     const sentMsg = await bot.sendMessage(targetChatId, text, {
       parse_mode: 'HTML',
@@ -273,21 +364,27 @@ export async function postOrUpdateGroupPinnedDashboard(forceNew: boolean = false
     });
 
     cachedState.chatId = targetChatId;
-    cachedState.messageId = sentMsg.message_id;
+    cachedState.performanceMessageId = sentMsg.message_id;
     cachedState.lastCycleTimeMs = Date.now();
     cachedState.lastUpdatedTimeMs = Date.now();
     persistState();
 
-    // Pin the message in the group without notifying all members
-    try {
-      await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true });
-      console.log(`📌 [Group Pinned Dashboard] Successfully posted and pinned message #${sentMsg.message_id} in ${targetChatId}`);
-    } catch (pinErr: any) {
-      console.warn('⚠️ [Group Pinned Dashboard] Could not pin message (check bot admin rights in group):', pinErr.message);
-    }
+    await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true }).catch((pinErr: any) => {
+      console.warn('⚠️ [Performance Report] Could not pin message:', pinErr.message);
+    });
+
+    console.log(`📌 [Performance Report] Posted and pinned newest performance report #${sentMsg.message_id} in ${targetChatId}`);
   } catch (sendErr: any) {
-    console.error('❌ [Group Pinned Dashboard] Failed to send message to group:', sendErr.message);
+    console.error('❌ [Performance Report] Failed to send report to group:', sendErr.message);
   }
+}
+
+/**
+ * Master method: ensures constant guide is pinned and updates performance report.
+ */
+export async function postOrUpdateGroupPinnedDashboard(forceNew: boolean = false): Promise<void> {
+  await ensureConstantBotGuidePinned();
+  await postOrUpdatePerformanceReport(forceNew);
 }
 
 // Debounce timer for live updates
@@ -303,21 +400,21 @@ export function triggerGroupDashboardUpdate(): void {
   }
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    postOrUpdateGroupPinnedDashboard(false).catch((err) => {
+    postOrUpdatePerformanceReport(false).catch((err) => {
       console.warn('⚠️ [Group Pinned Dashboard] Live update error:', err.message);
     });
   }, 15000);
 }
 
 /**
- * Handles user clicking the "📬 Send to My Private DM" button
+ * Handles user clicking the "📬 Send Copy to My DM" button
  */
 export async function handleSendDashboardToDm(query: any): Promise<void> {
   const userId = query.from.id;
   const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
 
   try {
-    const text = await buildGroupDashboardText(String(userId));
+    const text = await buildPerformanceReportText(String(userId));
     const keyboard = buildPrivateDashboardKeyboard();
 
     await safeSendTelegramMessage(userId, text, {
@@ -327,13 +424,12 @@ export async function handleSendDashboardToDm(query: any): Promise<void> {
     });
 
     await bot.answerCallbackQuery(query.id, {
-      text: '📬 Performance report & bot guide sent to your private DM!',
+      text: '📬 Performance report & PnL sent to your private DM!',
       show_alert: false,
     });
   } catch (err: any) {
     const errMsg = err?.message || '';
     if (errMsg.includes('403') || errMsg.includes('blocked') || errMsg.includes('chat not found')) {
-      // User hasn't clicked Start in the bot yet
       await bot.answerCallbackQuery(query.id, {
         text: `⚠️ Please open @${botUsername} and tap START first so the bot can DM you!`,
         show_alert: true,
@@ -348,9 +444,9 @@ export async function handleSendDashboardToDm(query: any): Promise<void> {
 }
 
 /**
- * Initializes the 6-hour interval scheduler for the pinned group dashboard.
- * - Posts/updates once upon startup
- * - Every 6 hours posts a fresh message and pins it
+ * Initializes the 6-hour interval scheduler:
+ * - Constant Bot Guide stays permanently pinned
+ * - Community Performance Report is updated every 6 hours (old report unpinned, newest report pinned)
  */
 export function initGroupPinnedDashboardScheduler(): void {
   const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
@@ -358,16 +454,16 @@ export function initGroupPinnedDashboardScheduler(): void {
   // Run initial check / post on startup after a short warm-up delay (5 seconds)
   setTimeout(async () => {
     try {
+      await ensureConstantBotGuidePinned();
+
       const now = Date.now();
       const lastCycle = cachedState.lastCycleTimeMs || 0;
       const isDueForCycle = now - lastCycle >= SIX_HOURS_MS;
 
-      // If no message pinned yet or >6h passed, post and pin fresh message
-      if (!cachedState.messageId || isDueForCycle) {
-        await postOrUpdateGroupPinnedDashboard(true);
+      if (!cachedState.performanceMessageId || isDueForCycle) {
+        await postOrUpdatePerformanceReport(true);
       } else {
-        // Otherwise update existing pinned message in place
-        await postOrUpdateGroupPinnedDashboard(false);
+        await postOrUpdatePerformanceReport(false);
       }
     } catch (err: any) {
       console.warn('⚠️ [Group Pinned Dashboard] Startup check error:', err.message);
@@ -376,13 +472,14 @@ export function initGroupPinnedDashboardScheduler(): void {
 
   // Recurring 6-hour scheduler
   setInterval(async () => {
-    console.log('⏰ [Group Pinned Dashboard] 6-hour cycle reached. Posting and pinning fresh performance update...');
+    console.log('⏰ [Group Pinned Dashboard] 6-hour cycle reached. Posting newest performance update and unpinning old one...');
     try {
-      await postOrUpdateGroupPinnedDashboard(true);
+      await ensureConstantBotGuidePinned();
+      await postOrUpdatePerformanceReport(true);
     } catch (err: any) {
       console.warn('⚠️ [Group Pinned Dashboard] 6-hour cycle error:', err.message);
     }
   }, SIX_HOURS_MS);
 
-  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (6-hour pinned cycles + live in-place updates).');
+  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (Constant Guide Pinned + 6h Rotating PnL Pin).');
 }

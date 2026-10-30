@@ -83,6 +83,109 @@ export async function safeSendTelegramMessage(chatId: number | string, text: str
   return lastResult;
 }
 
+interface CachedAdmin {
+  isAdmin: boolean;
+  timestamp: number;
+}
+const adminCache = new Map<string, CachedAdmin>();
+const ADMIN_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+/**
+ * Pre-populates the cache with all current group administrators
+ */
+export async function refreshGroupAdminsCache(): Promise<void> {
+  const groupChatId = env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId || groupChatId === '0' || !env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+    return;
+  }
+  try {
+    const admins = await bot.getChatAdministrators(groupChatId);
+    for (const adm of admins) {
+      const cacheKey = `${groupChatId}_${adm.user.id}`;
+      adminCache.set(cacheKey, { isAdmin: true, timestamp: Date.now() });
+    }
+    console.log(`🛡️ [Admin Guardian] Cached ${admins.length} administrator(s) for group ${groupChatId}`);
+  } catch (err: any) {
+    console.warn('⚠️ [Admin Guardian] Could not fetch group administrators:', err.message);
+  }
+}
+
+/**
+ * Determines whether a user is either the bot owner (env.TELEGRAM_CHAT_ID)
+ * or a group administrator/creator in the specified chat.
+ */
+export async function isGroupAdminOrOwner(chatId: number | string, userId: number | string): Promise<boolean> {
+  const sUserId = String(userId);
+  const sChatId = String(chatId);
+  const ownerId = String(env.TELEGRAM_CHAT_ID || '');
+
+  // Owner is always authorized
+  if (sUserId && ownerId && sUserId === ownerId) {
+    return true;
+  }
+
+  const cacheKey = `${sChatId}_${sUserId}`;
+  const cached = adminCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < ADMIN_CACHE_TTL_MS) {
+    return cached.isAdmin;
+  }
+
+  try {
+    const member = await bot.getChatMember(chatId, Number(userId));
+    const isAdmin = member.status === 'creator' || member.status === 'administrator';
+    adminCache.set(cacheKey, { isAdmin, timestamp: Date.now() });
+    return isAdmin;
+  } catch (err: any) {
+    console.warn(`⚠️ [Admin Check] Could not verify permissions for user ${userId} in ${chatId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Enforces that only the owner and group administrators can post messages in the public group.
+ * Non-admin messages (text, photos, stickers, commands, media) are instantly deleted,
+ * and a temporary 8-second notice guides them to private DM.
+ */
+export async function enforceGroupAdminOnly(msg: any): Promise<boolean> {
+  const groupChatId = env.TELEGRAM_GROUP_CHAT_ID;
+  if (!groupChatId || String(msg.chat?.id) !== String(groupChatId)) {
+    return true; // Not the restricted public group
+  }
+  if (msg.from?.is_bot) {
+    return true; // Allow bots (or our own bot)
+  }
+
+  const userId = msg.from?.id;
+  const isAuthorized = userId ? await isGroupAdminOrOwner(msg.chat.id, userId) : false;
+
+  if (!isAuthorized) {
+    // Delete unauthorized message from public group immediately
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+
+    // Send transient 8s notice guiding them to private DM
+    const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+    const senderName = msg.from?.first_name || 'Member';
+    const warnText = `⚠️ <b>${escapeHtml(senderName)}</b>, this public group is restricted to owner and admin announcements.\n\n💬 <i>To interact with the bot, view your portfolio, or trade, please click below to open your private direct message:</i>`;
+
+    bot.sendMessage(msg.chat.id, warnText, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💬 Open Private DM ➔', url: `https://t.me/${botUser}?start=dashboard` }],
+        ],
+      },
+    }).then((sentWarn) => {
+      setTimeout(() => {
+        bot.deleteMessage(msg.chat.id, sentWarn.message_id).catch(() => {});
+      }, 8000);
+    }).catch(() => {});
+
+    return false;
+  }
+
+  return true;
+}
+
 export function formatTokenQuantity(amount: number): string {
   if (!amount || amount <= 0) return 'Tokens';
   if (amount >= 1_000_000_000) return `${(amount / 1_000_000_000).toFixed(2)}B`;
@@ -732,16 +835,11 @@ export function initTelegramCommands(): void {
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
     { command: 'portfolio', description: '💼 $1,000 Alpha Portfolio & Live PnL' },
-    { command: 'buy', description: '⚡ Instant Buy Any Solana Mint' },
-    { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
-    { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
     { command: 'flops', description: '📉 Daily Flopped Coins & Dips (-50%+)' },
     { command: 'weekly', description: '🗓️ Weekly Cumulative Recap & PnL' },
     { command: 'learner', description: '🧠 Adaptive Loss-Learning Feedback Engine' },
     { command: 'ask', description: '🤖 AI Trading Co-Pilot Q&A' },
-    { command: 'audit', description: '🔍 AI Audit Any Token Mint or Ticker' },
-    { command: 'slm', description: '🛡️ SLM Quality Gate Sentiment Evaluator' },
     { command: 'milestones', description: '📈 Price Milestones (+50% / -50%)' },
     { command: 'positions', description: '💼 My Active Positions & TP/SL Status' },
     { command: 'exitall', description: '🚨 Exit All Active Trades & Return Money to Account' },
@@ -754,6 +852,19 @@ export function initTelegramCommands(): void {
   ]).catch((err: any) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
+
+  // Pre-fetch and periodically sync group administrators for message authorization
+  refreshGroupAdminsCache().catch(() => {});
+  setInterval(refreshGroupAdminsCache, 15 * 60 * 1000);
+
+  // Group admin guard wrapper for command listeners
+  const onTextCmd = (regexp: RegExp, handler: (msg: any, match?: any) => Promise<void> | void) => {
+    bot.onText(regexp, async (msg, match) => {
+      const allowed = await enforceGroupAdminOnly(msg);
+      if (!allowed) return;
+      return handler(msg, match);
+    });
+  };
 
   // Initialize the 6-Hour Group Pinned Dashboard Scheduler
   initGroupPinnedDashboardScheduler();
@@ -824,10 +935,9 @@ export function initTelegramCommands(): void {
   // Persistent Keyboard docked at the bottom of phone screen
   const persistentReplyKeyboard = {
     keyboard: [
-      [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $1,000 Portfolio' }, { text: '🚨 Exit All Trades' }],
-      [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
-      [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
+      [{ text: '🚀 /start' }, { text: '💼 $1,000 Portfolio' }],
+      [{ text: '🏆 Top Gainers' }, { text: '📉 Daily Flops' }],
+      [{ text: '📈 Price Milestones' }, { text: '🚨 Exit All Trades' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
     ],
     resize_keyboard: true,
@@ -890,10 +1000,6 @@ ${capitalLine}
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
-        { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-      ],
-      [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
         { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
       ],
@@ -934,7 +1040,7 @@ ${capitalLine}
   };
 
   // /start or Start button (supports deep-linking: /start <payload>)
-  bot.onText(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
+  onTextCmd(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
     const payload = match?.[1]?.trim();
     const userId = String(msg.from?.id || msg.chat.id);
 
@@ -978,7 +1084,7 @@ ${capitalLine}
   });
 
   // /portfolio or /paper or "💼 $1,000 Portfolio" button
-  bot.onText(/💼 \$1,?000 Portfolio|💼 \$500 Portfolio|💼 \$1,?000 Paper|💼 \$500 Paper|💼 \$100 Paper|\/portfolio(?:\s+(.+))?|\/paper(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/💼 \$1,?000 Portfolio|💼 \$500 Portfolio|💼 \$1,?000 Paper|💼 \$500 Paper|💼 \$100 Paper|\/portfolio(?:\s+(.+))?|\/paper(?:\s+(.+))?/i, async (msg, match) => {
     const target = (match?.[1] || match?.[2])?.trim();
     if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
       await handleUserSubmittedToken(msg.chat.id, target);
@@ -989,12 +1095,12 @@ ${capitalLine}
   });
 
   // /reset_portfolio, /paper_reset, or /resetpaper
-  bot.onText(/\/reset_portfolio|\/resetportfolio|\/paper_reset|\/reset_paper|\/resetpaper/i, async (msg) => {
+  onTextCmd(/\/reset_portfolio|\/resetportfolio|\/paper_reset|\/reset_paper|\/resetpaper/i, async (msg) => {
     await handlePaperResetCommand(msg.chat.id);
   });
 
   // /fund or /topup (Funds portfolio with $1,000 or specified amount)
-  bot.onText(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
+  onTextCmd(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
     const amount = parseFloat(match?.[1] || match?.[2] || '1000');
     try {
       const { topUpPaperTradingWallet } = await import('./paperTrading.js');
@@ -1013,7 +1119,7 @@ ${capitalLine}
   });
 
   // /dashboard or /pinned (Forces posting and pinning group performance dashboard)
-  bot.onText(/\/dashboard|\/pinned|\/pin_dashboard/i, async (msg) => {
+  onTextCmd(/\/dashboard|\/pinned|\/pin_dashboard/i, async (msg) => {
     try {
       await postOrUpdateGroupPinnedDashboard(true);
       await bot.sendMessage(msg.chat.id, '📌 <b>[PINNED DASHBOARD]</b> Performance briefing posted and pinned in the group!', { parse_mode: 'HTML' });
@@ -1023,7 +1129,7 @@ ${capitalLine}
   });
 
   // /exitall, /closeall, /sellall, "🚨 Exit All Trades", or "Exit All"
-  bot.onText(/\/exitall|\/closeall|\/sellall|🚨 Exit All Trades|Exit All Trades|🚨 Exit All|Exit All/i, async (msg) => {
+  onTextCmd(/\/exitall|\/closeall|\/sellall|🚨 Exit All Trades|Exit All Trades|🚨 Exit All|Exit All/i, async (msg) => {
     try {
       const { exitAllPaperPositions } = await import('./paperTrading.js');
       const { exitAllSnipedPositions } = await import('./sniper.js');
@@ -1051,7 +1157,7 @@ ${capitalLine}
           inline_keyboard: [
             [
               { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
-              { text: '⚡ Scan New Gems', callback_data: 'cmd_scan' },
+              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
             ],
           ],
         },
@@ -1062,7 +1168,7 @@ ${capitalLine}
   });
 
   // /exit, /close, /sell <mint or ticker>
-  bot.onText(/\/exit(?:\s+(.+))?|\/close(?:\s+(.+))?|\/sell(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/\/exit(?:\s+(.+))?|\/close(?:\s+(.+))?|\/sell(?:\s+(.+))?/i, async (msg, match) => {
     const query = (match?.[1] || match?.[2] || match?.[3])?.trim();
     if (!query) {
       await bot.sendMessage(
@@ -1125,27 +1231,27 @@ ${capitalLine}
   });
 
   // /daily or /early or "💎 Daily Coins" button
-  bot.onText(/💎 Daily Coins|\/daily|\/early|Daily Coin/i, async (msg) => {
+  onTextCmd(/💎 Daily Coins|\/daily|\/early|Daily Coin/i, async (msg) => {
     await handleEarlyTrendingCommand(msg.chat.id);
   });
 
   // /top or /profits or "🏆 Top Gainers" button
-  bot.onText(/🏆 Top Gainers|\/top|\/profits|\/leaderboard|Top Early Trending|Top Gainer|Hall of Fame|^top gainers?$|^top$/i, async (msg) => {
+  onTextCmd(/🏆 Top Gainers|\/top|\/profits|\/leaderboard|Top Early Trending|Top Gainer|Hall of Fame|^top gainers?$|^top$/i, async (msg) => {
     await handleTopCommand(msg.chat.id);
   });
 
   // /flops or /bad or "📉 Daily Flops" button
-  bot.onText(/📉 Daily Flops|\/flops|\/bad|\/flopped|\/dips|Bad Coin|Daily Flop|^daily flops?$|^flops?$/i, async (msg) => {
+  onTextCmd(/📉 Daily Flops|\/flops|\/bad|\/flopped|\/dips|Bad Coin|Daily Flop|^daily flops?$|^flops?$/i, async (msg) => {
     await handleDailyFlopsCommand(msg.chat.id);
   });
 
   // /weekly or /week or "🗓️ Weekly Report"
-  bot.onText(/🗓️ Weekly Report|\/weekly|\/week|Weekly Report|Weekly Recap|^weekly report$|^weekly recap$|^weekly$/i, async (msg) => {
+  onTextCmd(/🗓️ Weekly Report|\/weekly|\/week|Weekly Report|Weekly Recap|^weekly report$|^weekly recap$|^weekly$/i, async (msg) => {
     await handleWeeklyReportCommand(msg.chat.id);
   });
 
   // /ask or "🤖 AI Co-Pilot"
-  bot.onText(/🤖 AI Co-Pilot|\/ask(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/🤖 AI Co-Pilot|\/ask(?:\s+(.+))?/i, async (msg, match) => {
     const question = match?.[1]?.trim();
     if (!question) {
       await bot.sendMessage(
@@ -1197,7 +1303,7 @@ ${capitalLine}
   });
 
   // /audit <mint or ticker>
-  bot.onText(/\/audit(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/\/audit(?:\s+(.+))?/i, async (msg, match) => {
     const query = match?.[1]?.trim();
     if (!query) {
       await bot.sendMessage(
@@ -1243,7 +1349,7 @@ ${capitalLine}
               { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
             ],
             [
-              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
             ],
           ],
         },
@@ -1254,7 +1360,7 @@ ${capitalLine}
   });
 
   // /slm or /gate <mint or ticker>
-  bot.onText(/\/slm(?:\s+(.+))?|\/gate(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/\/slm(?:\s+(.+))?|\/gate(?:\s+(.+))?/i, async (msg, match) => {
     const query = (match?.[1] || match?.[2])?.trim();
     if (!query) {
       await bot.sendMessage(
@@ -1371,7 +1477,7 @@ ${flagsText}
   });
 
   // /predict or /gems or /recommend
-  bot.onText(/\/predict|\/gems|\/recommend/i, async (msg) => {
+  onTextCmd(/\/predict|\/gems|\/recommend/i, async (msg) => {
     const waitMsg = await bot.sendMessage(msg.chat.id, '🎯 <i>Analyzing live on-chain momentum, buy pressure & radar breakout signals...</i>', { parse_mode: 'HTML' });
     try {
       const { predictTopGemsToBuy } = await import('./aiIntelligence.js');
@@ -1386,7 +1492,7 @@ ${flagsText}
       }
       inlineKeyboard.push([
         { text: '🔄 Refresh Predictions', callback_data: 'cmd_predict' },
-        { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       ]);
 
       await bot.editMessageText(text, {
@@ -1402,7 +1508,7 @@ ${flagsText}
   });
 
   // /buy or /submit or /trade <mint or ticker>
-  bot.onText(/\/buy(?:\s+(.+))?|\/submit(?:\s+(.+))?|\/trade(?:\s+(.+))?/i, async (msg, match) => {
+  onTextCmd(/\/buy(?:\s+(.+))?|\/submit(?:\s+(.+))?|\/trade(?:\s+(.+))?/i, async (msg, match) => {
     const query = (match?.[1] || match?.[2] || match?.[3])?.trim();
     if (!query) {
       await bot.sendMessage(
@@ -1422,37 +1528,37 @@ ${flagsText}
   });
 
   // /milestones or "📈 Price Milestones" button
-  bot.onText(/\/milestones|📈 Price Milestones|📈 Milestones|Price Milestone|^price milestones?$|^milestones?$/i, async (msg) => {
+  onTextCmd(/\/milestones|📈 Price Milestones|📈 Milestones|Price Milestone|^price milestones?$|^milestones?$/i, async (msg) => {
     await handlePriceMilestonesCommand(msg.chat.id);
   });
 
   // /positions or "💼 My Positions" button
-  bot.onText(/💼 My Positions|\/positions|\/portfolio|My Position/i, async (msg) => {
+  onTextCmd(/💼 My Positions|\/positions|\/portfolio|My Position/i, async (msg) => {
     await handlePositionsCommand(msg.chat.id, String(msg.from?.id || msg.chat.id));
   });
 
   // "⚙️ Auto-Snipe" button
-  bot.onText(/⚙️ Auto-Snipe|Auto Snipe Settings/i, async (msg) => {
+  onTextCmd(/⚙️ Auto-Snipe|Auto Snipe Settings/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await handleSnipeStatus(msg.chat.id, userId);
   });
 
   // "🟢 Auto-Snipe ON" button
-  bot.onText(/🟢 Auto-Snipe ON|\/autosnipe\s+on/i, async (msg) => {
+  onTextCmd(/🟢 Auto-Snipe ON|\/autosnipe\s+on/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
     await bot.sendMessage(msg.chat.id, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved trades.', { parse_mode: 'HTML' });
   });
 
   // "🔴 Auto-Snipe OFF" button
-  bot.onText(/🔴 Auto-Snipe OFF|\/autosnipe\s+off/i, async (msg) => {
+  onTextCmd(/🔴 Auto-Snipe OFF|\/autosnipe\s+off/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
     await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
     await bot.sendMessage(msg.chat.id, '🔴 <b>Auto-Snipe is now DISABLED!</b>\nYou will receive alert signals only.', { parse_mode: 'HTML' });
   });
 
   // /autosnipe on|off
-  bot.onText(/\/autosnipe(?:\s+(on|off))?/i, async (msg, match) => {
+  onTextCmd(/\/autosnipe(?:\s+(on|off))?/i, async (msg, match) => {
     const userId = String(msg.from?.id || msg.chat.id);
     const mode = match?.[1]?.toLowerCase();
     if (mode === 'on') {
@@ -1467,7 +1573,7 @@ ${flagsText}
   });
 
   // /scan or "⚡ Scan Now"
-  bot.onText(/\/scan|⚡ Scan Now|Scan/i, async (msg) => {
+  onTextCmd(/\/scan|⚡ Scan Now|Scan/i, async (msg) => {
     await bot.sendMessage(msg.chat.id, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
     try {
       const { runEarlyTrendingRadarCycle } = await import('./earlyTrending.js');
@@ -1483,7 +1589,7 @@ ${flagsText}
   });
 
   // /wallet, /balance, /connect, or "💰 Wallet"
-  bot.onText(/\/wallet|\/balance|\/connect|💰 Wallet|Balance/i, async (msg) => {
+  onTextCmd(/\/wallet|\/balance|\/connect|💰 Wallet|Balance/i, async (msg) => {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (isGroup) {
       await bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
@@ -1503,7 +1609,7 @@ ${flagsText}
   });
 
   // /withdraw <solana_address> [amount|all]
-  bot.onText(/\/withdraw(?:\s+(\S+))?(?:\s+(\S+))?/i, async (msg, match) => {
+  onTextCmd(/\/withdraw(?:\s+(\S+))?(?:\s+(\S+))?/i, async (msg, match) => {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (isGroup) {
       await bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
@@ -1605,7 +1711,7 @@ ${flagsText}
   });
 
   // /help or "❓ Help"
-  bot.onText(/\/help|❓ Help/i, async (msg) => {
+  onTextCmd(/\/help|❓ Help/i, async (msg) => {
     await bot.sendMessage(
       msg.chat.id,
       `📖 <b>SOLANA BOT GUIDE</b>\n\n` +
@@ -1623,7 +1729,7 @@ ${flagsText}
   });
 
   // /learner or /memory or "🧠 Loss Learner"
-  bot.onText(/\/(?:learner|memory|lossanalytics)|🧠 Loss Learner|Loss Learner/i, async (msg) => {
+  onTextCmd(/\/(?:learner|memory|lossanalytics)|🧠 Loss Learner|Loss Learner/i, async (msg) => {
     try {
       const { getLearnedLossDashboard } = await import('./lossLearner.js');
       const dash = getLearnedLossDashboard();
@@ -1633,7 +1739,7 @@ ${flagsText}
           inline_keyboard: [
             [
               { text: '🔄 Refresh Memory & Stats', callback_data: 'cmd_learner' },
-              { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+              { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
             ],
           ],
         },
@@ -1645,6 +1751,11 @@ ${flagsText}
 
   // Natural Language, Wallet Key Ingestion & Free-form Question Listener
   bot.on('message', async (msg) => {
+    // PUBLIC GROUP RESTRICTION: Only Owner and Admins can post in the public group
+    const allowed = await enforceGroupAdminOnly(msg);
+    if (!allowed) {
+      return;
+    }
     const text = msg.text?.trim();
     if (!text) return;
 
@@ -1776,11 +1887,7 @@ ${flagsText}
 
         inlineKeyboard.push([
           { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-          { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-        ]);
-        inlineKeyboard.push([
           { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
-          { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
         ]);
 
         const replyMarkup = { inline_keyboard: inlineKeyboard };
@@ -1848,7 +1955,7 @@ ${flagsText}
                   { text: `⚡ Snipe 0.5 SOL`, callback_data: `snipe_quick_0.5_${audit.mint}` },
                 ],
                 [
-                  { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+                  { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
                 ],
               ],
             },
@@ -1867,9 +1974,6 @@ ${flagsText}
             { text: `⚡ Snipe $${t.tokenSymbol}`, callback_data: `snipe_quick_0.1_${t.tokenMint}` },
           ]);
         }
-        predButtons.push([
-          { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-        ]);
 
         results.push({
           type: 'article',
@@ -1904,11 +2008,7 @@ ${flagsText}
           inline_keyboard: [
             [
               { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-              { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-            ],
-            [
               { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
-              { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
             ],
           ],
         },
@@ -2002,7 +2102,7 @@ ${flagsText}
         }
         predButtons.push([
           { text: '🔄 Refresh Predictions', callback_data: 'cmd_predict' },
-          { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+          { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
         ]);
         await bot.editMessageText(predText, {
           chat_id: chatId,
@@ -2113,7 +2213,7 @@ ${flagsText}
             inline_keyboard: [
               [
                 { text: '🔄 Refresh Memory & Stats', callback_data: 'cmd_learner' },
-                { text: '⚡ Scan DexScreener', callback_data: 'cmd_scan' },
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
               ],
             ],
           },
@@ -2320,8 +2420,8 @@ ${flagsText}
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
-                { text: '⚡ Scan New Gems', callback_data: 'cmd_scan' },
+                { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
               ],
             ],
           },
@@ -2496,7 +2596,7 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
                 { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
               ],
             ],
@@ -2532,11 +2632,10 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
       ]);
     });
     milestoneButtons.push([
-      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
       { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+      { text: '💼 My Positions', callback_data: 'cmd_positions' },
     ]);
     milestoneButtons.push([
-      { text: '💼 My Positions', callback_data: 'cmd_positions' },
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
@@ -2558,7 +2657,7 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '💎 Daily Coins', callback_data: 'cmd_early' }],
+            [{ text: '🏆 Top Gainers', callback_data: 'cmd_top' }],
             [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
           ],
         },
@@ -2811,13 +2910,11 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
         `🏆 <b>Top Early Trending</b> 💸\n` +
           `📅 <b>Date:</b> <code>${dateFormatted}</code>\n\n` +
           `⚠️ <b>No report found.</b>\n` +
-          `<i>No top gainers recorded yet for today (${today}). Background radar is actively scanning!</i>\n` +
-          `Tap <b>⚡ Scan Now</b> to run an immediate discovery cycle.`,
+          `<i>No top gainers recorded yet for today (${today}). Background radar is actively scanning!</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
-              [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
               [{ text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' }],
               [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
             ],
@@ -2830,10 +2927,6 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
     const report = renderTopLeaderboardText(gainers.slice(0, 15), today);
 
     const inlineKeyboard = [
-      [
-        { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
-        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-      ],
       [
         { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
         { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
@@ -2866,7 +2959,7 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' }],
             [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
           ],
         },
@@ -2933,10 +3026,9 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
             inline_keyboard: [
               [
                 { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
               ],
               [
-                { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
                 { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
               ],
             ],
@@ -2989,10 +3081,9 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
 
     flopButtons.push([
       { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
     ]);
     flopButtons.push([
-      { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
@@ -3015,7 +3106,7 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' }],
             [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
           ],
         },
@@ -3036,14 +3127,13 @@ export async function handleWeeklyReportCommand(chatId: number | string): Promis
     const inlineKeyboard = [
       [
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
-      ],
-      [
         { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
-        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
       ],
       [
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
         { text: '💼 My Positions', callback_data: 'cmd_positions' },
+      ],
+      [
         { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
       ],
     ];
@@ -3067,7 +3157,7 @@ export async function handleWeeklyReportCommand(chatId: number | string): Promis
         disable_web_page_preview: true,
         reply_markup: {
           inline_keyboard: [
-            [{ text: '⚡ Scan Now', callback_data: 'cmd_scan' }],
+            [{ text: '🏆 Top Gainers', callback_data: 'cmd_top' }],
             [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
           ],
         },
@@ -3095,7 +3185,7 @@ async function handlePositionsCommand(chatId: number | string, userId?: string):
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
                 { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
               ],
               [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
@@ -3150,7 +3240,7 @@ async function handlePositionsCommand(chatId: number | string, userId?: string):
       { text: '🔄 Refresh Positions', callback_data: 'cmd_positions' },
     ]);
     posButtons.push([
-      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
@@ -3192,7 +3282,7 @@ Wallet: <code>${walletTrunc}</code>
     ],
     [
       { text: '💼 My Positions', callback_data: 'cmd_positions' },
-      { text: '💎 Daily Coins', callback_data: 'cmd_early' },
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
     ],
     [
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
@@ -3377,7 +3467,7 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
           ],
           [
             { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
-            { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
+            { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
           ],
           [
             { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
@@ -3552,10 +3642,6 @@ export async function handlePaperPortfolioCommand(
       ],
       [
         { text: '🚨 Exit All Trades (Sell All)', callback_data: 'cmd_exit_all' },
-        { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
-      ],
-      [
-        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       ],
       [
