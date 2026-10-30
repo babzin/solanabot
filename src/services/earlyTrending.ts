@@ -7,7 +7,7 @@ import { verifyTokenSecurity } from './security.js';
 import { executeSnipeTrade, getUserAutoSnipeConfig, getActiveAutoSnipeUsers, executeUserSnipeTrade, getSolForFixedUsd } from './sniper.js';
 import { decryptUserKeypair } from './encryption.js';
 import { verifyGroupMembership, revokeUserWalletAndAccess } from './groupAccessGate.js';
-import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
+import { dispatchEarlyTrendingAlert, dispatchSnipeNotification, fetchUserSolBalance } from './telegram.js';
 import { analyzeTokenNarrative, evaluateSlmQualityGate } from './aiIntelligence.js';
 import { HolderDistributionItem, AiNarrativeScore, LearnedEvaluationResult, SlmEvaluationResult } from '../types/index.js';
 import { evaluateCandidateAgainstLearnedPatterns } from './lossLearner.js';
@@ -784,6 +784,11 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
 
           for (const user of activeUsers) {
             try {
+              // 0. Auto-Snipe Guard: If sniping is NOT enabled, no funds are allocated for trading!
+              if (!user.autoSnipeEnabled) {
+                continue;
+              }
+
               // 1. JIT Access Check: Ensure user is still an active member of the group
               const membership = await verifyGroupMembership(user.telegramUserId);
               if (!membership.isMember) {
@@ -792,17 +797,25 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
                 continue;
               }
 
-              // 2. Decrypt user's private key
+              // 2. Dynamic $10.00 USD entry sizing rule
+              const fixedUsd = user.fixedTradeSizeUsd || 10.0;
+              const tradeSol = await getSolForFixedUsd(fixedUsd);
+
+              // 3. Balance Check: Only proceed if user has deposited funds sufficient for the trade
+              if (!user.solanaWallet) continue;
+              const solBal = await fetchUserSolBalance(user.solanaWallet);
+              if (solBal < tradeSol) {
+                console.log(`⏸️ [Auto-Snipe Skipped] User ${user.telegramUserId} balance is ${solBal.toFixed(4)} SOL (< ${tradeSol.toFixed(4)} SOL needed). No funds allocated.`);
+                continue;
+              }
+
+              // 4. Decrypt user's private key
               let userKeypair: any = null;
               if (user.encryptedSecret && user.encryptionIv && user.encryptionTag) {
                 userKeypair = decryptUserKeypair(user.encryptedSecret, user.encryptionIv, user.encryptionTag);
               }
 
-              // 3. Dynamic $10.00 USD entry sizing rule
-              const fixedUsd = user.fixedTradeSizeUsd || 10.0;
-              const tradeSol = await getSolForFixedUsd(fixedUsd);
-
-              // 4. Execute individual snipe trade
+              // 5. Execute individual snipe trade using their deposited funds
               const snipeRes = await executeUserSnipeTrade(
                 {
                   userId: user.telegramUserId,

@@ -55,7 +55,7 @@ function persistState(): void {
  * 3. Hypothetical $1,000 baseline simulation
  * 4. Active trades and daily discoveries
  */
-export async function buildGroupDashboardText(): Promise<string> {
+export async function buildGroupDashboardText(userId?: string): Promise<string> {
   const summary = await getPaperPortfolioSummary();
   const wallet = summary.wallet;
 
@@ -117,11 +117,47 @@ export async function buildGroupDashboardText(): Promise<string> {
 
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
+  // Personalized user status section when viewed in private DM
+  let userPersonalStatus = '';
+  if (userId) {
+    try {
+      const { getUserPreferences, getUserActivePositions } = await import('./sniper.js');
+      const { fetchUserSolBalance } = await import('./telegram.js');
+      const pref = await getUserPreferences(userId);
+      const solBal = pref.solanaWallet ? await fetchUserSolBalance(pref.solanaWallet) : 0;
+      const isFunded = Boolean(pref.solanaWallet && solBal >= 0.01);
+      const solPrice = wallet.solPriceUsd || 145.0;
+
+      if (isFunded) {
+        const depositedUsd = (solBal * solPrice).toFixed(2);
+        const userPositions = getUserActivePositions(userId);
+        const snipeStatusText = pref.autoSnipeEnabled
+          ? '🟢 <b>ACTIVE</b> (Using deposited funds for $10 entries)'
+          : '⏸️ <b>DISABLED</b> (No funds allocated • Manual only)';
+
+        userPersonalStatus = `
+👤 <b>YOUR LIVE ACCOUNT STATUS:</b>
+• <b>Deposited Funds:</b> <code>${solBal.toFixed(4)} SOL</code> (<b>$${depositedUsd} USD</b>)
+• <b>Auto-Snipe:</b> ${snipeStatusText}
+• <b>Active Personal Trades:</b> <code>${userPositions.length} running</code>
+• <b>Wallet:</b> <code>${pref.solanaWallet?.slice(0, 4)}...${pref.solanaWallet?.slice(-4)}</code>
+        `.trim() + '\n\n';
+      } else {
+        userPersonalStatus = `
+👤 <b>YOUR ACCOUNT STATUS:</b>
+• <b>Status:</b> 💼 <b>Utilizing $1,000 Alpha Model Portfolio (Unfunded)</b>
+• <b>Auto-Snipe:</b> 🔴 <b>Awaiting Deposit</b>
+• <i>Deposit SOL into your personal wallet to switch from the $1,000 model portfolio to live trading.</i>
+        `.trim() + '\n\n';
+      }
+    } catch {}
+  }
+
   return `
 📌 <b>COMMUNITY PERFORMANCE BRIEFING &amp; BOT GUIDE</b>
 ⚡ <i>Solana Early Trending Breakout Radar • 24/7 Autopilot</i>
 
-📖 <b>HOW TO UTILIZE THIS BOT:</b>
+${userPersonalStatus}📖 <b>HOW TO UTILIZE THIS BOT:</b>
 • <b>Breakout Radar:</b> Scans Raydium &amp; Pump.fun 24/7 for brand new tokens (&lt; 2 mins old) at inception momentum.
 • <b>RugCheck Armor:</b> Mandatory safety gate enforces 100% LP burned, Mint Authority Revoked, Freeze Authority Revoked, and &lt;3% dev retention.
 • <b>Universal $10 Rule:</b> Strictly sizes trade allocations at $10.00 USD (+ gas) — completely eliminates reckless overexposure.
@@ -281,7 +317,7 @@ export async function handleSendDashboardToDm(query: any): Promise<void> {
   const botUsername = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
 
   try {
-    const text = await buildGroupDashboardText();
+    const text = await buildGroupDashboardText(String(userId));
     const keyboard = buildPrivateDashboardKeyboard();
 
     await safeSendTelegramMessage(userId, text, {

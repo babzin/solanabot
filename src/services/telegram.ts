@@ -837,10 +837,29 @@ export function initTelegramCommands(): void {
   const sendWelcomeDashboard = async (chatId: number | string) => {
     const userId = String(chatId);
     const pref = await getUserPreferences(userId);
+    const { fetchLiveSolPrice } = await import('./paperTrading.js');
+    const solPrice = await fetchLiveSolPrice();
 
-    const snipeBadge = pref.autoSnipeEnabled
-      ? `🟢 <b>ACTIVE</b> (<code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code>)`
-      : '🔴 <b>DISABLED</b> (Signals Only)';
+    let solBal = 0;
+    if (pref.solanaWallet) {
+      solBal = await fetchUserSolBalance(pref.solanaWallet);
+    }
+    const isFunded = Boolean(pref.solanaWallet && solBal >= 0.01);
+    const balanceUsd = (solBal * solPrice).toFixed(2);
+
+    let portfolioLabel = '💼 $1,000 Alpha Portfolio';
+    let capitalLine = '• <b>Capital:</b> 💼 <b>$1,000.00 USD</b> (Alpha Model Portfolio • Unfunded)';
+    let snipeBadge = '🔴 <b>DISABLED</b> (Signals Only • Unfunded)';
+
+    if (isFunded) {
+      portfolioLabel = `💼 My Live Portfolio ($${balanceUsd})`;
+      capitalLine = `• <b>Deposited Funds:</b> <code>${solBal.toFixed(4)} SOL</code> (<b>$${balanceUsd} USD</b>)`;
+      snipeBadge = pref.autoSnipeEnabled
+        ? `🟢 <b>ACTIVE</b> (Using deposited funds for $10 entries)`
+        : '⏸️ <b>DISABLED</b> (No funds allocated • Manual only)';
+    } else if (pref.autoSnipeEnabled) {
+      snipeBadge = '🟡 <b>AWAITING DEPOSIT</b> (Deposit SOL to activate)';
+    }
 
     let dailyCoinCount = 0;
     try {
@@ -856,9 +875,10 @@ export function initTelegramCommands(): void {
 
     const welcome = `
 ⚡ <b>Solana Trading Bot</b>
+${capitalLine}
 • <b>Auto-Snipe:</b> ${snipeBadge}
 • <b>Allocation:</b> $10.00 max per trade (+ gas)
-• <b>Strategy:</b> Infinite Trend Rider (Max Profit)
+• <b>Strategy:</b> Infinite Trend Rider (2X de-risk ➔ Moonbag)
 • <b>Coins Alerted Today:</b> <code>${dailyCoinCount}</code>
 
 <i>Tap any action below:</i>
@@ -866,7 +886,7 @@ export function initTelegramCommands(): void {
 
     const inlineKeyboard = [
       [
-        { text: '💼 $1,000 Alpha Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: portfolioLabel, callback_data: 'cmd_paper_portfolio' },
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
@@ -920,7 +940,7 @@ export function initTelegramCommands(): void {
 
     if (payload === 'dashboard' || payload === 'report' || payload === 'guide') {
       const { buildGroupDashboardText, buildPrivateDashboardKeyboard } = await import('./groupPinnedDashboard.js');
-      const text = await buildGroupDashboardText();
+      const text = await buildGroupDashboardText(userId);
       const keyboard = buildPrivateDashboardKeyboard();
       await safeSendTelegramMessage(msg.chat.id, text, {
         parse_mode: 'HTML',
@@ -964,7 +984,8 @@ export function initTelegramCommands(): void {
       await handleUserSubmittedToken(msg.chat.id, target);
       return;
     }
-    await handlePaperPortfolioCommand(msg.chat.id);
+    const userId = String(msg.from?.id || msg.chat.id);
+    await handlePaperPortfolioCommand(msg.chat.id, userId);
   });
 
   // /reset_portfolio, /paper_reset, or /resetpaper
@@ -1954,7 +1975,9 @@ ${flagsText}
       if (data === 'cmd_start') {
         await sendWelcomeDashboard(chatId);
       } else if (data === 'cmd_paper_portfolio') {
-        await handlePaperPortfolioCommand(chatId);
+        await handlePaperPortfolioCommand(chatId, userId);
+      } else if (data === 'cmd_view_alpha_benchmark') {
+        await handlePaperPortfolioCommand(chatId, userId, true);
       } else if (data === 'cmd_paper_reset') {
         await handlePaperResetCommand(chatId);
       } else if (data === 'cmd_scan') {
@@ -2155,10 +2178,18 @@ ${flagsText}
         await sendWelcomeDashboard(chatId);
       } else if (data === 'snipe_enable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
-        await bot.sendMessage(chatId, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved $10 trades.', { parse_mode: 'HTML' });
+        await bot.sendMessage(
+          chatId,
+          '🟢 <b>Auto-Snipe is now ENABLED!</b>\nYour deposited funds will be automatically used to snipe verified radar gems ($10.00 / entry).',
+          { parse_mode: 'HTML' }
+        );
       } else if (data === 'snipe_disable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
-        await bot.sendMessage(chatId, '🔴 <b>Auto-Snipe is now DISABLED!</b>\nYou will receive alert signals only.', { parse_mode: 'HTML' });
+        await bot.sendMessage(
+          chatId,
+          '⏸️ <b>Auto-Snipe is now DISABLED!</b>\nNo funds will be allocated for trading unless you manually initiate a transaction.',
+          { parse_mode: 'HTML' }
+        );
       } else if (data?.startsWith('snipe_set_')) {
         const amt = parseFloat(data.replace('snipe_set_', ''));
         if (!isNaN(amt)) {
@@ -3361,26 +3392,117 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
 }
 
 /**
- * Handles /paper and /portfolio command displaying live $1,000 bankroll & active positions
+ * Handles /paper and /portfolio command displaying live $1,000 bankroll or personalized deposited funds
  */
-export async function handlePaperPortfolioCommand(chatId: number | string): Promise<void> {
+export async function handlePaperPortfolioCommand(
+  chatId: number | string,
+  userId?: string,
+  forceBenchmark: boolean = false
+): Promise<void> {
+  const effectiveUserId = userId || String(chatId);
+  const isPublicGroup = String(chatId) === String(env.TELEGRAM_GROUP_CHAT_ID);
+  const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+
   try {
-    const { getPaperPortfolioSummary, PAPER_RESERVE_FLOOR_USD } = await import('./paperTrading.js');
+    const { getPaperPortfolioSummary, PAPER_RESERVE_FLOOR_USD, fetchLiveSolPrice } = await import('./paperTrading.js');
+    const solPrice = await fetchLiveSolPrice();
+
+    // 1. Check if user is in private chat and has deposited real funds
+    if (!isPublicGroup && !forceBenchmark) {
+      const pref = await getUserPreferences(effectiveUserId);
+      const walletAddr = pref.solanaWallet;
+      let solBal = 0;
+      if (walletAddr) {
+        solBal = await fetchUserSolBalance(walletAddr);
+      }
+      const isFunded = Boolean(walletAddr && solBal >= 0.01);
+
+      // --- FUNDED USER LIVE PORTFOLIO ---
+      if (isFunded) {
+        const depositedUsd = Number((solBal * solPrice).toFixed(2));
+        const userPositions = getUserActivePositions(effectiveUserId);
+
+        let openPositionsValueUsd = 0;
+        let unrealizedPnlUsd = 0;
+        for (const pos of userPositions) {
+          const val = pos.remainingTokens * (pos.currentPriceUsd || pos.entryPriceUsd);
+          openPositionsValueUsd += val;
+          unrealizedPnlUsd += val - pos.solInvested * solPrice;
+        }
+        const netEquityUsd = depositedUsd + openPositionsValueUsd;
+        const unrealizedSign = unrealizedPnlUsd >= 0 ? '+' : '';
+
+        const autoSnipeStatus = pref.autoSnipeEnabled
+          ? '🟢 <b>ACTIVE</b> (Using deposited funds for $10 radar entries)'
+          : '⏸️ <b>DISABLED</b> (No funds allocated • 100% idle until manual trade)';
+
+        let msg = `💼 <b>YOUR LIVE DEPOSITED PORTFOLIO</b> 🟢\n\n`;
+        msg += `💰 <b>Deposited Balance:</b> <code>${solBal.toFixed(4)} SOL</code> (<b>$${depositedUsd.toFixed(2)} USD</b>)\n`;
+        msg += `🏦 <b>Total Account Equity:</b> <b>$${netEquityUsd.toFixed(2)} USD</b>\n`;
+        msg += `⚡ <b>Auto-Snipe:</b> ${autoSnipeStatus}\n`;
+        msg += `💵 <b>Entry Allocation:</b> <b>$10.00 USD</b> per trade (+ network gas)\n`;
+        msg += `🛡️ <b>Strategy:</b> 2X De-Risk (Sell 50%) ➔ Infinite Trend Runner\n`;
+        if (userPositions.length > 0) {
+          msg += `📈 <b>Unrealized PnL:</b> <b>${unrealizedSign}$${unrealizedPnlUsd.toFixed(2)} USD</b>\n`;
+        }
+        msg += `\n📊 <b>Your Active Positions (${userPositions.length}):</b>\n`;
+
+        if (userPositions.length === 0) {
+          msg += pref.autoSnipeEnabled
+            ? `<i>Waiting for next radar breakout entry...</i>\n`
+            : `<i>No active trades. Enable auto-snipe or tap [⚡ Snipe] on any alert to trade.</i>\n`;
+        } else {
+          for (const pos of userPositions.slice(0, 15)) {
+            const mult = (pos.currentPriceUsd / Math.max(0.00000001, pos.entryPriceUsd)).toFixed(2);
+            const gainPct = (((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100).toFixed(1);
+            const sign = Number(gainPct) >= 0 ? '+' : '';
+            msg += `• <b>$${escapeHtml(pos.tokenSymbol)}</b>: <b>${sign}${gainPct}%</b> (<code>${mult}X</code>) • ${pos.status}\n`;
+          }
+        }
+
+        const inlineKeyboard = [
+          [
+            pref.autoSnipeEnabled
+              ? { text: '⏸️ Turn Auto-Snipe OFF (Pause Trading)', callback_data: 'snipe_disable' }
+              : { text: '🟢 Turn Auto-Snipe ON (Use Funds for Gems)', callback_data: 'snipe_enable' },
+          ],
+          [
+            { text: '🚨 Exit All My Trades', callback_data: 'cmd_exit_all' },
+            { text: '💸 Withdraw SOL', callback_data: 'wallet_withdraw' },
+          ],
+          [
+            { text: '🔄 Refresh Balance', callback_data: 'cmd_paper_portfolio' },
+            { text: '💼 View $1,000 Alpha Benchmark', callback_data: 'cmd_view_alpha_benchmark' },
+          ],
+        ];
+
+        await safeSendTelegramMessage(chatId, msg.trim(), {
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: inlineKeyboard },
+        });
+        return;
+      }
+    }
+
+    // --- UNFUNDED USER OR PUBLIC BENCHMARK: UTILIZE $1,000 ALPHA PORTFOLIO ---
     const summary = await getPaperPortfolioSummary();
     const w = summary.wallet;
 
     const pnlSign = summary.totalPnlUsd >= 0 ? '+' : '';
     const pnlEmoji = summary.totalPnlUsd >= 0 ? '💸' : '🩸';
-    const statusColor = summary.totalPnlUsd >= 0 ? '🟢' : '🔴';
 
     const isReserveLocked = w.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD && summary.activePositions.length > 0;
     const reserveStatusLine = isReserveLocked
       ? `⏸️ <b>Reserve Floor:</b> <b>$${PAPER_RESERVE_FLOOR_USD.toFixed(0)} Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
       : '';
 
-    let msg = `💼 <b>ALPHA TRADING PORTFOLIO</b> ${pnlEmoji}\n\n`;
-    msg += `🏦 <b>Equity:</b> <b>$${summary.netWorthUsd.toFixed(2)}</b> (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)\n`;
-    msg += `💵 <b>Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)}</code> | <b>In Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)}</code>\n`;
+    let msg = `💼 <b>ALPHA MODEL PORTFOLIO ($1,000 BASELINE)</b> ${pnlEmoji}\n\n`;
+    if (!isPublicGroup && !forceBenchmark) {
+      msg += `ℹ️ <i>Wallet not funded. You are currently utilizing the $1,000 Alpha Model Portfolio. Deposit SOL into your dedicated wallet to activate live fund trading.</i>\n\n`;
+    }
+    msg += `🏦 <b>Model Equity:</b> <b>$${summary.netWorthUsd.toFixed(2)}</b> (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)\n`;
+    msg += `💵 <b>Model Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)}</code> | <b>In Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)}</code>\n`;
     msg += `🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L)\n`;
     if (reserveStatusLine) msg += reserveStatusLine;
     msg += `\n📊 <b>Active Positions (${summary.activePositions.length}):</b>\n`;
@@ -3411,7 +3533,6 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
         
         const line = `• <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a> [${badge}]: <b>${sign}${gainPct.toFixed(1)}%</b> (<code>${mult}X</code>)\n`;
 
-        // Strict buffer guard against 4096 character limit
         if ((msg + line).length > 3400) {
           break;
         }
@@ -3426,15 +3547,18 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
 
     const inlineKeyboard = [
       [
-        { text: '🚨 Exit All Trades (Sell All)', callback_data: 'cmd_exit_all' },
+        { text: '🔐 Deposit Funds / Connect Wallet', callback_data: 'cmd_wallet' },
         { text: '🔄 Refresh Portfolio', callback_data: 'cmd_paper_portfolio' },
       ],
       [
+        { text: '🚨 Exit All Trades (Sell All)', callback_data: 'cmd_exit_all' },
         { text: '⚡ Scan Gems Now', callback_data: 'cmd_scan' },
-        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
       ],
       [
+        { text: '💎 Daily Coins', callback_data: 'cmd_early' },
         { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+      ],
+      [
         { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
       ],
     ];
