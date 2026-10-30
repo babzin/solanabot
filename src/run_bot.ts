@@ -32,12 +32,12 @@ async function startFullBot() {
     console.log('🟢 Telegram Polling: Online (Listening for /start, /daily, /top, /milestones, /positions, /autosnipe)');
 
     // Log user interactions
-    bot.on('message', (msg) => {
+    bot.on('message', (msg: any) => {
       const from = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || 'User');
       console.log(`📥 [Incoming Message] From: ${from} | Text: "${msg.text || ''}"`);
     });
 
-    bot.on('callback_query', (query) => {
+    bot.on('callback_query', (query: any) => {
       const from = query.from.username ? `@${query.from.username}` : query.from.first_name;
       console.log(`🔘 [Button Clicked] From: ${from} | Action: "${query.data}"`);
     });
