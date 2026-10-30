@@ -142,7 +142,7 @@ export async function buildGroupDashboardText(): Promise<string> {
 • <b>Net Cumulative Return:</b> <b>${totalReturnText}</b>
 • <b>Liquid Cash Reserve:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (Capital floor secured)
 
-<i>Tap <b>[📬 Send to My Private DM]</b> below to receive this report and personal wallet instructions directly in your private chat.</i>
+<i>Tap <b>[💬 Open Private DM ➔]</b> below to jump directly into private chat with the bot and view your live trading dashboard.</i>
 
 🔄 <i>Auto-updated live on new trade data • Fresh cycle pinned every 6 hours</i>
 🕒 <i>Last Sync: ${timestamp} UTC</i>
@@ -157,11 +157,14 @@ export function buildGroupDashboardKeyboard(): any {
   return {
     inline_keyboard: [
       [
-        { text: '📬 Send to My Private DM', callback_data: 'send_pinned_to_dm' },
+        { text: '💬 Open Private DM ➔', url: `https://t.me/${botUsername}?start=dashboard` },
+      ],
+      [
+        { text: '📬 Send Copy to My DM', callback_data: 'send_pinned_to_dm' },
+        { text: '🔄 Refresh Stats', callback_data: 'refresh_pinned_dashboard' },
       ],
       [
         { text: '🔐 Connect Sniper Wallet', url: `https://t.me/${botUsername}?start=connect` },
-        { text: '🔄 Refresh Stats', callback_data: 'refresh_pinned_dashboard' },
       ],
     ],
   };

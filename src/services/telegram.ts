@@ -375,6 +375,7 @@ export async function dispatchEarlyTrendingAlert(
     ],
     [
       { text: '⚡ Snipe $10 (Private DM)', url: `https://t.me/${botUser}?start=snipe_${candidate.tokenMint}` },
+      { text: '💬 Open Private DM', url: `https://t.me/${botUser}` },
     ],
     [
       { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${candidate.tokenMint}` },
@@ -449,6 +450,7 @@ ${flyingMoney}
   // Broadcast to Soul Web Terminal
   broadcastPricePump(pump);
 
+  const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
   const inlineKeyboard = [
     [
       { text: '📊 DexScreener Chart', url: chartUrl },
@@ -457,6 +459,9 @@ ${flyingMoney}
     [
       { text: '💰 Take-Profit (Sell 50%)', callback_data: `sell_quick_50_${pump.tokenMint}` },
       { text: '🚪 Exit All (100%)', callback_data: `sell_quick_100_${pump.tokenMint}` },
+    ],
+    [
+      { text: '💬 Open Private DM', url: `https://t.me/${botUser}` },
     ],
   ];
 
@@ -505,6 +510,7 @@ from ⚡️ <a href="${chartUrl}">${signalLabel}</a>
   // Broadcast to Soul Web Terminal
   broadcastPriceDip(dip);
 
+  const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
   const inlineKeyboard = [
     [
       { text: '📊 DexScreener Chart', url: chartUrl },
@@ -512,6 +518,7 @@ from ⚡️ <a href="${chartUrl}">${signalLabel}</a>
     ],
     [
       { text: '🛡️ Emergency Cut-Loss (Sell 100%)', callback_data: `sell_quick_100_${dip.tokenMint}` },
+      { text: '💬 Open Private DM', url: `https://t.me/${botUser}` },
     ],
   ];
 
@@ -910,6 +917,18 @@ export function initTelegramCommands(): void {
   bot.onText(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
     const payload = match?.[1]?.trim();
     const userId = String(msg.from?.id || msg.chat.id);
+
+    if (payload === 'dashboard' || payload === 'report' || payload === 'guide') {
+      const { buildGroupDashboardText, buildPrivateDashboardKeyboard } = await import('./groupPinnedDashboard.js');
+      const text = await buildGroupDashboardText();
+      const keyboard = buildPrivateDashboardKeyboard();
+      await safeSendTelegramMessage(msg.chat.id, text, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: keyboard,
+      });
+      return;
+    }
 
     if (payload === 'connect') {
       await sendUserWalletDashboard(msg.chat.id, userId);
