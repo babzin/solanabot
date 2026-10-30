@@ -31,6 +31,11 @@ import {
 } from './groupAccessGate.js';
 import { broadcastPricePump, broadcastPriceDip } from './events.js';
 import { getTokensForDate, getActiveTrackedTokens, getTokensForPastDays } from './earlyTokenStore.js';
+import {
+  initGroupPinnedDashboardScheduler,
+  handleSendDashboardToDm,
+  postOrUpdateGroupPinnedDashboard,
+} from './groupPinnedDashboard.js';
 
 export const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, {
   polling: {
@@ -719,7 +724,7 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
-    { command: 'portfolio', description: '💼 $500 Alpha Portfolio & Live PnL' },
+    { command: 'portfolio', description: '💼 $1,000 Alpha Portfolio & Live PnL' },
     { command: 'buy', description: '⚡ Instant Buy Any Solana Mint' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
@@ -742,6 +747,9 @@ export function initTelegramCommands(): void {
   ]).catch((err: any) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
+
+  // Initialize the 6-Hour Group Pinned Dashboard Scheduler
+  initGroupPinnedDashboardScheduler();
 
   // 1. New Group Members Listener: Send Transient 60s Welcome Explaining $10 Rule
   bot.on('new_chat_members', async (msg) => {
@@ -810,7 +818,7 @@ export function initTelegramCommands(): void {
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $500 Portfolio' }, { text: '🚨 Exit All Trades' }],
+      [{ text: '💼 $1,000 Portfolio' }, { text: '🚨 Exit All Trades' }],
       [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
       [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
@@ -851,7 +859,7 @@ export function initTelegramCommands(): void {
 
     const inlineKeyboard = [
       [
-        { text: '💼 $500 Alpha Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '💼 $1,000 Alpha Portfolio', callback_data: 'cmd_paper_portfolio' },
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
@@ -930,8 +938,8 @@ export function initTelegramCommands(): void {
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-  // /portfolio or /paper or "💼 $500 Portfolio" button
-  bot.onText(/💼 \$500 Portfolio|💼 \$500 Paper|💼 \$1,?000 Paper|💼 \$100 Paper|\/portfolio(?:\s+(.+))?|\/paper(?:\s+(.+))?/i, async (msg, match) => {
+  // /portfolio or /paper or "💼 $1,000 Portfolio" button
+  bot.onText(/💼 \$1,?000 Portfolio|💼 \$500 Portfolio|💼 \$1,?000 Paper|💼 \$500 Paper|💼 \$100 Paper|\/portfolio(?:\s+(.+))?|\/paper(?:\s+(.+))?/i, async (msg, match) => {
     const target = (match?.[1] || match?.[2])?.trim();
     if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
       await handleUserSubmittedToken(msg.chat.id, target);
@@ -945,9 +953,9 @@ export function initTelegramCommands(): void {
     await handlePaperResetCommand(msg.chat.id);
   });
 
-  // /fund or /topup (Funds portfolio with $500 or specified amount)
+  // /fund or /topup (Funds portfolio with $1,000 or specified amount)
   bot.onText(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
-    const amount = parseFloat(match?.[1] || match?.[2] || '500');
+    const amount = parseFloat(match?.[1] || match?.[2] || '1000');
     try {
       const { topUpPaperTradingWallet } = await import('./paperTrading.js');
       const wallet = await topUpPaperTradingWallet(amount);
@@ -961,6 +969,16 @@ export function initTelegramCommands(): void {
       );
     } catch (err: any) {
       await bot.sendMessage(msg.chat.id, `⚠️ Error funding portfolio: ${err.message}`);
+    }
+  });
+
+  // /dashboard or /pinned (Forces posting and pinning group performance dashboard)
+  bot.onText(/\/dashboard|\/pinned|\/pin_dashboard/i, async (msg) => {
+    try {
+      await postOrUpdateGroupPinnedDashboard(true);
+      await bot.sendMessage(msg.chat.id, '📌 <b>[PINNED DASHBOARD]</b> Performance briefing posted and pinned in the group!', { parse_mode: 'HTML' });
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `⚠️ Error updating pinned dashboard: ${err.message}`);
     }
   });
 
@@ -1556,7 +1574,7 @@ ${flagsText}
       `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
       `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
       `<b>Quick Commands:</b>\n` +
-      `• /portfolio — Live $500 Alpha Portfolio\n` +
+      `• /portfolio — Live $1,000 Alpha Portfolio\n` +
       `• /positions — Active Trades & Exits\n` +
       `• /exitall — Sell All & Cash Out\n` +
       `• /autosnipe — Automated Sniping`,
@@ -1900,6 +1918,18 @@ ${flagsText}
     const msgId = query.message?.message_id;
 
     try {
+      if (data === 'send_pinned_to_dm') {
+        await handleSendDashboardToDm(query);
+        return;
+      }
+      if (data === 'refresh_pinned_dashboard') {
+        await postOrUpdateGroupPinnedDashboard(false);
+        try {
+          await bot.answerCallbackQuery(query.id, { text: '✅ Pinned dashboard updated!', show_alert: false });
+        } catch {}
+        return;
+      }
+
       await bot.answerCallbackQuery(query.id);
 
       if (data === 'cmd_start') {
@@ -3401,7 +3431,7 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
 }
 
 /**
- * Resets the trading wallet to a fresh $500.00 USD balance
+ * Resets the trading wallet to a fresh $1,000.00 USD balance
  */
 export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
   try {
@@ -3409,9 +3439,9 @@ export async function handlePaperResetCommand(chatId: number | string): Promise<
     const wallet = await resetPaperTradingWallet();
     await bot.sendMessage(
       chatId,
-      `🔄 <b>[PORTFOLIO RESET TO $500]</b> 💸\n\n` +
+      `🔄 <b>[PORTFOLIO RESET TO $1,000]</b> 💸\n\n` +
         `💰 <b>Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n` +
-        `🏦 <b>Initial Balance:</b> <code>$500.00 USD</code>\n` +
+        `🏦 <b>Initial Balance:</b> <code>$1,000.00 USD</code>\n` +
         `📊 <b>Active Trades:</b> 0 (Clean Slate)\n` +
         `🎯 <b>Stats & Streaks:</b> Freshly re-initialized\n\n` +
         `<i>The engine is armed and ready to execute $10.00 base conviction trades from radar breakout alerts.</i>`,

@@ -1,9 +1,9 @@
 {
   "wallet": {
-    "initialBalanceUsd": 500,
-    "liquidCashUsd": 255.09403504813298,
+    "initialBalanceUsd": 1000,
+    "liquidCashUsd": 755.09403504813298,
     "solPriceUsd": 100.74,
-    "liquidCashSol": 2.5322,
+    "liquidCashSol": 7.4955,
     "totalInvestedUsd": 75,
     "totalRealizedPnlUsd": -143.03396495186698,
     "totalFeesPaidSol": 0.5613949999999999,
@@ -13,7 +13,7 @@
     "losingTrades": 42,
     "winRatePercent": 34.4,
     "maxConcurrentPositions": 200,
-    "tradeSizePercent": 2,
+    "tradeSizePercent": 1,
     "tradeSizeUsd": 10,
     "consecutiveLosses": 2,
     "autoRefillCount": 0,

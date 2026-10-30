@@ -219,6 +219,12 @@ export async function checkPriceMilestones(): Promise<number> {
       }
     }
 
+  if (alertsDispatched > 0) {
+    import('./groupPinnedDashboard.js')
+      .then((m) => m.triggerGroupDashboardUpdate())
+      .catch(() => {});
+  }
+
   return alertsDispatched;
 }
 
