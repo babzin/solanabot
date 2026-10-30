@@ -365,7 +365,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const wallet = await resetPaperTradingWallet();
       return reply.send({
         success: true,
-        message: 'Paper trading wallet successfully reset to a fresh $500.00 USD balance.',
+        message: 'Portfolio successfully reset to a fresh $500.00 USD balance.',
         wallet,
       });
     } catch (err: any) {
@@ -374,7 +374,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Fund / Top-up Paper Trading Wallet with custom or default amount
+   * Fund / Top-up Trading Wallet with custom or default amount
    */
   fastify.post('/api/paper/fund', async (request: FastifyRequest<{ Body: { amountUsd?: number } }>, reply: FastifyReply) => {
     try {
@@ -383,7 +383,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const wallet = await topUpPaperTradingWallet(amountUsd);
       return reply.send({
         success: true,
-        message: `Paper trading wallet topped up with +$${amountUsd.toFixed(2)} USD.`,
+        message: `Portfolio topped up with +$${amountUsd.toFixed(2)} USD.`,
         wallet,
       });
     } catch (err: any) {

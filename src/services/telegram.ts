@@ -121,13 +121,12 @@ export async function dispatchSnipeNotification(
   snipe: SnipeResult,
   chatId: string | number = env.TELEGRAM_CHAT_ID
 ): Promise<void> {
-  const simText = snipe.simulated ? ' <i>(Paper-Trading Simulation)</i>' : '';
   const explorerUrl = `https://solscan.io/tx/${snipe.signature}`;
   const symbol = snipe.tokenSymbol || 'TOKEN';
 
   const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
   const message = `
-🤖 <b>[AUTO-SNIPE EXECUTED]</b>${simText}
+🤖 <b>[AUTO-SNIPE EXECUTED]</b>
 
 🪙 <b>Target Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
 💰 <b>Allocation Spent:</b> <code>${snipe.solAmount.toFixed(2)} SOL</code>
@@ -160,13 +159,12 @@ export async function dispatchSnipeSellNotification(
   snipe: SnipeResult,
   chatId: string | number = env.TELEGRAM_CHAT_ID
 ): Promise<void> {
-  const simText = snipe.simulated ? ' <i>(Paper-Trading Simulation)</i>' : '';
   const explorerUrl = `https://solscan.io/tx/${snipe.signature}`;
   const symbol = snipe.tokenSymbol || 'TOKEN';
   const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
 
   const message = `
-🚨 <b>[AI AUTO-SELL EXECUTED]</b>${simText}
+🚨 <b>[AI AUTO-SELL EXECUTED]</b>
 
 🪙 <b>Sold Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
 💰 <b>SOL Reclaimed:</b> <code>+${snipe.solAmount.toFixed(3)} SOL</code>
@@ -721,8 +719,8 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
-    { command: 'paper', description: '💼 $500 Paper Portfolio & Live PnL' },
-    { command: 'buy', description: '💼 Instant Paper Buy Any Solana Mint' },
+    { command: 'portfolio', description: '💼 $500 Alpha Portfolio & Live PnL' },
+    { command: 'buy', description: '⚡ Instant Buy Any Solana Mint' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
@@ -741,7 +739,7 @@ export function initTelegramCommands(): void {
     { command: 'withdraw', description: '💸 Withdraw SOL to External Wallet' },
     { command: 'connect', description: '🔐 Connect / Generate Sniper Wallet' },
     { command: 'help', description: '❓ How It Works & Trading Guide' },
-  ]).catch((err) => {
+  ]).catch((err: any) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
   });
 
@@ -812,7 +810,7 @@ export function initTelegramCommands(): void {
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $500 Paper' }, { text: '🚨 Exit All Trades' }],
+      [{ text: '💼 $500 Portfolio' }, { text: '🚨 Exit All Trades' }],
       [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
       [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
@@ -853,7 +851,7 @@ export function initTelegramCommands(): void {
 
     const inlineKeyboard = [
       [
-        { text: '💼 $500 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '💼 $500 Alpha Portfolio', callback_data: 'cmd_paper_portfolio' },
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
@@ -932,9 +930,9 @@ export function initTelegramCommands(): void {
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-  // /paper or /portfolio or "💼 $500 Paper" button (supports /paper <mint or ticker>)
-  bot.onText(/💼 \$500 Paper|💼 \$1,?000 Paper|💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
-    const target = match?.[1]?.trim();
+  // /portfolio or /paper or "💼 $500 Portfolio" button
+  bot.onText(/💼 \$500 Portfolio|💼 \$500 Paper|💼 \$1,?000 Paper|💼 \$100 Paper|\/portfolio(?:\s+(.+))?|\/paper(?:\s+(.+))?/i, async (msg, match) => {
+    const target = (match?.[1] || match?.[2])?.trim();
     if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
       await handleUserSubmittedToken(msg.chat.id, target);
       return;
@@ -942,12 +940,12 @@ export function initTelegramCommands(): void {
     await handlePaperPortfolioCommand(msg.chat.id);
   });
 
-  // /paper_reset, /reset_paper, or /resetpaper
-  bot.onText(/\/paper_reset|\/reset_paper|\/resetpaper/i, async (msg) => {
+  // /reset_portfolio, /paper_reset, or /resetpaper
+  bot.onText(/\/reset_portfolio|\/resetportfolio|\/paper_reset|\/reset_paper|\/resetpaper/i, async (msg) => {
     await handlePaperResetCommand(msg.chat.id);
   });
 
-  // /fund or /topup (Funds paper wallet with $500 or specified amount)
+  // /fund or /topup (Funds portfolio with $500 or specified amount)
   bot.onText(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
     const amount = parseFloat(match?.[1] || match?.[2] || '500');
     try {
@@ -955,14 +953,14 @@ export function initTelegramCommands(): void {
       const wallet = await topUpPaperTradingWallet(amount);
       await bot.sendMessage(
         msg.chat.id,
-        `💵 <b>[PAPER WALLET FUNDED]</b> 💸\n\n` +
+        `💵 <b>[PORTFOLIO FUNDED]</b> 💸\n\n` +
         `Added: <b>+$${amount.toFixed(2)} USD</b>\n` +
         `💰 <b>New Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n\n` +
         `<i>Ready for upcoming radar entries!</i>`,
         { parse_mode: 'HTML' }
       );
     } catch (err: any) {
-      await bot.sendMessage(msg.chat.id, `⚠️ Error funding paper wallet: ${err.message}`);
+      await bot.sendMessage(msg.chat.id, `⚠️ Error funding portfolio: ${err.message}`);
     }
   });
 
@@ -994,7 +992,7 @@ export function initTelegramCommands(): void {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+              { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
               { text: '⚡ Scan New Gems', callback_data: 'cmd_scan' },
             ],
           ],
@@ -1351,8 +1349,8 @@ ${flagsText}
     if (!query) {
       await bot.sendMessage(
         msg.chat.id,
-        `💼 <b>Instant Paper Trading Submission</b> ⚡\n\n` +
-          `Submit any Solana token to trade it immediately with paper money (regardless of SLM signal):\n` +
+        `⚡ <b>Instant Token Audit & Buy</b> 🪙\n\n` +
+          `Submit any Solana token to audit and trade it immediately:\n` +
           `<code>/buy &lt;mintAddress or $TICKER&gt;</code>\n\n` +
           `<b>Examples:</b>\n` +
           `• <code>/buy 7GUnr7krtQhJwd6ASY2VUprd9t4c64zcgCsjdmZepump</code>\n` +
@@ -1558,7 +1556,7 @@ ${flagsText}
       `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
       `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
       `<b>Quick Commands:</b>\n` +
-      `• /paper — Live $500 Portfolio\n` +
+      `• /portfolio — Live $500 Alpha Portfolio\n` +
       `• /positions — Active Trades & Exits\n` +
       `• /exitall — Sell All & Cash Out\n` +
       `• /autosnipe — Automated Sniping`,
@@ -3151,7 +3149,7 @@ Wallet: <code>${walletTrunc}</code>
 export async function handleUserSubmittedToken(chatId: number | string, query: string): Promise<void> {
   const waitMsg = await bot.sendMessage(
     chatId,
-    `⚡ <i>Analyzing <code>${escapeHtml(query)}</code> &amp; executing instant Paper Trade Buy...</i>`,
+    `⚡ <i>Analyzing <code>${escapeHtml(query)}</code> &amp; executing instant Buy...</i>`,
     { parse_mode: 'HTML' }
   );
 
@@ -3260,14 +3258,14 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
     // 4. Construct rich Telegram confirmation response
     const signalBadge = slmVerdict.viabilitySignal === 'GO'
       ? '🟢 <b>CONFIRMED (GO)</b>'
-      : '🔴 <b>NO_GO (Traded with paper money anyway!)</b>';
+      : '🔴 <b>NO_GO (Audited & Logged)</b>';
 
     let paperSection = '';
     if (paperPos) {
       paperSection = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💼 <b>[INSTANT PAPER BUY EXECUTED]</b> ✅
-• 💵 <b>Paper Capital Invested:</b> <code>$${paperPos.investedUsd.toFixed(2)} USD</code> (<code>${paperPos.investedSol.toFixed(4)} SOL</code>)
+💼 <b>[INSTANT BUY EXECUTED]</b> ✅
+• 💵 <b>Capital Invested:</b> <code>$${paperPos.investedUsd.toFixed(2)} USD</code> (<code>${paperPos.investedSol.toFixed(4)} SOL</code>)
 • 💰 <b>Entry Price:</b> <code>$${paperPos.entryPriceUsd.toFixed(6)}</code>
 • 🪙 <b>Position Tokens:</b> <code>${formatTokenQuantity(paperPos.tokensAcquired)}</code>
 • 🛡️ <b>SLM Gate Verdict:</b> ${signalBadge}
@@ -3278,8 +3276,8 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
     } else {
       paperSection = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💼 <b>[PAPER POSITION ACTIVE]</b>
-• Token is already open and tracked in your paper portfolio!
+💼 <b>[POSITION ACTIVE]</b>
+• Token is already open and tracked in your portfolio!
 `;
     }
 
@@ -3298,12 +3296,12 @@ export async function handleUserSubmittedToken(chatId: number | string, query: s
             { text: '🔍 Solscan', url: `https://solscan.io/token/${audit.mint}` },
           ],
           [
-            { text: '💼 View Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+            { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
             { text: '⚡ Scan Now', callback_data: 'cmd_scan' },
           ],
           [
-            { text: '⚡ Snipe 0.1 SOL (Real)', callback_data: `snipe_quick_0.1_${audit.mint}` },
-            { text: '⚡ Snipe 0.5 SOL (Real)', callback_data: `snipe_quick_0.5_${audit.mint}` },
+            { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${audit.mint}` },
+            { text: '⚡ Snipe 0.5 SOL', callback_data: `snipe_quick_0.5_${audit.mint}` },
           ],
         ],
       },
@@ -3331,7 +3329,7 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
       ? `⏸️ <b>Reserve Floor:</b> <b>$${PAPER_RESERVE_FLOOR_USD.toFixed(0)} Lock Active</b> (Entries paused • Waiting for profit from ${summary.activePositions.length} active trade(s))\n`
       : '';
 
-    let msg = `💼 <b>PAPER PORTFOLIO</b> ${pnlEmoji}\n\n`;
+    let msg = `💼 <b>ALPHA TRADING PORTFOLIO</b> ${pnlEmoji}\n\n`;
     msg += `🏦 <b>Equity:</b> <b>$${summary.netWorthUsd.toFixed(2)}</b> (${pnlSign}${summary.totalPnlPercent.toFixed(1)}%)\n`;
     msg += `💵 <b>Cash:</b> <code>$${w.liquidCashUsd.toFixed(2)}</code> | <b>In Trades:</b> <code>$${w.totalInvestedUsd.toFixed(2)}</code>\n`;
     msg += `🎯 <b>Win Rate:</b> <b>${w.winRatePercent.toFixed(1)}%</b> (${w.winningTrades}W / ${w.losingTrades}L)\n`;
@@ -3398,12 +3396,12 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
       reply_markup: { inline_keyboard: inlineKeyboard },
     });
   } catch (err: any) {
-    await bot.sendMessage(chatId, `⚠️ Could not fetch paper trading portfolio: ${err.message}`);
+    await bot.sendMessage(chatId, `⚠️ Could not fetch trading portfolio: ${err.message}`);
   }
 }
 
 /**
- * Resets the paper trading wallet to a fresh $500.00 USD balance
+ * Resets the trading wallet to a fresh $500.00 USD balance
  */
 export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
   try {
@@ -3411,7 +3409,7 @@ export async function handlePaperResetCommand(chatId: number | string): Promise<
     const wallet = await resetPaperTradingWallet();
     await bot.sendMessage(
       chatId,
-      `🔄 <b>[PAPER TRADING WALLET RESET TO $500]</b> 💸\n\n` +
+      `🔄 <b>[PORTFOLIO RESET TO $500]</b> 💸\n\n` +
         `💰 <b>Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n` +
         `🏦 <b>Initial Balance:</b> <code>$500.00 USD</code>\n` +
         `📊 <b>Active Trades:</b> 0 (Clean Slate)\n` +
@@ -3420,7 +3418,7 @@ export async function handlePaperResetCommand(chatId: number | string): Promise<
       { parse_mode: 'HTML' }
     );
   } catch (err: any) {
-    await bot.sendMessage(chatId, `⚠️ Error resetting paper wallet: ${err.message}`);
+    await bot.sendMessage(chatId, `⚠️ Error resetting portfolio: ${err.message}`);
   }
 }
 
