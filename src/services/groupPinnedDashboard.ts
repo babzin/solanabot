@@ -23,30 +23,65 @@ interface PinnedDashboardState {
   chatId: string;
   guideMessageId?: number;
   performanceMessageId?: number;
+  pastPerformanceMessageIds?: number[];
   lastCycleTimeMs?: number;
   lastUpdatedTimeMs?: number;
 }
 
+const REDIS_KEY_PINNED_STATE = 'solana_bot:pinned_dashboard_state';
+
 let cachedState: PinnedDashboardState = {
   chatId: env.TELEGRAM_GROUP_CHAT_ID || '',
+  pastPerformanceMessageIds: [],
 };
 
 // Load persisted state from disk
 try {
   if (fs.existsSync(DASHBOARD_STATE_FILE)) {
     const raw = fs.readFileSync(DASHBOARD_STATE_FILE, 'utf-8');
-    cachedState = JSON.parse(raw);
+    cachedState = { ...cachedState, ...JSON.parse(raw) };
   }
 } catch (err: any) {
   console.warn('⚠️ Could not load pinned_dashboard.json:', err.message);
 }
 
-function persistState(): void {
+export async function loadPersistedDashboardState(): Promise<void> {
+  // 1. Try disk
+  try {
+    if (fs.existsSync(DASHBOARD_STATE_FILE)) {
+      const raw = fs.readFileSync(DASHBOARD_STATE_FILE, 'utf-8');
+      cachedState = { ...cachedState, ...JSON.parse(raw) };
+    }
+  } catch {}
+
+  // 2. Try Redis (survives ephemeral disk restarts on Render)
+  try {
+    const { redis } = await import('./redis.js');
+    if (redis && redis.status === 'ready') {
+      const redisRaw = await redis.get(REDIS_KEY_PINNED_STATE);
+      if (redisRaw) {
+        cachedState = { ...cachedState, ...JSON.parse(redisRaw) };
+      }
+    }
+  } catch {}
+}
+
+export async function persistDashboardState(): Promise<void> {
   try {
     fs.writeFileSync(DASHBOARD_STATE_FILE, JSON.stringify(cachedState, null, 2), 'utf-8');
   } catch (err: any) {
     console.warn('⚠️ Could not persist pinned_dashboard.json:', err.message);
   }
+  try {
+    const { redis } = await import('./redis.js');
+    if (redis && redis.status === 'ready') {
+      await redis.set(REDIS_KEY_PINNED_STATE, JSON.stringify(cachedState));
+    }
+  } catch {}
+}
+
+function persistState(): void {
+  persistDashboardState().catch(() => {});
 }
 
 /**
@@ -264,8 +299,8 @@ export function buildPrivateDashboardKeyboard(): any {
 
 /**
  * Ensures the constant Bot Guide message is posted and permanently pinned in the public group.
- * It does NOT get unpinned on 6-hour cycles.
- * If chat is cleared or message is deleted, auto-restores a brand new message and pins it immediately.
+ * Strictly pinned ONCE upon creation. Does NOT get re-pinned repeatedly.
+ * If chat was cleared or message was deleted, detects this and creates + pins a new guide once.
  */
 export async function ensureConstantBotGuidePinned(forceFresh: boolean = false): Promise<void> {
   const targetChatId = env.TELEGRAM_GROUP_CHAT_ID;
@@ -281,6 +316,7 @@ export async function ensureConstantBotGuidePinned(forceFresh: boolean = false):
   if (!needsFreshPost && cachedState.guideMessageId) {
     try {
       // 1. Verify message still exists in Telegram (if chat was cleared, edit will throw message not found)
+      // Do NOT call pinChatMessage here! It is already pinned once and stays permanently pinned.
       await bot.editMessageText(guideText, {
         chat_id: targetChatId,
         message_id: cachedState.guideMessageId,
@@ -293,14 +329,6 @@ export async function ensureConstantBotGuidePinned(forceFresh: boolean = false):
           return;
         }
         throw editErr;
-      });
-
-      // 2. Ensure it is actively pinned
-      await bot.pinChatMessage(targetChatId, cachedState.guideMessageId, { disable_notification: true }).catch((pinErr: any) => {
-        const pinMsg = pinErr?.message || '';
-        if (pinMsg.includes('not found') || pinMsg.includes('deleted') || pinMsg.includes('MESSAGE_ID_INVALID')) {
-          throw pinErr;
-        }
       });
 
       return;
@@ -321,10 +349,11 @@ export async function ensureConstantBotGuidePinned(forceFresh: boolean = false):
 
       cachedState.chatId = targetChatId;
       cachedState.guideMessageId = sentMsg.message_id;
-      persistState();
+      await persistDashboardState();
 
+      // Pin strictly ONCE upon initial send
       await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true });
-      console.log(`📌 [Constant Bot Guide] Auto-sent & pinned brand new guide #${sentMsg.message_id} in ${targetChatId}`);
+      console.log(`📌 [Constant Bot Guide] Posted and pinned ONCE successfully: #${sentMsg.message_id} in ${targetChatId}`);
     } catch (err: any) {
       console.error('❌ [Constant Bot Guide] Failed to send & pin guide to group:', err.message);
     }
@@ -333,8 +362,8 @@ export async function ensureConstantBotGuidePinned(forceFresh: boolean = false):
 
 /**
  * Posts or updates the Community Performance Report in the public group.
- * - In-place updates (forceNew = false) for live trades
- * - 6-hour cycles (forceNew = true) unpin the old performance report and pin the newest one.
+ * - In-place updates (forceNew = false) for live trades (updates currently pinned message)
+ * - 6-hour cycles (forceNew = true) unpin ALL old performance reports and pin the newest one.
  */
 export async function postOrUpdatePerformanceReport(forceNew: boolean = false): Promise<void> {
   const targetChatId = env.TELEGRAM_GROUP_CHAT_ID;
@@ -356,7 +385,7 @@ export async function postOrUpdatePerformanceReport(forceNew: boolean = false): 
         reply_markup: keyboard,
       });
       cachedState.lastUpdatedTimeMs = Date.now();
-      persistState();
+      await persistDashboardState();
       return;
     } catch (err: any) {
       const errMsg = err?.message || '';
@@ -366,13 +395,25 @@ export async function postOrUpdatePerformanceReport(forceNew: boolean = false): 
     }
   }
 
-  // If forceNew (fresh 6-hour cycle), unpin the old performance report
-  if (cachedState.performanceMessageId && cachedState.chatId === targetChatId) {
+  // 6-hour cycle (forceNew = true): UNPIN ALL OLD PERFORMANCE REPORTS
+  const idsToUnpin = new Set<number>();
+  if (cachedState.performanceMessageId) {
+    idsToUnpin.add(cachedState.performanceMessageId);
+  }
+  if (cachedState.pastPerformanceMessageIds && Array.isArray(cachedState.pastPerformanceMessageIds)) {
+    for (const pid of cachedState.pastPerformanceMessageIds) {
+      if (pid && pid !== cachedState.guideMessageId) {
+        idsToUnpin.add(pid);
+      }
+    }
+  }
+
+  for (const oldId of idsToUnpin) {
     try {
-      await bot.unpinChatMessage(targetChatId, { message_id: cachedState.performanceMessageId } as any);
-      console.log(`📌 [Performance Report] Unpinned old performance report #${cachedState.performanceMessageId}`);
+      await bot.unpinChatMessage(targetChatId, { message_id: oldId } as any);
+      console.log(`📌 [Performance Report] Unpinned old performance report #${oldId}`);
     } catch (unpinErr: any) {
-      console.warn(`⚠️ [Performance Report] Could not unpin old message #${cachedState.performanceMessageId}:`, unpinErr.message);
+      // Ignore if already unpinned or deleted
     }
   }
 
@@ -384,17 +425,27 @@ export async function postOrUpdatePerformanceReport(forceNew: boolean = false): 
       reply_markup: keyboard,
     });
 
+    if (cachedState.performanceMessageId && cachedState.performanceMessageId !== sentMsg.message_id) {
+      if (!cachedState.pastPerformanceMessageIds) cachedState.pastPerformanceMessageIds = [];
+      if (!cachedState.pastPerformanceMessageIds.includes(cachedState.performanceMessageId)) {
+        cachedState.pastPerformanceMessageIds.push(cachedState.performanceMessageId);
+      }
+      if (cachedState.pastPerformanceMessageIds.length > 10) {
+        cachedState.pastPerformanceMessageIds = cachedState.pastPerformanceMessageIds.slice(-10);
+      }
+    }
+
     cachedState.chatId = targetChatId;
     cachedState.performanceMessageId = sentMsg.message_id;
     cachedState.lastCycleTimeMs = Date.now();
     cachedState.lastUpdatedTimeMs = Date.now();
-    persistState();
+    await persistDashboardState();
 
     await bot.pinChatMessage(targetChatId, sentMsg.message_id, { disable_notification: true }).catch((pinErr: any) => {
       console.warn('⚠️ [Performance Report] Could not pin message:', pinErr.message);
     });
 
-    console.log(`📌 [Performance Report] Posted and pinned newest performance report #${sentMsg.message_id} in ${targetChatId}`);
+    console.log(`📌 [Performance Report] Posted and pinned newest performance report #${sentMsg.message_id} in ${targetChatId} (old reports unpinned)`);
   } catch (sendErr: any) {
     console.error('❌ [Performance Report] Failed to send report to group:', sendErr.message);
   }
@@ -475,6 +526,7 @@ export function initGroupPinnedDashboardScheduler(): void {
   // Run initial check / post on startup after a short warm-up delay (5 seconds)
   setTimeout(async () => {
     try {
+      await loadPersistedDashboardState();
       await ensureConstantBotGuidePinned();
 
       const now = Date.now();
@@ -491,25 +543,22 @@ export function initGroupPinnedDashboardScheduler(): void {
     }
   }, 5000);
 
-  // Recurring 6-hour scheduler
+  // Recurring 6-hour scheduler: unpins old report, posts newest report and pins it
   setInterval(async () => {
-    console.log('⏰ [Group Pinned Dashboard] 6-hour cycle reached. Posting newest performance update and unpinning old one...');
+    console.log('⏰ [Group Pinned Dashboard] 6-hour cycle reached. Posting newest performance report and unpinning old one...');
     try {
-      await ensureConstantBotGuidePinned();
       await postOrUpdatePerformanceReport(true);
     } catch (err: any) {
       console.warn('⚠️ [Group Pinned Dashboard] 6-hour cycle error:', err.message);
     }
   }, SIX_HOURS_MS);
 
-  // Continuous 60-second watchdog: ensures Bot Guide is pinned. If chat is cleared, auto-sends and re-pins immediately!
+  // Gentle 15-minute health check: auto-heals guide ONLY if chat was cleared or message was deleted (never re-pins existing)
   setInterval(async () => {
     try {
       await ensureConstantBotGuidePinned();
-    } catch (err: any) {
-      // transient network issue suppressed
-    }
-  }, 60 * 1000);
+    } catch {}
+  }, 15 * 60 * 1000);
 
-  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (Constant Guide Pinned + 60s Clear-Chat Auto-Heal + 6h Rotating PnL Pin).');
+  console.log('📌 [Group Pinned Dashboard] Scheduler initialized (Operating Guide pinned once + 6h Rotating Performance Pin with old unpinned).');
 }
