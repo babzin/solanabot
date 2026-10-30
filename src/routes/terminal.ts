@@ -8,16 +8,24 @@ import { executeSnipeTrade, getActivePositions, getAllPositions } from '../servi
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const terminalHtmlPath = path.resolve(__dirname, '../views/terminal.html');
+function loadTerminalHtml(): string {
+  const possiblePaths = [
+    path.resolve(__dirname, '../views/terminal.html'),
+    path.resolve(process.cwd(), 'src/views/terminal.html'),
+    path.resolve(process.cwd(), 'dist/views/terminal.html'),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        return fs.readFileSync(p, 'utf8');
+      } catch {}
+    }
+  }
+  return '<!DOCTYPE html><html><head><title>Soul Terminal</title></head><body><h1>Soul Terminal Online</h1></body></html>';
+}
 
 export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
-  // Read HTML template into memory with fallback
-  let htmlTemplate = '';
-  try {
-    htmlTemplate = fs.readFileSync(terminalHtmlPath, 'utf8');
-  } catch (err: any) {
-    console.warn('⚠️ Could not load terminal.html from disk:', err.message);
-  }
+  const htmlTemplate = loadTerminalHtml();
 
   /**
    * Main Soul Terminal Dashboard
@@ -349,7 +357,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Reset Paper Trading Wallet - Resets to fresh $1,000.00 USD starting balance
+   * Reset Paper Trading Wallet - Resets to fresh $500.00 USD starting balance
    */
   fastify.post('/api/paper/reset', async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
@@ -357,7 +365,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const wallet = await resetPaperTradingWallet();
       return reply.send({
         success: true,
-        message: 'Paper trading wallet successfully reset to a fresh $1,000.00 USD balance.',
+        message: 'Paper trading wallet successfully reset to a fresh $500.00 USD balance.',
         wallet,
       });
     } catch (err: any) {
@@ -370,7 +378,7 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.post('/api/paper/fund', async (request: FastifyRequest<{ Body: { amountUsd?: number } }>, reply: FastifyReply) => {
     try {
-      const amountUsd = Number(request.body?.amountUsd) || 1000.0;
+      const amountUsd = Number(request.body?.amountUsd) || 500.0;
       const { topUpPaperTradingWallet } = await import('../services/paperTrading.js');
       const wallet = await topUpPaperTradingWallet(amountUsd);
       return reply.send({

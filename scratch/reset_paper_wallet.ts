@@ -2,7 +2,7 @@ import { resetPaperTradingWallet, getPaperPortfolioSummary } from '../src/servic
 import { redis } from '../src/services/redis.js';
 
 async function main() {
-  console.log('🔄 Executing Paper Trading Wallet Reset to $1,000.00 USD...');
+  console.log('🔄 Executing Paper Trading Wallet Reset to $500.00 USD...');
   const wallet = await resetPaperTradingWallet();
   console.log('✅ Wallet Reset Complete:', {
     initialBalanceUsd: wallet.initialBalanceUsd,

@@ -18,6 +18,8 @@ const envSchema = z.object({
 
   TELEGRAM_BOT_TOKEN: z.string().min(1).default('dummy_telegram_bot_token'),
   TELEGRAM_CHAT_ID: z.string().default('0'),
+  TELEGRAM_GROUP_CHAT_ID: z.string().default('8129176485'),
+  ENCRYPTION_MASTER_KEY: z.string().min(64).default('e8d2ab3c16150a31208d9fbadf3b8665d823fb79b69dab0034ddff5c827e22e3'),
   TG_TOPIC_SAFE: z.coerce.number().default(0),
   TG_TOPIC_RISK: z.coerce.number().default(0),
 

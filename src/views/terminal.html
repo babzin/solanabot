@@ -757,7 +757,7 @@
 
     <div class="header-stats">
       <div class="stat-pill online">SOLANA MAINNET</div>
-      <div class="stat-pill" id="paper-pill" style="border-color: rgba(0, 255, 136, 0.4); color: var(--green); font-weight: 700;">💼 PAPER: $1,000.00</div>
+      <div class="stat-pill" id="paper-pill" style="border-color: rgba(0, 255, 136, 0.4); color: var(--green); font-weight: 700;">💼 PAPER: $500.00</div>
       <div class="stat-pill">⚡ 2,480 TPS</div>
       <div class="stat-pill" id="sol-price-pill">SOL: $145.00</div>
       <div class="stat-pill" id="daily-quota-pill">💎 28/45 GEMS TODAY</div>
@@ -956,12 +956,12 @@
             </button>
           </div>
 
-          <!-- $1,000 REAL-MARKET PAPER TRADING WIDGET (BOUNDED AUTONOMY) -->
+          <!-- $500 REAL-MARKET PAPER TRADING WIDGET (BOUNDED AUTONOMY) -->
           <div class="audit-card" style="border-color: rgba(0, 240, 255, 0.25); background: rgba(0, 240, 255, 0.02); margin-top: 12px;">
             <div class="audit-title" style="display: flex; justify-content: space-between; align-items: center;">
-              <span style="color: var(--cyan);">💼 $1,000 Paper Trading (Max $10/Trade)</span>
+              <span style="color: var(--cyan);">💼 $500 Paper Trading (Max $10/Trade)</span>
               <div style="display: flex; gap: 6px;">
-                <button id="btn-paper-reset" onclick="resetPaperWalletUI()" style="background: rgba(0, 240, 255, 0.15); border: 1px solid rgba(0, 240, 255, 0.4); color: var(--cyan); border-radius: 4px; padding: 2px 8px; font-size: 10px; font-weight: 700; cursor: pointer; font-family: 'JetBrains Mono'; transition: all 0.2s ease;">🔄 Reset $1,000</button>
+                <button id="btn-paper-reset" onclick="resetPaperWalletUI()" style="background: rgba(0, 240, 255, 0.15); border: 1px solid rgba(0, 240, 255, 0.4); color: var(--cyan); border-radius: 4px; padding: 2px 8px; font-size: 10px; font-weight: 700; cursor: pointer; font-family: 'JetBrains Mono'; transition: all 0.2s ease;">🔄 Reset $500</button>
                 <button id="btn-paper-exit-all" onclick="exitAllTradesUI()" style="background: rgba(255, 59, 48, 0.2); border: 1px solid rgba(255, 59, 48, 0.6); color: #ff6b6b; border-radius: 4px; padding: 2px 8px; font-size: 10px; font-weight: 700; cursor: pointer; font-family: 'JetBrains Mono'; transition: all 0.2s ease;">🚨 Exit All</button>
               </div>
             </div>
@@ -974,7 +974,7 @@
             <div class="audit-grid" style="margin-bottom: 8px;">
               <div class="audit-row">
                 <span>Net Equity:</span>
-                <b id="paper-net-worth" style="color: var(--green); font-size: 12px;">$1,000.00</b>
+                <b id="paper-net-worth" style="color: var(--green); font-size: 12px;">$500.00</b>
               </div>
               <div class="audit-row">
                 <span>Total PnL:</span>
@@ -982,7 +982,7 @@
               </div>
               <div class="audit-row">
                 <span>Liquid Cash:</span>
-                <b id="paper-liquid">$1,000.00</b>
+                <b id="paper-liquid">$500.00</b>
               </div>
               <div class="audit-row">
                 <span>In Positions:</span>
@@ -1464,7 +1464,7 @@
     }
 
     async function resetPaperWalletUI() {
-      if (!confirm('Are you sure you want to reset the paper trading wallet to a fresh $1,000.00 USD starting balance?')) return;
+      if (!confirm('Are you sure you want to reset the paper trading wallet to a fresh $500.00 USD starting balance?')) return;
       try {
         const res = await fetch('/api/paper/reset', {
           method: 'POST',
@@ -1473,7 +1473,7 @@
         });
         const data = await res.json();
         if (data.success) {
-          showToast('🔄 <b>PAPER WALLET RESET:</b> Restored balance to <b>$1,000.00 USD</b>!');
+          showToast('🔄 <b>PAPER WALLET RESET:</b> Restored balance to <b>$500.00 USD</b>!');
           await loadPaperPortfolio();
         } else {
           showToast(`⚠️ Reset notice: ${data.error || 'Failed'}`);

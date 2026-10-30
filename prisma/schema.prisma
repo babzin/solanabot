@@ -71,17 +71,53 @@ model TradeLog {
 }
 
 model UserPreference {
-  id                 String   @id @default(cuid())
-  telegramUserId     String   @unique
-  username           String?
-  receiveSafeAlerts  Boolean  @default(true)
-  receiveRiskAlerts  Boolean  @default(true)
-  minWinRate         Float    @default(0.60)
-  autoSnipeEnabled   Boolean  @default(false)
-  autoSnipeSolAmount Float    @default(0.1)
-  maxSlippagePercent Float    @default(15.0)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                  String         @id @default(cuid())
+  telegramUserId      String         @unique
+  telegramChatId      String?        // DM chat ID for direct routing
+  username            String?
+  receiveSafeAlerts   Boolean        @default(true)
+  receiveRiskAlerts   Boolean        @default(true)
+  minWinRate          Float          @default(0.60)
+  autoSnipeEnabled    Boolean        @default(false)
+  autoSnipeSolAmount  Float          @default(0.1)
+  fixedTradeSizeUsd   Float          @default(10.00) // Fixed $10 USD rule
+  maxSlippagePercent  Float          @default(15.0)
+  priorityFeeLamports Int            @default(100000) // Default 0.0001 SOL (Turbo)
+  takeProfitPercent   Float          @default(100.0) // 2X Principal De-Risk
+  trailingStopPct     Float          @default(35.0)  // 35% Pullback from Peak
+  isMembershipActive  Boolean        @default(true)
+
+  // Encrypted Wallet Storage
+  solanaWallet        String?        // Public Base58 address
+  encryptedSecret     String?        // AES-256-GCM ciphertext
+  encryptionIv        String?        // IV in hex
+  encryptionTag       String?        // Auth tag in hex
+
+  positions           UserPosition[]
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+}
+
+model UserPosition {
+  id                 String         @id @default(cuid())
+  userId             String
+  user               UserPreference @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenMint          String
+  tokenSymbol        String
+  entryPriceUsd      Float
+  currentPriceUsd    Float
+  peakPriceUsd       Float
+  solInvested        Float
+  initialTokens      Float
+  remainingTokens    Float
+  status             String         @default("OPEN") // OPEN, PARTIAL_TP_2X, CLOSED
+  exitReason         String?
+  realizedSolProfit  Float          @default(0.0)
+  createdAt          DateTime       @default(now())
+  closedAt           DateTime?
+
+  @@unique([userId, tokenMint])
+  @@index([tokenMint, status])
 }
 
 model EarlyTrendingToken {

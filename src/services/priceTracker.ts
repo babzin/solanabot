@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { env } from '../config/env.js';
 import { prisma } from './db.js';
-import { checkActivePositionsTpSl } from './sniper.js';
+import { checkActivePositionsTpSl, checkAllUserPositionsTpSl } from './sniper.js';
 import {
   bot,
   dispatchPriceDipMilestoneAlert,
@@ -76,17 +76,28 @@ export async function checkPriceMilestones(): Promise<number> {
         const newPeak = Math.max(token.peakPriceUsd, currentPriceUsd);
         const newLowest = Math.min(token.lowestPriceUsd, currentPriceUsd);
 
-        // Check autonomous Take-Profit (2X) and Stop-Loss on active sniped positions
+        // Check autonomous Take-Profit (2X) and Stop-Loss on active multi-user sniped positions
         try {
-          const tpsl = await checkActivePositionsTpSl(token.tokenMint, currentPriceUsd);
-          if (tpsl && env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
-            await bot.sendMessage(env.TELEGRAM_CHAT_ID, tpsl.message, {
-              parse_mode: 'HTML',
-              disable_web_page_preview: true,
-            });
+          const userNotifications = await checkAllUserPositionsTpSl(token.tokenMint, currentPriceUsd);
+          for (const notif of userNotifications) {
+            if (notif.telegramChatId && env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+              // PRIVATE ROUTING: Send directly to individual user's DM
+              await bot.sendMessage(notif.telegramChatId, notif.action.message, {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true,
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      { text: '📊 Chart', url: dexUrl },
+                      { text: '🚪 Exit Remaining (100%)', callback_data: `sell_quick_100_${token.tokenMint}` },
+                    ],
+                  ],
+                },
+              }).catch(() => {});
+            }
           }
         } catch (tpslErr: any) {
-          console.warn('⚠️ TP/SL check error:', tpslErr.message);
+          console.warn('⚠️ Multi-user TP/SL check error:', tpslErr.message);
         }
 
         // Check autonomous $1,000 Paper Trading TP/SL and Trailing Stop-Loss

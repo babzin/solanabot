@@ -4,7 +4,9 @@ import { KNOWN_PROGRAMS } from '../config/strategies.js';
 import { prisma } from './db.js';
 import { broadcastNewTrending } from './events.js';
 import { verifyTokenSecurity } from './security.js';
-import { executeSnipeTrade, getUserAutoSnipeConfig } from './sniper.js';
+import { executeSnipeTrade, getUserAutoSnipeConfig, getActiveAutoSnipeUsers, executeUserSnipeTrade, getSolForFixedUsd } from './sniper.js';
+import { decryptUserKeypair } from './encryption.js';
+import { verifyGroupMembership, revokeUserWalletAndAccess } from './groupAccessGate.js';
 import { dispatchEarlyTrendingAlert, dispatchSnipeNotification } from './telegram.js';
 import { analyzeTokenNarrative, evaluateSlmQualityGate } from './aiIntelligence.js';
 import { HolderDistributionItem, AiNarrativeScore, LearnedEvaluationResult, SlmEvaluationResult } from '../types/index.js';
@@ -774,21 +776,66 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
     if (isSlmBlocked) {
       console.log(`🛑 [SLM QUALITY GATE BLOCKED REAL SNIPE] $${candidate.tokenSymbol}: Viability is NO_GO. Reason: ${candidate.slmVerdict?.verdictReason || 'Risk mitigation flags'}. Real wallet auto-snipe prevented.`);
     } else {
-      // Autonomous 1-Click / Auto-Snipe execution if enabled (Real mainnet SOL)
+      // MULTI-USER AUTO-SNIPE FAN-OUT: Iterate through all active registered group members with auto-snipe enabled
       try {
-        const autoSnipePref = await getUserAutoSnipeConfig(env.TELEGRAM_CHAT_ID);
-        if (autoSnipePref.autoSnipeEnabled && autoSnipePref.autoSnipeSolAmount > 0) {
-          console.log(`🤖 [AUTO-SNIPER ENGAGED] Executing ${autoSnipePref.autoSnipeSolAmount} SOL snipe on $${candidate.tokenSymbol}...`);
-          const snipeRes = await executeSnipeTrade(
-            candidate.tokenMint,
-            autoSnipePref.autoSnipeSolAmount,
-            candidate.tokenSymbol,
-            candidate.priceUsd
-          );
-          await dispatchSnipeNotification(snipeRes);
+        const activeUsers = await getActiveAutoSnipeUsers();
+        if (activeUsers.length > 0) {
+          console.log(`🤖 [AUTO-SNIPER ENGAGED] Executing auto-snipe fan-out for ${activeUsers.length} active trader(s) on $${candidate.tokenSymbol}...`);
+
+          for (const user of activeUsers) {
+            try {
+              // 1. JIT Access Check: Ensure user is still an active member of the group
+              const membership = await verifyGroupMembership(user.telegramUserId);
+              if (!membership.isMember) {
+                console.log(`🔒 [JIT Check] User ${user.telegramUserId} is no longer in group. Purging access & skipping...`);
+                await revokeUserWalletAndAccess(user.telegramUserId, 'JIT auto-snipe verification failed');
+                continue;
+              }
+
+              // 2. Decrypt user's private key
+              let userKeypair: any = null;
+              if (user.encryptedSecret && user.encryptionIv && user.encryptionTag) {
+                userKeypair = decryptUserKeypair(user.encryptedSecret, user.encryptionIv, user.encryptionTag);
+              }
+
+              // 3. Dynamic $10.00 USD entry sizing rule
+              const fixedUsd = user.fixedTradeSizeUsd || 10.0;
+              const tradeSol = await getSolForFixedUsd(fixedUsd);
+
+              // 4. Execute individual snipe trade
+              const snipeRes = await executeUserSnipeTrade(
+                {
+                  userId: user.telegramUserId,
+                  telegramChatId: user.telegramChatId || user.telegramUserId,
+                  keypair: userKeypair,
+                  slippageBps: Math.round((user.maxSlippagePercent || 15) * 100),
+                  priorityFeeLamports: user.priorityFeeLamports || 100_000,
+                },
+                candidate.tokenMint,
+                tradeSol,
+                candidate.tokenSymbol,
+                candidate.priceUsd
+              );
+
+              // 5. ROUTE NOTIFICATION STRICTLY TO USER'S PRIVATE DM
+              await dispatchSnipeNotification(snipeRes, user.telegramChatId || user.telegramUserId);
+            } catch (userSnipeErr: any) {
+              console.warn(`⚠️ Auto-snipe failed for user ${user.telegramUserId}:`, userSnipeErr.message);
+              // Send private failure alert to user DM only
+              const dmChatId = user.telegramChatId || user.telegramUserId;
+              if (dmChatId && env.TELEGRAM_BOT_TOKEN && !env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
+                const { bot } = await import('./telegram.js');
+                bot.sendMessage(
+                  dmChatId,
+                  `⚠️ <b>Auto-Snipe Notice:</b> Could not snipe $${candidate.tokenSymbol}: ${userSnipeErr.message}`,
+                  { parse_mode: 'HTML' }
+                ).catch(() => {});
+              }
+            }
+          }
         }
       } catch (snipeErr: any) {
-        console.warn('⚠️ Auto-sniper trigger note:', snipeErr.message);
+        console.warn('⚠️ Multi-user auto-sniper fan-out notice:', snipeErr.message);
       }
     }
 

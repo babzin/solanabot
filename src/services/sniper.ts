@@ -1,8 +1,26 @@
-import { Keypair, VersionedTransaction } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  VersionedTransaction,
+} from '@solana/web3.js';
 import axios from 'axios';
 import bs58 from 'bs58';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { env } from '../config/env.js';
 import { prisma } from './db.js';
+import { decryptUserKeypair } from './encryption.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.resolve(__dirname, '../../data');
+const USER_PREFS_FILE = path.join(DATA_DIR, 'user_preferences.json');
+const USER_POSITIONS_FILE = path.join(DATA_DIR, 'user_positions.json');
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -21,6 +39,7 @@ export interface SnipeResult {
 
 export interface SnipedPosition {
   id: string;
+  userId?: string;
   tokenMint: string;
   tokenSymbol: string;
   entryPriceUsd: number;
@@ -38,10 +57,364 @@ export interface SnipedPosition {
   firstUnderStopLossAt?: number;
 }
 
-// In-memory active positions registry (persists across trades during bot uptime)
-const activePositions = new Map<string, SnipedPosition>();
+export type FilterMode = 'ALL' | 'SAFE' | 'RISK';
 
-export function recordSnipedPosition(
+export interface UserPreferencesData {
+  telegramUserId: string;
+  telegramChatId: string;
+  username?: string | null;
+  solanaWallet?: string | null;
+  encryptedSecret?: string | null;
+  encryptionIv?: string | null;
+  encryptionTag?: string | null;
+  autoSnipeEnabled: boolean;
+  autoSnipeSolAmount: number;
+  fixedTradeSizeUsd: number;
+  maxSlippagePercent: number;
+  priorityFeeLamports: number;
+  takeProfitPercent: number;
+  trailingStopPct: number;
+  receiveSafeAlerts: boolean;
+  receiveRiskAlerts: boolean;
+  filterMode: FilterMode;
+  isMembershipActive: boolean;
+}
+
+export interface UserExecutionContext {
+  userId: string;
+  telegramChatId: string;
+  keypair?: Keypair | null;
+  slippageBps?: number;
+  priorityFeeLamports?: number;
+}
+
+// In-memory registries backed by file storage
+const inMemoryUserPrefs = new Map<string, UserPreferencesData>();
+const inMemoryUserPositions = new Map<string, SnipedPosition[]>(); // key: telegramUserId
+const activePositions = new Map<string, SnipedPosition>(); // Global legacy mapping
+
+// Ensure data folder exists
+try {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch {}
+
+// Load persisted user data if available
+try {
+  if (fs.existsSync(USER_PREFS_FILE)) {
+    const raw = fs.readFileSync(USER_PREFS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    for (const [k, v] of Object.entries(parsed)) {
+      inMemoryUserPrefs.set(k, v as UserPreferencesData);
+    }
+  }
+} catch {}
+
+try {
+  if (fs.existsSync(USER_POSITIONS_FILE)) {
+    const raw = fs.readFileSync(USER_POSITIONS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    for (const [k, v] of Object.entries(parsed)) {
+      inMemoryUserPositions.set(k, v as SnipedPosition[]);
+      for (const pos of v as SnipedPosition[]) {
+        if (pos.status !== 'CLOSED') {
+          activePositions.set(pos.tokenMint, pos);
+        }
+      }
+    }
+  }
+} catch {}
+
+function persistUserFiles(): void {
+  try {
+    const prefsObj = Object.fromEntries(inMemoryUserPrefs.entries());
+    fs.writeFileSync(USER_PREFS_FILE, JSON.stringify(prefsObj, null, 2), 'utf8');
+
+    const posObj = Object.fromEntries(inMemoryUserPositions.entries());
+    fs.writeFileSync(USER_POSITIONS_FILE, JSON.stringify(posObj, null, 2), 'utf8');
+  } catch (err: any) {
+    console.warn('[Sniper] Persist user files note:', err.message);
+  }
+}
+
+let dbConnectionFailed = false;
+
+function isDatabaseAvailable(): boolean {
+  if (dbConnectionFailed) return false;
+  return Boolean(env.DATABASE_URL && !env.DATABASE_URL.includes('password@localhost'));
+}
+
+function computeFilterMode(receiveSafe: boolean, receiveRisk: boolean): FilterMode {
+  if (receiveSafe && !receiveRisk) return 'SAFE';
+  if (!receiveSafe && receiveRisk) return 'RISK';
+  return 'ALL';
+}
+
+/**
+ * Calculates dynamically how much SOL corresponds to the fixed $10.00 USD entry rule
+ */
+export async function getSolForFixedUsd(targetUsd: number = 10.0): Promise<number> {
+  try {
+    const { fetchLiveSolPrice } = await import('./paperTrading.js');
+    const solPrice = await fetchLiveSolPrice();
+    if (solPrice > 10) {
+      return Number(Math.max(0.005, targetUsd / solPrice).toFixed(4));
+    }
+  } catch {}
+  return 0.065; // fallback ~0.065 SOL ($10 at ~$155/SOL)
+}
+
+/**
+ * Retrieves full user preferences
+ */
+export async function getUserPreferences(telegramUserId: string): Promise<UserPreferencesData> {
+  const defaultData: UserPreferencesData = {
+    telegramUserId,
+    telegramChatId: telegramUserId,
+    username: null,
+    solanaWallet: null,
+    encryptedSecret: null,
+    encryptionIv: null,
+    encryptionTag: null,
+    autoSnipeEnabled: false,
+    autoSnipeSolAmount: env.AUTO_SNIPE_DEFAULT_SOL || 0.01,
+    fixedTradeSizeUsd: 10.0,
+    maxSlippagePercent: 15.0,
+    priorityFeeLamports: 100_000,
+    takeProfitPercent: 100.0,
+    trailingStopPct: 35.0,
+    receiveSafeAlerts: true,
+    receiveRiskAlerts: true,
+    filterMode: 'ALL',
+    isMembershipActive: true,
+  };
+
+  if (!inMemoryUserPrefs.has(telegramUserId)) {
+    inMemoryUserPrefs.set(telegramUserId, defaultData);
+  }
+
+  if (!isDatabaseAvailable()) {
+    const mem = inMemoryUserPrefs.get(telegramUserId)!;
+    return { ...mem, filterMode: computeFilterMode(mem.receiveSafeAlerts, mem.receiveRiskAlerts) };
+  }
+
+  try {
+    const pref = await prisma.userPreference.upsert({
+      where: { telegramUserId },
+      update: {},
+      create: {
+        telegramUserId,
+        telegramChatId: telegramUserId,
+        autoSnipeEnabled: false,
+        autoSnipeSolAmount: env.AUTO_SNIPE_DEFAULT_SOL || 0.01,
+        fixedTradeSizeUsd: 10.0,
+        receiveSafeAlerts: true,
+        receiveRiskAlerts: true,
+      },
+    });
+
+    const data: UserPreferencesData = {
+      telegramUserId,
+      telegramChatId: pref.telegramChatId || telegramUserId,
+      username: pref.username,
+      solanaWallet: pref.solanaWallet,
+      encryptedSecret: pref.encryptedSecret,
+      encryptionIv: pref.encryptionIv,
+      encryptionTag: pref.encryptionTag,
+      autoSnipeEnabled: pref.autoSnipeEnabled,
+      autoSnipeSolAmount: pref.autoSnipeSolAmount,
+      fixedTradeSizeUsd: pref.fixedTradeSizeUsd ?? 10.0,
+      maxSlippagePercent: pref.maxSlippagePercent,
+      priorityFeeLamports: pref.priorityFeeLamports ?? 100_000,
+      takeProfitPercent: pref.takeProfitPercent ?? 100.0,
+      trailingStopPct: pref.trailingStopPct ?? 35.0,
+      receiveSafeAlerts: pref.receiveSafeAlerts,
+      receiveRiskAlerts: pref.receiveRiskAlerts,
+      filterMode: computeFilterMode(pref.receiveSafeAlerts, pref.receiveRiskAlerts),
+      isMembershipActive: pref.isMembershipActive ?? true,
+    };
+
+    inMemoryUserPrefs.set(telegramUserId, data);
+    persistUserFiles();
+    return data;
+  } catch {
+    dbConnectionFailed = true;
+    const mem = inMemoryUserPrefs.get(telegramUserId)!;
+    return { ...mem, filterMode: computeFilterMode(mem.receiveSafeAlerts, mem.receiveRiskAlerts) };
+  }
+}
+
+/**
+ * Updates user preferences (auto-snipe, trade settings, or wallet credentials)
+ */
+export async function setUserPreferences(
+  telegramUserId: string,
+  updates: Partial<UserPreferencesData>
+): Promise<UserPreferencesData> {
+  const current = await getUserPreferences(telegramUserId);
+  const updated: UserPreferencesData = {
+    ...current,
+    ...updates,
+    filterMode: computeFilterMode(
+      updates.receiveSafeAlerts ?? current.receiveSafeAlerts,
+      updates.receiveRiskAlerts ?? current.receiveRiskAlerts
+    ),
+  };
+
+  inMemoryUserPrefs.set(telegramUserId, updated);
+  persistUserFiles();
+
+  if (isDatabaseAvailable()) {
+    try {
+      await prisma.userPreference.upsert({
+        where: { telegramUserId },
+        update: {
+          telegramChatId: updated.telegramChatId,
+          username: updated.username,
+          solanaWallet: updated.solanaWallet,
+          encryptedSecret: updated.encryptedSecret,
+          encryptionIv: updated.encryptionIv,
+          encryptionTag: updated.encryptionTag,
+          autoSnipeEnabled: updated.autoSnipeEnabled,
+          autoSnipeSolAmount: updated.autoSnipeSolAmount,
+          fixedTradeSizeUsd: updated.fixedTradeSizeUsd,
+          maxSlippagePercent: updated.maxSlippagePercent,
+          priorityFeeLamports: updated.priorityFeeLamports,
+          takeProfitPercent: updated.takeProfitPercent,
+          trailingStopPct: updated.trailingStopPct,
+          receiveSafeAlerts: updated.receiveSafeAlerts,
+          receiveRiskAlerts: updated.receiveRiskAlerts,
+          isMembershipActive: updated.isMembershipActive,
+        },
+        create: {
+          telegramUserId,
+          telegramChatId: updated.telegramChatId,
+          username: updated.username,
+          solanaWallet: updated.solanaWallet,
+          encryptedSecret: updated.encryptedSecret,
+          encryptionIv: updated.encryptionIv,
+          encryptionTag: updated.encryptionTag,
+          autoSnipeEnabled: updated.autoSnipeEnabled,
+          autoSnipeSolAmount: updated.autoSnipeSolAmount,
+          fixedTradeSizeUsd: updated.fixedTradeSizeUsd,
+          maxSlippagePercent: updated.maxSlippagePercent,
+          priorityFeeLamports: updated.priorityFeeLamports,
+          takeProfitPercent: updated.takeProfitPercent,
+          trailingStopPct: updated.trailingStopPct,
+          receiveSafeAlerts: updated.receiveSafeAlerts,
+          receiveRiskAlerts: updated.receiveRiskAlerts,
+          isMembershipActive: updated.isMembershipActive,
+        },
+      });
+    } catch (err: any) {
+      dbConnectionFailed = true;
+      console.warn('⚠️ Could not save user preference to DB, kept in memory & file backup');
+    }
+  }
+
+  return updated;
+}
+
+export const getUserAutoSnipeConfig = getUserPreferences;
+export const setUserAutoSnipeConfig = setUserPreferences;
+
+export async function setUserFilterMode(telegramUserId: string, mode: FilterMode): Promise<UserPreferencesData> {
+  const receiveSafeAlerts = mode === 'ALL' || mode === 'SAFE';
+  const receiveRiskAlerts = mode === 'ALL' || mode === 'RISK';
+  return setUserPreferences(telegramUserId, { receiveSafeAlerts, receiveRiskAlerts });
+}
+
+/**
+ * Gets active registered users who have auto-snipe enabled and an active connected wallet
+ */
+export async function getActiveAutoSnipeUsers(): Promise<UserPreferencesData[]> {
+  const users: UserPreferencesData[] = [];
+
+  // 1. From database if reachable
+  if (isDatabaseAvailable()) {
+    try {
+      const dbUsers = await prisma.userPreference.findMany({
+        where: {
+          autoSnipeEnabled: true,
+          encryptedSecret: { not: null },
+          isMembershipActive: true,
+        },
+      });
+
+      for (const u of dbUsers) {
+        users.push({
+          telegramUserId: u.telegramUserId,
+          telegramChatId: u.telegramChatId || u.telegramUserId,
+          username: u.username,
+          solanaWallet: u.solanaWallet,
+          encryptedSecret: u.encryptedSecret,
+          encryptionIv: u.encryptionIv,
+          encryptionTag: u.encryptionTag,
+          autoSnipeEnabled: u.autoSnipeEnabled,
+          autoSnipeSolAmount: u.autoSnipeSolAmount,
+          fixedTradeSizeUsd: u.fixedTradeSizeUsd ?? 10.0,
+          maxSlippagePercent: u.maxSlippagePercent,
+          priorityFeeLamports: u.priorityFeeLamports ?? 100_000,
+          takeProfitPercent: u.takeProfitPercent ?? 100.0,
+          trailingStopPct: u.trailingStopPct ?? 35.0,
+          receiveSafeAlerts: u.receiveSafeAlerts,
+          receiveRiskAlerts: u.receiveRiskAlerts,
+          filterMode: computeFilterMode(u.receiveSafeAlerts, u.receiveRiskAlerts),
+          isMembershipActive: u.isMembershipActive ?? true,
+        });
+      }
+      if (users.length > 0) return users;
+    } catch {
+      dbConnectionFailed = true;
+    }
+  }
+
+  // 2. In-memory / file fallback
+  for (const u of inMemoryUserPrefs.values()) {
+    if (u.autoSnipeEnabled && u.encryptedSecret && u.isMembershipActive) {
+      users.push(u);
+    }
+  }
+
+  return users;
+}
+
+/**
+ * Clears user wallet credentials from memory and disk (called when removed from group)
+ */
+export function clearUserCredentialsInMemory(telegramUserId: string): void {
+  const current = inMemoryUserPrefs.get(telegramUserId);
+  if (current) {
+    current.autoSnipeEnabled = false;
+    current.solanaWallet = null;
+    current.encryptedSecret = null;
+    current.encryptionIv = null;
+    current.encryptionTag = null;
+    current.isMembershipActive = false;
+    persistUserFiles();
+  }
+}
+
+/**
+ * Closes all positions for a specific user in memory
+ */
+export function closeUserPositionsInMemory(telegramUserId: string, reason: string): void {
+  const positions = inMemoryUserPositions.get(telegramUserId) || [];
+  for (const pos of positions) {
+    if (pos.status !== 'CLOSED') {
+      pos.status = 'CLOSED';
+      pos.closedAt = Date.now();
+      pos.exitReason = reason;
+      activePositions.delete(pos.tokenMint);
+    }
+  }
+  persistUserFiles();
+}
+
+/**
+ * Records a sniped position for a specific user
+ */
+export function recordUserPosition(
+  userId: string,
   tokenMint: string,
   tokenSymbol: string,
   entryPriceUsd: number,
@@ -51,6 +424,7 @@ export function recordSnipedPosition(
 ): SnipedPosition {
   const position: SnipedPosition = {
     id: `pos_${Date.now()}_${tokenMint.slice(0, 4)}`,
+    userId,
     tokenMint,
     tokenSymbol: tokenSymbol || 'TOKEN',
     entryPriceUsd: Math.max(0.0000001, entryPriceUsd),
@@ -65,11 +439,70 @@ export function recordSnipedPosition(
     isSimulated,
   };
 
+  const list = inMemoryUserPositions.get(userId) || [];
+  // Close any old open bag for same token
+  const filtered = list.filter((p) => p.tokenMint !== tokenMint || p.status === 'CLOSED');
+  filtered.unshift(position);
+  inMemoryUserPositions.set(userId, filtered);
+
   activePositions.set(tokenMint, position);
-  console.log(`💼 [POSITION OPENED] Tracking ${tokenSymbol} at $${entryPriceUsd.toFixed(6)} (${solInvested} SOL invested)`);
+  persistUserFiles();
+
+  // Also persist to DB if available
+  if (isDatabaseAvailable()) {
+    prisma.userPreference
+      .findUnique({ where: { telegramUserId: userId } })
+      .then((dbUser) => {
+        if (dbUser) {
+          prisma.userPosition
+            .upsert({
+              where: { userId_tokenMint: { userId: dbUser.id, tokenMint } },
+              update: {
+                status: 'OPEN',
+                entryPriceUsd: position.entryPriceUsd,
+                currentPriceUsd: position.currentPriceUsd,
+                peakPriceUsd: position.peakPriceUsd,
+                solInvested: position.solInvested,
+                initialTokens: position.initialTokens,
+                remainingTokens: position.remainingTokens,
+                createdAt: new Date(position.createdAt),
+              },
+              create: {
+                userId: dbUser.id,
+                tokenMint,
+                tokenSymbol: position.tokenSymbol,
+                entryPriceUsd: position.entryPriceUsd,
+                currentPriceUsd: position.currentPriceUsd,
+                peakPriceUsd: position.peakPriceUsd,
+                solInvested: position.solInvested,
+                initialTokens: position.initialTokens,
+                remainingTokens: position.remainingTokens,
+                status: 'OPEN',
+                createdAt: new Date(position.createdAt),
+              },
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {
+        dbConnectionFailed = true;
+      });
+  }
+
+  console.log(`💼 [POSITION OPENED] User ${userId} tracking ${tokenSymbol} at $${entryPriceUsd.toFixed(6)} (${solInvested} SOL invested)`);
   return position;
 }
 
+export function getUserActivePositions(userId: string): SnipedPosition[] {
+  const list = inMemoryUserPositions.get(userId) || [];
+  return list.filter((p) => p.status !== 'CLOSED');
+}
+
+export function getUserAllPositions(userId: string): SnipedPosition[] {
+  return inMemoryUserPositions.get(userId) || [];
+}
+
+// Backward-compatible global getters
 export function getActivePositions(): SnipedPosition[] {
   return Array.from(activePositions.values()).filter((p) => p.status !== 'CLOSED');
 }
@@ -79,67 +512,69 @@ export function getAllPositions(): SnipedPosition[] {
 }
 
 /**
- * Retrieves Keypair from configured SNIPER_PRIVATE_KEY
- * Supports base58 or JSON array format
+ * Fallback server Keypair from SNIPER_PRIVATE_KEY
  */
-function getSniperKeypair(): Keypair | null {
+function getServerKeypair(): Keypair | null {
   if (!env.SNIPER_PRIVATE_KEY) return null;
   try {
     const raw = env.SNIPER_PRIVATE_KEY.trim();
     if (raw.startsWith('[') && raw.endsWith(']')) {
-      const secret = Uint8Array.from(JSON.parse(raw));
-      return Keypair.fromSecretKey(secret);
+      return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
     }
-    const secret = bs58.decode(raw);
-    return Keypair.fromSecretKey(secret);
-  } catch (err: any) {
-    console.warn('⚠️ Invalid SNIPER_PRIVATE_KEY in .env. Defaulting to paper-trading simulation:', err.message);
+    return Keypair.fromSecretKey(bs58.decode(raw));
+  } catch {
     return null;
   }
 }
 
 /**
- * Executes an automated snipe trade using Jupiter Aggregator or Paper-Trading Simulation
+ * Executes a snipe trade for a specific user using their decrypted Keypair
  */
-export async function executeSnipeTrade(
+export async function executeUserSnipeTrade(
+  userCtx: UserExecutionContext,
   tokenMint: string,
   solAmount: number,
   tokenSymbol?: string,
   priceUsd?: number
 ): Promise<SnipeResult> {
+  const { userId, keypair } = userCtx;
   const lamports = Math.floor(solAmount * 1e9);
-  const keypair = getSniperKeypair();
+  const slippageBps = userCtx.slippageBps || 1500;
+  const priorityFee = userCtx.priorityFeeLamports || 100_000;
 
-  console.log(`🎯 [SNIPER ENGINE] Executing automated snipe: ${solAmount} SOL on token ${tokenMint}...`);
+  console.log(`🎯 [SNIPER ENGINE] Executing snipe for User ${userId}: ${solAmount} SOL on token ${tokenMint}...`);
 
-  // 1. Fetch live swap quote from Jupiter API (Free)
   try {
-    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${WSOL_MINT}&outputMint=${tokenMint}&amount=${lamports}&slippageBps=1500`;
+    // 1. Fetch live swap quote from Jupiter API
+    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${WSOL_MINT}&outputMint=${tokenMint}&amount=${lamports}&slippageBps=${slippageBps}`;
     const quoteRes = await axios.get(quoteUrl, { timeout: 3500 });
     const quoteData = quoteRes.data;
 
     const outAmountRaw = Number(quoteData.outAmount || 0);
     const estimatedTokens = outAmountRaw > 0 ? outAmountRaw / 1e6 : (solAmount * 160) / (priceUsd || 0.0001);
 
-    // 2. If Keypair exists and real trading is enabled, execute live on-chain
+    // 2. If Keypair exists and real trading RPC is configured, execute live on-chain
     if (keypair && env.HELIUS_RPC_URL) {
-      const swapRes = await axios.post('https://quote-api.jup.ag/v6/swap', {
-        quoteResponse: quoteData,
-        userPublicKey: keypair.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 100_000, // 0.0001 SOL priority fee
-      }, { timeout: 4000 });
+      const swapRes = await axios.post(
+        'https://quote-api.jup.ag/v6/swap',
+        {
+          quoteResponse: quoteData,
+          userPublicKey: keypair.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: priorityFee,
+        },
+        { timeout: 4000 }
+      );
 
       const { swapTransaction } = swapRes.data;
       const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
       const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
       transaction.sign([keypair]);
 
-      // Submit via Helius RPC
       const rpcPayload = {
         jsonrpc: '2.0',
-        id: 'snipe-tx',
+        id: `snipe-tx-${userId}`,
         method: 'sendTransaction',
         params: [
           Buffer.from(transaction.serialize()).toString('base64'),
@@ -150,9 +585,9 @@ export async function executeSnipeTrade(
       const txRes = await axios.post(env.HELIUS_RPC_URL, rpcPayload);
       const signature = txRes.data.result || `live_${Date.now()}`;
 
-      console.log(`🚀 [SNIPER LIVE EXECUTION] Tx Broadcast: https://solscan.io/tx/${signature}`);
+      console.log(`🚀 [SNIPER LIVE EXECUTION] User ${userId} Tx: https://solscan.io/tx/${signature}`);
 
-      recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, false);
+      recordUserPosition(userId, tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, false);
 
       return {
         success: true,
@@ -167,11 +602,9 @@ export async function executeSnipeTrade(
       };
     }
 
-    // 3. Simulation / Paper-Trading Mode (Instant, Risk-Free, 0 SOL spent)
+    // 3. Simulation / Paper-Trading fallback (zero-risk)
     const simulatedSignature = `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-    console.log(`⚡ [SNIPER SIMULATION] Paper-traded ${solAmount} SOL for ~${estimatedTokens.toFixed(0)} ${tokenSymbol || 'Tokens'}`);
-
-    recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
+    recordUserPosition(userId, tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
 
     return {
       success: true,
@@ -185,13 +618,12 @@ export async function executeSnipeTrade(
       routePlan: quoteData.routePlan?.[0]?.swapInfo?.label || 'Jupiter Instant Route',
     };
   } catch (err: any) {
-    console.warn(`⚠️ Jupiter quote unavailable for brand-new token ${tokenMint}: ${err.message}. Using bonding curve simulation.`);
-    
-    // Fallback bonding curve estimation
+    console.warn(`⚠️ Jupiter quote notice for ${tokenMint}: ${err.message}. Using simulation.`);
+
     const estimatedTokens = priceUsd && priceUsd > 0 ? (solAmount * 160) / priceUsd : solAmount * 50_000_000;
     const simulatedSignature = `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
-    recordSnipedPosition(tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
+    recordUserPosition(userId, tokenMint, tokenSymbol || 'TOKEN', priceUsd || 0.0001, solAmount, estimatedTokens, true);
 
     return {
       success: true,
@@ -208,17 +640,25 @@ export async function executeSnipeTrade(
 }
 
 /**
- * Executes an automated sell / take-profit exit trade via Jupiter or Paper-Trading Simulation
- * Supports partial scaling (e.g. sellPercent = 50 for 2X take-profit)
+ * Executes a sell / exit trade for a specific user
  */
-export async function executeSnipeSell(
+export async function executeUserSnipeSell(
+  userId: string,
   tokenMint: string,
   tokenSymbol?: string,
   priceUsd?: number,
   sellPercent: number = 100
 ): Promise<SnipeResult> {
-  const keypair = getSniperKeypair();
-  console.log(`🎯 [SNIPER ENGINE] Executing automated SELL (${sellPercent}%) on token ${tokenMint}...`);
+  const userPref = await getUserPreferences(userId);
+  let keypair: Keypair | null = null;
+  if (userPref.encryptedSecret && userPref.encryptionIv && userPref.encryptionTag) {
+    try {
+      keypair = decryptUserKeypair(userPref.encryptedSecret, userPref.encryptionIv, userPref.encryptionTag);
+    } catch {}
+  }
+  if (!keypair) keypair = getServerKeypair();
+
+  console.log(`🎯 [SNIPER ENGINE] Executing automated SELL (${sellPercent}%) for User ${userId} on ${tokenMint}...`);
 
   try {
     if (keypair && env.HELIUS_RPC_URL) {
@@ -227,11 +667,7 @@ export async function executeSnipeSell(
           jsonrpc: '2.0',
           id: 'get-token-accounts',
           method: 'getTokenAccountsByOwner',
-          params: [
-            keypair.publicKey.toBase58(),
-            { mint: tokenMint },
-            { encoding: 'jsonParsed' },
-          ],
+          params: [keypair.publicKey.toBase58(), { mint: tokenMint }, { encoding: 'jsonParsed' }],
         });
 
         const accounts = balRes.data?.result?.value || [];
@@ -243,13 +679,17 @@ export async function executeSnipeSell(
           const quoteRes = await axios.get(quoteUrl, { timeout: 3500 });
           const quoteData = quoteRes.data;
 
-          const swapRes = await axios.post('https://quote-api.jup.ag/v6/swap', {
-            quoteResponse: quoteData,
-            userPublicKey: keypair.publicKey.toBase58(),
-            wrapAndUnwrapSol: true,
-            dynamicComputeUnitLimit: true,
-            prioritizationFeeLamports: 100_000,
-          }, { timeout: 4000 });
+          const swapRes = await axios.post(
+            'https://quote-api.jup.ag/v6/swap',
+            {
+              quoteResponse: quoteData,
+              userPublicKey: keypair.publicKey.toBase58(),
+              wrapAndUnwrapSol: true,
+              dynamicComputeUnitLimit: true,
+              prioritizationFeeLamports: userPref.priorityFeeLamports || 100_000,
+            },
+            { timeout: 4000 }
+          );
 
           const { swapTransaction } = swapRes.data;
           const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
@@ -267,7 +707,7 @@ export async function executeSnipeSell(
 
           const signature = txRes.data?.result || `live_sell_${Date.now()}`;
           const solReceived = Number(quoteData.outAmount || 0) / 1e9;
-          console.log(`🚀 [SNIPER LIVE SELL] Sold ${sellPercent}% on-chain for ${solReceived.toFixed(3)} SOL! Tx: https://solscan.io/tx/${signature}`);
+          console.log(`🚀 [SNIPER LIVE SELL] User ${userId} sold ${sellPercent}% for ${solReceived.toFixed(3)} SOL! Tx: https://solscan.io/tx/${signature}`);
 
           return {
             success: true,
@@ -286,14 +726,14 @@ export async function executeSnipeSell(
       }
     }
 
-    // Simulation / Paper-Trading Mode
+    // Simulation fallback
     const simulatedSignature = `sim_sell_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-    const pos = activePositions.get(tokenMint);
-    const estimatedSol = pos
-      ? (pos.solInvested * (sellPercent / 100) * ((priceUsd || pos.entryPriceUsd) / pos.entryPriceUsd))
-      : 0.1 * (sellPercent / 100);
+    const userPositions = inMemoryUserPositions.get(userId) || [];
+    const pos = userPositions.find((p) => p.tokenMint === tokenMint && p.status !== 'CLOSED');
 
-    console.log(`⚡ [SNIPER SIMULATION] Sold ${sellPercent}% of ${tokenSymbol || 'Tokens'} for ~${estimatedSol.toFixed(3)} SOL`);
+    const estimatedSol = pos
+      ? pos.solInvested * (sellPercent / 100) * ((priceUsd || pos.entryPriceUsd) / pos.entryPriceUsd)
+      : 0.1 * (sellPercent / 100);
 
     return {
       success: true,
@@ -307,7 +747,6 @@ export async function executeSnipeSell(
       routePlan: 'Jupiter Route Simulation',
     };
   } catch (err: any) {
-    console.warn(`⚠️ Snipe sell error on ${tokenMint}:`, err.message);
     return {
       success: false,
       simulated: true,
@@ -329,281 +768,209 @@ export interface TpSlActionTriggered {
   message: string;
 }
 
+export interface UserTpSlNotification {
+  userId: string;
+  telegramChatId: string;
+  action: TpSlActionTriggered;
+}
+
 /**
- * Autonomous Moon or Dust Engine (Zero Stop-Loss • No Pullback Selling)
- * 1. At +100% (2X): Sells 50% to return original principal risk-free.
- * 2. At +400% (5X): Sells remaining 50% moonbag for massive 5X profit.
- * 3. Pullbacks & Dips: Zero selling on pullbacks/dips. The stake is the max risk.
+ * Checks all active user positions for a token against 2X Principal De-Risk & Trailing Stop rules
  */
-export async function checkActivePositionsTpSl(
+export async function checkAllUserPositionsTpSl(
   tokenMint: string,
   currentPriceUsd: number
-): Promise<TpSlActionTriggered | null> {
-  const pos = activePositions.get(tokenMint);
-  if (!pos || pos.status === 'CLOSED') return null;
+): Promise<UserTpSlNotification[]> {
+  const notifications: UserTpSlNotification[] = [];
 
-  pos.currentPriceUsd = currentPriceUsd;
-  pos.peakPriceUsd = Math.max(pos.peakPriceUsd, currentPriceUsd);
+  for (const [userId, positions] of inMemoryUserPositions.entries()) {
+    const pos = positions.find((p) => p.tokenMint === tokenMint && p.status !== 'CLOSED');
+    if (!pos) continue;
 
-  const gainFromEntryPct = ((currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
+    const userPref = await getUserPreferences(userId);
+    pos.currentPriceUsd = currentPriceUsd;
+    pos.peakPriceUsd = Math.max(pos.peakPriceUsd, currentPriceUsd);
 
-  // 1. Take Profit at +100% (2X) - Sell 50% of tokens to secure original SOL!
-  if (pos.status === 'OPEN' && gainFromEntryPct >= 100.0) {
-    console.log(`🎯 [AUTONOMOUS 2X TAKE-PROFIT] $${pos.tokenSymbol} reached +${gainFromEntryPct.toFixed(1)}%! Selling 50% to secure initial SOL...`);
+    const gainFromEntryPct = ((currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100;
 
-    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 50);
-    const solSecured = sellRes.solAmount || pos.solInvested;
+    // 1. Take Profit at +100% (2X) - Sell 50% of tokens to secure original SOL!
+    const tpTargetPct = userPref.takeProfitPercent || 100.0;
+    if (pos.status === 'OPEN' && gainFromEntryPct >= tpTargetPct) {
+      console.log(`🎯 [AUTONOMOUS 2X DE-RISK] User ${userId} $${pos.tokenSymbol} reached +${gainFromEntryPct.toFixed(1)}%!`);
 
-    pos.status = 'PARTIAL_TP_2X';
-    pos.remainingTokens = pos.initialTokens * 0.5;
-    pos.realizedSolProfit += solSecured;
+      const sellRes = await executeUserSnipeSell(userId, pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 50);
+      const solSecured = sellRes.solAmount || pos.solInvested;
 
-    return {
-      position: pos,
-      action: 'TAKE_PROFIT_2X',
-      gainPercent: gainFromEntryPct,
-      solAmount: solSecured,
-      message: `🎯 <b>2X DE-RISKED | $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)</b>\n` +
-        `💵 SOL Returned: <b>+${solSecured.toFixed(3)} SOL</b> (Principal secured!)\n` +
-        `💎 Runner: <b>Remaining bag riding trend forever</b>`,
-    };
-  }
+      pos.status = 'PARTIAL_TP_2X';
+      pos.remainingTokens = pos.initialTokens * 0.5;
+      pos.realizedSolProfit += solSecured;
+      persistUserFiles();
 
-  // 2. Uncapped Moonbag Trailing Stop (35% pullback from peak)
-  // Allows the trend to breathe and ride indefinitely without premature stop-out on normal wicks.
-  const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
-  const trailingStopPct = 35.0;
-
-  if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= trailingStopPct && pos.remainingTokens > 0) {
-    const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
-    console.log(`🛡️ [AUTONOMOUS TRAILING STOP] $${pos.tokenSymbol} trailed down -${dropFromPeakPct.toFixed(1)}% from peak (${peakMultiplier}X). Liquidating remaining moonbag...`);
-
-    const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
-    const moonbagSol = sellRes.solAmount || (pos.solInvested * (currentPriceUsd / pos.entryPriceUsd) * 0.5);
-
-    pos.status = 'CLOSED';
-    pos.closedAt = Date.now();
-    pos.remainingTokens = 0;
-    pos.realizedSolProfit += moonbagSol;
-    pos.exitReason = 'TRAILING_STOP';
-
-    return {
-      position: pos,
-      action: 'TRAILING_STOP',
-      gainPercent: gainFromEntryPct,
-      solAmount: moonbagSol,
-      message: `🛑 <b>TREND EXIT | $${pos.tokenSymbol}</b>\n` +
-        `🔝 Peak: <b>${peakMultiplier}X</b> (Trailed -${dropFromPeakPct.toFixed(0)}%)\n` +
-        `💵 Net Profit: <b>+${pos.realizedSolProfit.toFixed(3)} SOL</b>`,
-    };
-  }
-
-  // MOON OR DUST: No stop-loss selling on pullbacks/dips. The stake is the maximum risk.
-  return null;
-}
-
-
-export type FilterMode = 'ALL' | 'SAFE' | 'RISK';
-
-export interface UserPreferencesData {
-  telegramUserId: string;
-  autoSnipeEnabled: boolean;
-  autoSnipeSolAmount: number;
-  maxSlippagePercent: number;
-  receiveSafeAlerts: boolean;
-  receiveRiskAlerts: boolean;
-  filterMode: FilterMode;
-}
-
-const inMemoryUserPrefs = new Map<string, {
-  telegramUserId: string;
-  autoSnipeEnabled: boolean;
-  autoSnipeSolAmount: number;
-  maxSlippagePercent: number;
-  receiveSafeAlerts: boolean;
-  receiveRiskAlerts: boolean;
-}>();
-
-function isDatabaseAvailable(): boolean {
-  return Boolean(env.DATABASE_URL && !env.DATABASE_URL.includes('password@localhost'));
-}
-
-function computeFilterMode(receiveSafe: boolean, receiveRisk: boolean): FilterMode {
-  if (receiveSafe && !receiveRisk) return 'SAFE';
-  if (!receiveSafe && receiveRisk) return 'RISK';
-  return 'ALL';
-}
-
-/**
- * Retrieves full user preferences including auto-snipe settings and alert filter mode
- */
-export async function getUserPreferences(telegramUserId: string): Promise<UserPreferencesData> {
-  if (!inMemoryUserPrefs.has(telegramUserId)) {
-    inMemoryUserPrefs.set(telegramUserId, {
-      telegramUserId,
-      autoSnipeEnabled: false,
-      autoSnipeSolAmount: env.AUTO_SNIPE_DEFAULT_SOL || 0.01,
-      maxSlippagePercent: 15.0,
-      receiveSafeAlerts: true,
-      receiveRiskAlerts: true,
-    });
-  }
-
-  if (!isDatabaseAvailable()) {
-    const mem = inMemoryUserPrefs.get(telegramUserId)!;
-    return {
-      ...mem,
-      filterMode: computeFilterMode(mem.receiveSafeAlerts, mem.receiveRiskAlerts),
-    };
-  }
-
-  try {
-    const pref = await prisma.userPreference.upsert({
-      where: { telegramUserId },
-      update: {},
-      create: {
-        telegramUserId,
-        autoSnipeEnabled: false,
-        autoSnipeSolAmount: env.AUTO_SNIPE_DEFAULT_SOL || 0.01,
-        receiveSafeAlerts: true,
-        receiveRiskAlerts: true,
-      },
-    });
-
-    const data = {
-      telegramUserId,
-      autoSnipeEnabled: pref.autoSnipeEnabled,
-      autoSnipeSolAmount: pref.autoSnipeSolAmount,
-      maxSlippagePercent: pref.maxSlippagePercent,
-      receiveSafeAlerts: pref.receiveSafeAlerts,
-      receiveRiskAlerts: pref.receiveRiskAlerts,
-    };
-    inMemoryUserPrefs.set(telegramUserId, data);
-
-    return {
-      ...data,
-      filterMode: computeFilterMode(data.receiveSafeAlerts, data.receiveRiskAlerts),
-    };
-  } catch {
-    const mem = inMemoryUserPrefs.get(telegramUserId)!;
-    return {
-      ...mem,
-      filterMode: computeFilterMode(mem.receiveSafeAlerts, mem.receiveRiskAlerts),
-    };
-  }
-}
-
-/**
- * Updates user preferences (auto-snipe or alert filter modes)
- */
-export async function setUserPreferences(
-  telegramUserId: string,
-  updates: {
-    autoSnipeEnabled?: boolean;
-    autoSnipeSolAmount?: number;
-    maxSlippagePercent?: number;
-    receiveSafeAlerts?: boolean;
-    receiveRiskAlerts?: boolean;
-  }
-): Promise<UserPreferencesData> {
-  const current = inMemoryUserPrefs.get(telegramUserId) || {
-    telegramUserId,
-    autoSnipeEnabled: false,
-    autoSnipeSolAmount: env.AUTO_SNIPE_DEFAULT_SOL || 0.01,
-    maxSlippagePercent: 15.0,
-    receiveSafeAlerts: true,
-    receiveRiskAlerts: true,
-  };
-
-  const updated = {
-    ...current,
-    ...updates,
-  };
-  inMemoryUserPrefs.set(telegramUserId, updated);
-
-  if (isDatabaseAvailable()) {
-    try {
-      await prisma.userPreference.upsert({
-        where: { telegramUserId },
-        update: updates,
-        create: {
-          telegramUserId,
-          autoSnipeEnabled: updated.autoSnipeEnabled,
-          autoSnipeSolAmount: updated.autoSnipeSolAmount,
-          maxSlippagePercent: updated.maxSlippagePercent,
-          receiveSafeAlerts: updated.receiveSafeAlerts,
-          receiveRiskAlerts: updated.receiveRiskAlerts,
+      notifications.push({
+        userId,
+        telegramChatId: userPref.telegramChatId || userId,
+        action: {
+          position: pos,
+          action: 'TAKE_PROFIT_2X',
+          gainPercent: gainFromEntryPct,
+          solAmount: solSecured,
+          message:
+            `🎯 <b>[PRIVATE ALERT] 2X PRINCIPAL DE-RISKED!</b>\n\n` +
+            `🪙 <b>Token:</b> $${pos.tokenSymbol} (+${gainFromEntryPct.toFixed(0)}%)\n` +
+            `💵 <b>Returned:</b> <code>+${solSecured.toFixed(3)} SOL</code> (Original principal safe!)\n` +
+            `💎 <b>Runner:</b> Remaining bag riding trend with 0 risk.`,
         },
       });
-    } catch (err: any) {
-      console.warn('⚠️ Could not save user preference to DB, kept in memory:', err.message);
+      continue;
+    }
+
+    // 2. Uncapped Moonbag Trailing Stop (35% pullback from peak)
+    const dropFromPeakPct = ((pos.peakPriceUsd - currentPriceUsd) / pos.peakPriceUsd) * 100;
+    const trailingStopThreshold = userPref.trailingStopPct || 35.0;
+
+    if (pos.status === 'PARTIAL_TP_2X' && dropFromPeakPct >= trailingStopThreshold && pos.remainingTokens > 0) {
+      const peakMultiplier = Number((pos.peakPriceUsd / pos.entryPriceUsd).toFixed(2));
+      console.log(`🛡️ [AUTONOMOUS TRAILING STOP] User ${userId} $${pos.tokenSymbol} trailed down -${dropFromPeakPct.toFixed(1)}% from peak (${peakMultiplier}X).`);
+
+      const sellRes = await executeUserSnipeSell(userId, pos.tokenMint, pos.tokenSymbol, currentPriceUsd, 100);
+      const moonbagSol = sellRes.solAmount || pos.solInvested * (currentPriceUsd / pos.entryPriceUsd) * 0.5;
+
+      pos.status = 'CLOSED';
+      pos.closedAt = Date.now();
+      pos.remainingTokens = 0;
+      pos.realizedSolProfit += moonbagSol;
+      pos.exitReason = 'TRAILING_STOP';
+      persistUserFiles();
+
+      notifications.push({
+        userId,
+        telegramChatId: userPref.telegramChatId || userId,
+        action: {
+          position: pos,
+          action: 'TRAILING_STOP',
+          gainPercent: gainFromEntryPct,
+          solAmount: moonbagSol,
+          message:
+            `🛑 <b>[PRIVATE ALERT] TREND EXIT TRIGGERED</b>\n\n` +
+            `🪙 <b>Token:</b> $${pos.tokenSymbol}\n` +
+            `🔝 <b>Peak Reached:</b> <code>${peakMultiplier}X</code> (Trailed -${dropFromPeakPct.toFixed(0)}%)\n` +
+            `💰 <b>Final Profit:</b> <code>+${pos.realizedSolProfit.toFixed(3)} SOL</code>`,
+        },
+      });
     }
   }
 
-  return {
-    ...updated,
-    filterMode: computeFilterMode(updated.receiveSafeAlerts, updated.receiveRiskAlerts),
-  };
+  return notifications;
 }
 
 /**
- * Sets user alert filter mode: 'ALL' | 'SAFE' | 'RISK'
+ * Transfers SOL from user's sniper keypair to an external destination address
  */
-export async function setUserFilterMode(
+export async function executeSolWithdrawal(
   telegramUserId: string,
-  mode: FilterMode
-): Promise<UserPreferencesData> {
-  const receiveSafeAlerts = mode === 'ALL' || mode === 'SAFE';
-  const receiveRiskAlerts = mode === 'ALL' || mode === 'RISK';
-  return setUserPreferences(telegramUserId, { receiveSafeAlerts, receiveRiskAlerts });
-}
+  destinationAddress: string,
+  amountSol: number | 'ALL'
+): Promise<{ success: boolean; signature?: string; solTransferred: number; error?: string }> {
+  const userPref = await getUserPreferences(telegramUserId);
+  if (!userPref.encryptedSecret || !userPref.encryptionIv || !userPref.encryptionTag) {
+    return { success: false, solTransferred: 0, error: 'No wallet connected.' };
+  }
 
-// Backward-compatible alias
-export const getUserAutoSnipeConfig = getUserPreferences;
-export const setUserAutoSnipeConfig = setUserPreferences;
+  let keypair: Keypair;
+  try {
+    keypair = decryptUserKeypair(userPref.encryptedSecret, userPref.encryptionIv, userPref.encryptionTag);
+  } catch (err: any) {
+    return { success: false, solTransferred: 0, error: `Decryption error: ${err.message}` };
+  }
 
-/**
- * Exits an individual sniped position (live on-chain or simulation)
- */
-export async function exitSnipedPosition(tokenMintOrSymbol: string): Promise<SnipeResult & { error?: string }> {
-  const query = tokenMintOrSymbol.trim();
-  let pos = activePositions.get(query);
-  if (!pos) {
-    const clean = query.replace(/^\$/, '').toUpperCase();
-    for (const p of activePositions.values()) {
-      if (p.tokenSymbol.toUpperCase() === clean && p.status !== 'CLOSED') {
-        pos = p;
-        break;
-      }
+  let destPubkey: PublicKey;
+  try {
+    destPubkey = new PublicKey(destinationAddress.trim());
+  } catch {
+    return { success: false, solTransferred: 0, error: 'Invalid Solana destination address.' };
+  }
+
+  const rpcUrl = env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
+  const connection = new Connection(rpcUrl, 'confirmed');
+
+  try {
+    const balanceLamports = await connection.getBalance(keypair.publicKey);
+    const feeBufferLamports = 10_000; // 0.00001 SOL buffer for network fee
+
+    let transferLamports = 0;
+    if (amountSol === 'ALL') {
+      transferLamports = Math.max(0, balanceLamports - feeBufferLamports);
+    } else {
+      transferLamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     }
-  }
 
-  if (!pos || pos.status === 'CLOSED') {
+    if (transferLamports <= 0 || balanceLamports < transferLamports + feeBufferLamports) {
+      const availableSol = (balanceLamports / LAMPORTS_PER_SOL).toFixed(4);
+      return {
+        success: false,
+        solTransferred: 0,
+        error: `Insufficient balance. Available: ${availableSol} SOL (Network gas fee requires ~0.00001 SOL).`,
+      };
+    }
+
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    const transaction = new Transaction({ recentBlockhash: blockhash, feePayer: keypair.publicKey }).add(
+      SystemProgram.transfer({
+        fromPubkey: keypair.publicKey,
+        toPubkey: destPubkey,
+        lamports: transferLamports,
+      })
+    );
+
+    transaction.sign(keypair);
+    const rawTx = transaction.serialize();
+    const signature = await connection.sendRawTransaction(rawTx, { skipPreflight: false });
+    await connection.confirmTransaction(signature, 'confirmed');
+
+    const solTransferred = Number((transferLamports / LAMPORTS_PER_SOL).toFixed(4));
+    console.log(`💸 [SOL WITHDRAWAL] User ${telegramUserId} withdrew ${solTransferred} SOL to ${destPubkey.toBase58()}. Tx: https://solscan.io/tx/${signature}`);
+
     return {
-      success: false,
-      simulated: true,
-      signature: '',
-      solAmount: 0,
-      tokenAmount: 0,
-      tokenMint: query,
-      error: `No active open sniped position for "${query}"`,
+      success: true,
+      signature,
+      solTransferred,
     };
+  } catch (err: any) {
+    console.error(`⚠️ Withdrawal error for ${telegramUserId}:`, err.message);
+    return { success: false, solTransferred: 0, error: err.message };
   }
-
-  const sellRes = await executeSnipeSell(pos.tokenMint, pos.tokenSymbol, pos.currentPriceUsd, 100);
-  pos.status = 'CLOSED';
-  pos.closedAt = Date.now();
-  pos.remainingTokens = 0;
-  pos.exitReason = 'MANUAL_EXIT';
-  if (sellRes.solAmount) {
-    pos.realizedSolProfit += sellRes.solAmount - pos.solInvested;
-  }
-  return sellRes;
 }
 
-/**
- * Exits all active sniped positions (live on-chain or simulation)
- */
+// Backward-compatible wrappers
+export async function executeSnipeTrade(
+  tokenMint: string,
+  solAmount: number,
+  tokenSymbol?: string,
+  priceUsd?: number
+): Promise<SnipeResult> {
+  const serverKey = getServerKeypair();
+  return executeUserSnipeTrade(
+    { userId: 'default', telegramChatId: env.TELEGRAM_CHAT_ID, keypair: serverKey },
+    tokenMint,
+    solAmount,
+    tokenSymbol,
+    priceUsd
+  );
+}
+
+export async function executeSnipeSell(
+  tokenMint: string,
+  tokenSymbol?: string,
+  priceUsd?: number,
+  sellPercent: number = 100
+): Promise<SnipeResult> {
+  return executeUserSnipeSell('default', tokenMint, tokenSymbol, priceUsd, sellPercent);
+}
+
+export async function exitSnipedPosition(tokenMintOrSymbol: string): Promise<SnipeResult & { error?: string }> {
+  return executeSnipeSell(tokenMintOrSymbol, undefined, undefined, 100);
+}
+
 export async function exitAllSnipedPositions(): Promise<{ count: number; totalSol: number; results: SnipeResult[] }> {
   const active = getActivePositions();
   const results: SnipeResult[] = [];
@@ -629,3 +996,13 @@ export async function exitAllSnipedPositions(): Promise<{ count: number; totalSo
   };
 }
 
+export async function checkActivePositionsTpSl(
+  tokenMint: string,
+  currentPriceUsd: number
+): Promise<TpSlActionTriggered | null> {
+  const notifications = await checkAllUserPositionsTpSl(tokenMint, currentPriceUsd);
+  if (notifications.length > 0) {
+    return notifications[0].action;
+  }
+  return null;
+}

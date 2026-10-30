@@ -4,14 +4,31 @@ import { prisma } from './db.js';
 import {
   executeSnipeTrade,
   executeSnipeSell,
+  executeUserSnipeTrade,
+  executeUserSnipeSell,
   getUserAutoSnipeConfig,
   setUserAutoSnipeConfig,
   getUserPreferences,
+  setUserPreferences,
   getActivePositions,
   getAllPositions,
+  getUserActivePositions,
+  getSolForFixedUsd,
+  executeSolWithdrawal,
   SnipeResult,
   SnipedPosition,
 } from './sniper.js';
+import {
+  encryptPrivateKey,
+  generateBurnerWallet,
+  isValidPrivateKey,
+  decryptUserKeypair,
+  parseKeypair,
+} from './encryption.js';
+import {
+  verifyGroupMembership,
+  revokeUserWalletAndAccess,
+} from './groupAccessGate.js';
 import { broadcastPricePump, broadcastPriceDip } from './events.js';
 import { getTokensForDate, getActiveTrackedTokens, getTokensForPastDays } from './earlyTokenStore.js';
 
@@ -335,7 +352,9 @@ export async function dispatchEarlyTrendingAlert(
   candidate: any,
   dailyIndex: number = 1
 ): Promise<void> {
+  const targetGroupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
   const dexscreenerUrl = getDexScreenerUrl(candidate);
+  const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
   const trojanUrl = env.TROJAN_REF_CODE
     ? `https://t.me/solana_trojanbot?start=r-${env.TROJAN_REF_CODE}-${candidate.tokenMint}`
     : `https://t.me/solana_trojanbot?start=${candidate.tokenMint}`;
@@ -350,6 +369,9 @@ export async function dispatchEarlyTrendingAlert(
     [
       { text: '📊 DexScreener', url: dexscreenerUrl },
       { text: '🔍 Solscan', url: `https://solscan.io/token/${candidate.tokenMint}` },
+    ],
+    [
+      { text: '⚡ Snipe $10 (Private DM)', url: `https://t.me/${botUser}?start=snipe_${candidate.tokenMint}` },
     ],
     [
       { text: '⚡ Snipe 0.1 SOL', callback_data: `snipe_quick_0.1_${candidate.tokenMint}` },
@@ -369,7 +391,7 @@ export async function dispatchEarlyTrendingAlert(
   // Attempt photo alert with card as caption if imageUrl is present and fits Telegram's 1024-character caption limit
   if (candidate.imageUrl && message.length <= 1024) {
     try {
-      await bot.sendPhoto(env.TELEGRAM_CHAT_ID, candidate.imageUrl, {
+      await bot.sendPhoto(targetGroupChatId, candidate.imageUrl, {
         caption: message,
         parse_mode: 'HTML',
         reply_markup: { inline_keyboard: inlineKeyboard },
@@ -381,7 +403,7 @@ export async function dispatchEarlyTrendingAlert(
   }
 
   try {
-    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+    await bot.sendMessage(targetGroupChatId, message, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: inlineKeyboard },
       disable_web_page_preview: true,
@@ -397,6 +419,7 @@ export async function dispatchEarlyTrendingAlert(
 export async function dispatchPricePumpMilestoneAlert(
   pump: PricePumpMilestoneData
 ): Promise<void> {
+  const targetGroupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
   const chartUrl = pump.dexUrl || getDexScreenerUrl(pump);
   const entryMc = formatUsd(pump.entryMarketCap);
   const currentMc = formatUsd(pump.currentMarketCap);
@@ -440,7 +463,7 @@ ${flyingMoney}
   }
 
   try {
-    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+    await bot.sendMessage(targetGroupChatId, message, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: inlineKeyboard },
       disable_web_page_preview: true,
@@ -456,6 +479,7 @@ ${flyingMoney}
 export async function dispatchPriceDipMilestoneAlert(
   dip: PriceDipMilestoneData
 ): Promise<void> {
+  const targetGroupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
   const chartUrl = dip.dexUrl || getDexScreenerUrl(dip);
 
   const refMcVal = dip.referenceMarketCap || (dip.referencePriceUsd && dip.currentPriceUsd && dip.currentPriceUsd > 0
@@ -494,13 +518,192 @@ from ⚡️ <a href="${chartUrl}">${signalLabel}</a>
   }
 
   try {
-    await bot.sendMessage(env.TELEGRAM_CHAT_ID, message, {
+    await bot.sendMessage(targetGroupChatId, message, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: inlineKeyboard },
       disable_web_page_preview: true,
     });
   } catch (err: any) {
     console.error('⚠️ Failed to dispatch Dip Milestone Alert:', err.message);
+  }
+}
+
+/**
+ * Queries live SOL balance for a given wallet address using Solana web3 RPC
+ */
+export async function fetchUserSolBalance(walletAddress: string): Promise<number> {
+  try {
+    const { Connection, PublicKey } = await import('@solana/web3.js');
+    const conn = new Connection(env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com', 'confirmed');
+    const lamports = await conn.getBalance(new PublicKey(walletAddress));
+    return Number((lamports / 1e9).toFixed(4));
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Sends or updates the personalized multi-user wallet dashboard
+ */
+export async function sendUserWalletDashboard(
+  chatId: number | string,
+  userId: string,
+  messageIdToEdit?: number
+): Promise<void> {
+  const membership = await verifyGroupMembership(userId);
+  if (!membership.isMember) {
+    await bot.sendMessage(
+      chatId,
+      `⛔ <b>Access Denied:</b> You must be an active member of our official group to configure a sniper wallet.\n\n` +
+      `<i>Please join the group before setting up your sniper wallet.</i>`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  const pref = await getUserPreferences(userId);
+  const walletAddr = pref.solanaWallet;
+  let solBal = 0;
+  if (walletAddr) {
+    solBal = await fetchUserSolBalance(walletAddr);
+  }
+
+  const statusEmoji = pref.autoSnipeEnabled ? '🟢 <b>ACTIVE</b>' : '🔴 <b>DISABLED</b>';
+  const walletDisplay = walletAddr ? `<code>${walletAddr}</code>` : '<i>Not Connected (Click button below)</i>';
+
+  let msg = `
+💼 <b>SNIPER WALLET DASHBOARD</b>
+
+🔑 <b>Wallet:</b> ${walletDisplay}
+💰 <b>Balance:</b> <code>${solBal.toFixed(4)} SOL</code>
+⚡ <b>Auto-Snipe:</b> ${statusEmoji}
+💵 <b>Trade Size:</b> <b>$10.00 USD</b> (Universal locked rule)
+🛡️ <b>Strategy:</b> 2X De-Risk (Sell 50%) ➔ Infinite Trend Runner
+`.trim();
+
+  if (walletAddr) {
+    msg += `\n🔗 <a href="https://solscan.io/account/${walletAddr}">View on Solscan</a>`;
+    if (solBal < 0.03) {
+      msg += `\n\n⚠️ <i>Low SOL Warning: Please deposit at least 0.05 SOL to fund trades and Solana gas fees!</i>`;
+    }
+  } else {
+    msg += `\n\n💡 <i>To link your own wallet, paste your Solana private key directly into this private chat. It will be encrypted with AES-256-GCM and your original message will be deleted immediately for security.</i>`;
+  }
+
+  const inlineKeyboard: any[] = [];
+  if (!walletAddr) {
+    inlineKeyboard.push([{ text: '✨ Generate Dedicated Sniper Wallet', callback_data: 'wallet_generate_burner' }]);
+  } else {
+    inlineKeyboard.push([
+      pref.autoSnipeEnabled
+        ? { text: '🔴 Turn Auto-Snipe OFF', callback_data: 'snipe_disable' }
+        : { text: '🟢 Turn Auto-Snipe ON', callback_data: 'snipe_enable' },
+    ]);
+    inlineKeyboard.push([
+      { text: '✨ Generate New Burner', callback_data: 'wallet_generate_burner' },
+      { text: '💸 Withdraw SOL', callback_data: 'wallet_withdraw' },
+    ]);
+  }
+  inlineKeyboard.push([
+    { text: '💼 My Positions', callback_data: 'cmd_positions' },
+    { text: '🔄 Refresh Balance', callback_data: 'cmd_wallet' },
+  ]);
+  inlineKeyboard.push([
+    { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+  ]);
+
+  if (messageIdToEdit) {
+    try {
+      await bot.editMessageText(msg, {
+        chat_id: chatId,
+        message_id: messageIdToEdit,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      });
+      return;
+    } catch {}
+  }
+
+  await bot.sendMessage(chatId, msg, {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
+/**
+ * Handles deep-link 1-tap trade in private DM initiated from group alert buttons
+ */
+export async function handleUserDeepLinkSnipe(
+  chatId: number | string,
+  userId: string,
+  tokenMint: string
+): Promise<void> {
+  const membership = await verifyGroupMembership(userId);
+  if (!membership.isMember) {
+    await bot.sendMessage(
+      chatId,
+      `⛔ <b>Access Denied:</b> You must be an active member of our official group to execute snipes.`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  const pref = await getUserPreferences(userId);
+  if (!pref.encryptedSecret || !pref.encryptionIv || !pref.encryptionTag) {
+    await bot.sendMessage(
+      chatId,
+      `⚠️ <b>No Wallet Connected</b>\n\nPlease connect or generate a dedicated sniper wallet first to execute $10 gem snipes:`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✨ Generate Dedicated Sniper Wallet', callback_data: 'wallet_generate_burner' }],
+            [{ text: '💼 Open Wallet Dashboard', callback_data: 'cmd_wallet' }],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
+  let keypair: any = null;
+  try {
+    keypair = decryptUserKeypair(pref.encryptedSecret, pref.encryptionIv, pref.encryptionTag);
+  } catch (err: any) {
+    await bot.sendMessage(chatId, `❌ Could not decrypt wallet credentials: ${err.message}`);
+    return;
+  }
+
+  const waitMsg = await bot.sendMessage(
+    chatId,
+    `⏳ <i>Executing $10.00 snipe for <code>${tokenMint.slice(0, 6)}...${tokenMint.slice(-4)}</code>...</i>`,
+    { parse_mode: 'HTML' }
+  );
+
+  try {
+    const tradeSol = await getSolForFixedUsd(pref.fixedTradeSizeUsd || 10.0);
+    const snipeRes = await executeUserSnipeTrade(
+      {
+        userId,
+        telegramChatId: String(chatId),
+        keypair,
+        slippageBps: Math.round((pref.maxSlippagePercent || 15) * 100),
+        priorityFeeLamports: pref.priorityFeeLamports || 100_000,
+      },
+      tokenMint,
+      tradeSol
+    );
+
+    // ROUTE RECEIPT STRICTLY TO USER'S DM
+    await dispatchSnipeNotification(snipeRes, chatId);
+    await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+  } catch (err: any) {
+    await bot.editMessageText(`⚠️ Snipe failed: ${err.message}`, {
+      chat_id: chatId,
+      message_id: waitMsg.message_id,
+    });
   }
 }
 
@@ -518,7 +721,7 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
-    { command: 'paper', description: '💼 $1,000 Paper Portfolio & Live PnL' },
+    { command: 'paper', description: '💼 $500 Paper Portfolio & Live PnL' },
     { command: 'buy', description: '💼 Instant Paper Buy Any Solana Mint' },
     { command: 'scan', description: '⚡ Scan DexScreener & Pump.fun Now' },
     { command: 'daily', description: '💎 Daily 2min Early Trending Coins' },
@@ -534,17 +737,82 @@ export function initTelegramCommands(): void {
     { command: 'exitall', description: '🚨 Exit All Active Trades & Return Money to Account' },
     { command: 'exit', description: '🚨 Exit Specific Trade (/exit <mint or ticker>)' },
     { command: 'autosnipe', description: '⚙️ Auto-Snipe Settings & Toggle' },
-    { command: 'wallet', description: '💰 Wallet Balance & Solscan' },
+    { command: 'wallet', description: '💼 Sniper Wallet, Deposit & Withdraw' },
+    { command: 'withdraw', description: '💸 Withdraw SOL to External Wallet' },
+    { command: 'connect', description: '🔐 Connect / Generate Sniper Wallet' },
     { command: 'help', description: '❓ How It Works & Trading Guide' },
   ]).catch((err) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
+  });
+
+  // 1. New Group Members Listener: Send Transient 60s Welcome Explaining $10 Rule
+  bot.on('new_chat_members', async (msg) => {
+    const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
+    if (String(msg.chat.id) !== String(groupChatId)) return;
+
+    for (const newUser of (msg.new_chat_members || [])) {
+      if (newUser.is_bot) continue;
+
+      const name = newUser.first_name || 'Trader';
+      const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+      const welcomeText = `
+👋 <b>Welcome to the Alpha Radar, ${escapeHtml(name)}!</b>
+
+⚡ <b>Core Trading Rule:</b>
+• <b>Fixed Trade Size:</b> Strictly <b>$10.00 USD</b> per trade (+ network gas).
+• <b>The Strategy:</b> At 2X, the bot sells 50% to recover your $10 principal risk-free; the remaining bag rides trends indefinitely.
+• <b>Recommended Deposit:</b> 0.5 – 1.0 SOL in your sniper wallet covers 8–15 gem plays.
+
+👇 <i>Tap below to securely connect your wallet in private:</i>
+      `.trim();
+
+      try {
+        const welcomeMsg = await bot.sendMessage(msg.chat.id, welcomeText, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔐 Connect Sniper Wallet (Private DM)', url: `https://t.me/${botUser}?start=connect` }],
+            ],
+          },
+        });
+
+        setTimeout(() => {
+          bot.deleteMessage(msg.chat.id, welcomeMsg.message_id).catch(() => {});
+        }, 60_000);
+      } catch {}
+    }
+  });
+
+  // 2. Member Removal / Left Listener: Purge Credentials & Access Immediately
+  bot.on('left_chat_member', async (msg) => {
+    const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
+    if (String(msg.chat.id) !== String(groupChatId)) return;
+
+    const leftUser = msg.left_chat_member;
+    if (!leftUser || leftUser.is_bot) return;
+
+    console.log(`👋 User @${leftUser.username || leftUser.id} left or was kicked from group.`);
+    await revokeUserWalletAndAccess(String(leftUser.id), 'Kicked or left group');
+  });
+
+  bot.on('chat_member', async (update: any) => {
+    const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
+    if (String(update.chat.id) !== String(groupChatId)) return;
+
+    const newStatus = update.new_chat_member?.status;
+    const targetUser = update.new_chat_member?.user;
+    if (!targetUser || targetUser.is_bot) return;
+
+    if (newStatus === 'kicked' || newStatus === 'left') {
+      await revokeUserWalletAndAccess(String(targetUser.id), `Status changed to ${newStatus}`);
+    }
   });
 
   // Persistent Keyboard docked at the bottom of phone screen
   const persistentReplyKeyboard = {
     keyboard: [
       [{ text: '🚀 /start' }, { text: '⚡ Scan Now' }],
-      [{ text: '💼 $1,000 Paper' }, { text: '🚨 Exit All Trades' }],
+      [{ text: '💼 $500 Paper' }, { text: '🚨 Exit All Trades' }],
       [{ text: '💎 Daily Coins' }, { text: '🏆 Top Gainers' }],
       [{ text: '📈 Price Milestones' }, { text: '📉 Daily Flops' }],
       [{ text: '🤖 AI Co-Pilot' }, { text: '⚙️ Auto-Snipe' }],
@@ -585,7 +853,7 @@ export function initTelegramCommands(): void {
 
     const inlineKeyboard = [
       [
-        { text: '💼 $1,000 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '💼 $500 Paper Portfolio', callback_data: 'cmd_paper_portfolio' },
         { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
       ],
       [
@@ -632,18 +900,40 @@ export function initTelegramCommands(): void {
     }
   };
 
-  // /start or Start button (supports deep-linking: /start <tokenMint>)
+  // /start or Start button (supports deep-linking: /start <payload>)
   bot.onText(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
     const payload = match?.[1]?.trim();
+    const userId = String(msg.from?.id || msg.chat.id);
+
+    if (payload === 'connect') {
+      await sendUserWalletDashboard(msg.chat.id, userId);
+      return;
+    }
+
+    if (payload?.startsWith('snipe_')) {
+      const tokenMint = payload.replace('snipe_', '').trim();
+      await handleUserDeepLinkSnipe(msg.chat.id, userId, tokenMint);
+      return;
+    }
+
+    if (payload && (payload.startsWith('bundle_') || payload.startsWith('fakevol_') || payload.startsWith('first20_'))) {
+      const parts = payload.split('_');
+      if (parts[1]) {
+        await handleTokenDeepLink(msg.chat.id, parts[1]);
+        return;
+      }
+    }
+
     if (payload && payload.length >= 30) {
       await handleTokenDeepLink(msg.chat.id, payload);
       return;
     }
+
     await sendWelcomeDashboard(msg.chat.id);
   });
 
-  // /paper or /portfolio or "💼 $1,000 Paper" button (supports /paper <mint or ticker>)
-  bot.onText(/💼 \$1,?000 Paper|💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
+  // /paper or /portfolio or "💼 $500 Paper" button (supports /paper <mint or ticker>)
+  bot.onText(/💼 \$500 Paper|💼 \$1,?000 Paper|💼 \$100 Paper|\/paper(?:\s+(.+))?|\/portfolio/i, async (msg, match) => {
     const target = match?.[1]?.trim();
     if (target && target.length >= 3 && !/^(portfolio|stats|pnl)$/i.test(target)) {
       await handleUserSubmittedToken(msg.chat.id, target);
@@ -657,9 +947,9 @@ export function initTelegramCommands(): void {
     await handlePaperResetCommand(msg.chat.id);
   });
 
-  // /fund or /topup (Funds paper wallet with $1,000 or specified amount)
+  // /fund or /topup (Funds paper wallet with $500 or specified amount)
   bot.onText(/\/fund(?:\s+(\d+(?:\.\d+)?))?|\/topup(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
-    const amount = parseFloat(match?.[1] || match?.[2] || '1000');
+    const amount = parseFloat(match?.[1] || match?.[2] || '500');
     try {
       const { topUpPaperTradingWallet } = await import('./paperTrading.js');
       const wallet = await topUpPaperTradingWallet(amount);
@@ -1082,7 +1372,7 @@ ${flagsText}
 
   // /positions or "💼 My Positions" button
   bot.onText(/💼 My Positions|\/positions|\/portfolio|My Position/i, async (msg) => {
-    await handlePositionsCommand(msg.chat.id);
+    await handlePositionsCommand(msg.chat.id, String(msg.from?.id || msg.chat.id));
   });
 
   // "⚙️ Auto-Snipe" button
@@ -1136,21 +1426,126 @@ ${flagsText}
     }
   });
 
-  // /wallet or /balance or "💰 Wallet"
-  bot.onText(/\/wallet|\/balance|💰 Wallet|Balance/i, async (msg) => {
-    const wallet = env.USER_SOLANA_WALLET;
-    const mode = env.SNIPER_PRIVATE_KEY
-      ? '🟢 <b>Live On-Chain Trading (Mainnet)</b>'
-      : '⚡ <b>Zero-Risk Paper Trading (Simulation)</b>';
-    await bot.sendMessage(
+  // /wallet, /balance, /connect, or "💰 Wallet"
+  bot.onText(/\/wallet|\/balance|\/connect|💰 Wallet|Balance/i, async (msg) => {
+    const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+    if (isGroup) {
+      await bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+      const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+      const warnMsg = await bot.sendMessage(
+        msg.chat.id,
+        `🔒 <b>@${msg.from?.username || msg.from?.first_name || 'Trader'}</b>, please manage your sniper wallet in private DM to keep your keys safe:\n👉 <a href="https://t.me/${botUser}?start=connect">Open Private Wallet Dashboard</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+      );
+      setTimeout(() => {
+        bot.deleteMessage(msg.chat.id, warnMsg.message_id).catch(() => {});
+      }, 20_000);
+      return;
+    }
+
+    await sendUserWalletDashboard(msg.chat.id, String(msg.from?.id || msg.chat.id));
+  });
+
+  // /withdraw <solana_address> [amount|all]
+  bot.onText(/\/withdraw(?:\s+(\S+))?(?:\s+(\S+))?/i, async (msg, match) => {
+    const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+    if (isGroup) {
+      await bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+      const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+      const warn = await bot.sendMessage(
+        msg.chat.id,
+        `🔒 @${msg.from?.username || msg.from?.first_name || 'Trader'}, withdrawals must only be performed in private DM:\n👉 <a href="https://t.me/${botUser}?start=connect">Open Private Chat</a>`,
+        { parse_mode: 'HTML', disable_web_page_preview: true }
+      );
+      setTimeout(() => {
+        bot.deleteMessage(msg.chat.id, warn.message_id).catch(() => {});
+      }, 15_000);
+      return;
+    }
+
+    const userId = String(msg.from?.id || msg.chat.id);
+    const membership = await verifyGroupMembership(userId);
+    if (!membership.isMember) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `⛔ <b>Access Denied:</b> You must be an active member of our official group to use wallet functions.`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    const toAddress = match?.[1]?.trim();
+    const amountArg = match?.[2]?.trim()?.toLowerCase() || 'all';
+
+    if (!toAddress || toAddress.length < 32 || toAddress.length > 44) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `💸 <b>WITHDRAW SOL</b>\n\n` +
+        `<b>Usage:</b>\n` +
+        `<code>/withdraw &lt;recipient_solana_address&gt; [amount|all]</code>\n\n` +
+        `<b>Examples:</b>\n` +
+        `• <code>/withdraw 7Vz... 0.5</code> (Withdraws 0.5 SOL)\n` +
+        `• <code>/withdraw 7Vz... all</code> (Withdraws entire balance minus gas)\n\n` +
+        `<i>Safely sweeps your SOL back to your personal Phantom/Solflare wallet or exchange.</i>`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    const pref = await getUserPreferences(userId);
+    if (!pref.encryptedSecret || !pref.encryptionIv || !pref.encryptionTag) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `⚠️ <i>No wallet connected. Tap /wallet to generate or connect your sniper wallet first.</i>`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    let userKeypair: any = null;
+    try {
+      userKeypair = decryptUserKeypair(pref.encryptedSecret, pref.encryptionIv, pref.encryptionTag);
+    } catch (err: any) {
+      await bot.sendMessage(msg.chat.id, `❌ Could not decrypt wallet credentials: ${err.message}`);
+      return;
+    }
+
+    const waitMsg = await bot.sendMessage(
       msg.chat.id,
-      `💼 <b>Connected Sniper Wallet</b>\n\n` +
-      `🔑 <b>Address:</b> <code>${wallet}</code>\n` +
-      `🔗 <a href="https://solscan.io/account/${wallet}">View Account on Solscan</a>\n\n` +
-      `⚡ <b>Engine Status:</b> ${mode}\n` +
-      `💡 <i>To trade live on-chain with real SOL, set <code>SNIPER_PRIVATE_KEY</code> in your .env.</i>`,
-      { parse_mode: 'HTML', disable_web_page_preview: true }
+      `⏳ <i>Processing withdrawal to <code>${toAddress.slice(0, 6)}...${toAddress.slice(-4)}</code>...</i>`,
+      { parse_mode: 'HTML' }
     );
+
+    try {
+      const amount = amountArg === 'all' ? ('ALL' as const) : parseFloat(amountArg);
+      const res = await executeSolWithdrawal(userKeypair, toAddress, amount);
+      if (res.success) {
+        const sig = res.signature || '';
+        const explorerUrl = `https://solscan.io/tx/${sig}`;
+        await bot.editMessageText(
+          `💸 <b>WITHDRAWAL SUCCESSFUL!</b>\n\n` +
+          `💰 <b>Amount Sent:</b> <code>${res.solTransferred.toFixed(4)} SOL</code>\n` +
+          `📬 <b>Destination:</b> <code>${toAddress}</code>\n` +
+          `🔗 <b>Transaction Receipt:</b> <a href="${explorerUrl}">${sig ? sig.slice(0, 16) + '...' : 'View Transaction'}</a>`,
+          {
+            chat_id: msg.chat.id,
+            message_id: waitMsg.message_id,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+          }
+        );
+      } else {
+        await bot.editMessageText(`⚠️ Withdrawal failed: ${res.error || 'Unknown error'}`, {
+          chat_id: msg.chat.id,
+          message_id: waitMsg.message_id,
+        });
+      }
+    } catch (err: any) {
+      await bot.editMessageText(`⚠️ Withdrawal error: ${err.message}`, {
+        chat_id: msg.chat.id,
+        message_id: waitMsg.message_id,
+      });
+    }
   });
 
   // /help or "❓ Help"
@@ -1163,7 +1558,7 @@ ${flagsText}
       `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
       `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
       `<b>Quick Commands:</b>\n` +
-      `• /paper — Live $1,000 Portfolio\n` +
+      `• /paper — Live $500 Portfolio\n` +
       `• /positions — Active Trades & Exits\n` +
       `• /exitall — Sell All & Cash Out\n` +
       `• /autosnipe — Automated Sniping`,
@@ -1192,13 +1587,85 @@ ${flagsText}
     }
   });
 
-  // Natural Language & Free-form Question Listener
-  // Catches any message that isn't a command and either:
-  // 1) Is a Solana token mint (triggers automatic audit)
-  // 2) Is a natural question or trading strategy inquiry (triggers AI Co-Pilot)
+  // Natural Language, Wallet Key Ingestion & Free-form Question Listener
   bot.on('message', async (msg) => {
     const text = msg.text?.trim();
-    if (!text || text.startsWith('/')) return;
+    if (!text) return;
+
+    const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+
+    // 1. PUBLIC GROUP & DM GUARDIAN: Detect sensitive private keys
+    if (isValidPrivateKey(text)) {
+      // Purge sensitive message from chat history immediately
+      await bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+
+      if (isGroup) {
+        const warnMsg = await bot.sendMessage(
+          msg.chat.id,
+          `🚨 <b>CRITICAL SECURITY ACTION</b>\n\n` +
+          `@${msg.from?.username || msg.from?.first_name || 'Member'}, you posted a raw private key in a public chat! The message has been deleted immediately to protect your funds.\n\n` +
+          `⚠️ <i>If that wallet held significant funds, please migrate them to a new address immediately. Never share keys publicly!</i>`,
+          { parse_mode: 'HTML' }
+        );
+        setTimeout(() => {
+          bot.deleteMessage(msg.chat.id, warnMsg.message_id).catch(() => {});
+        }, 30_000);
+        return;
+      }
+
+      // 2. PRIVATE DM: Securely ingest & encrypt user's private key
+      const userId = String(msg.from?.id || msg.chat.id);
+      const membership = await verifyGroupMembership(userId);
+      if (!membership.isMember) {
+        await bot.sendMessage(
+          msg.chat.id,
+          `⛔ <b>Access Denied:</b> You must be an active member of our official group to configure a sniper wallet.\n\n` +
+          `<i>Please join the group before setting up your wallet.</i>`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      try {
+        const keypair = parseKeypair(text);
+        const pubkey = keypair.publicKey.toBase58();
+        const enc = encryptPrivateKey(text);
+
+        await setUserPreferences(userId, {
+          solanaWallet: pubkey,
+          encryptedSecret: enc.ciphertext,
+          encryptionIv: enc.iv,
+          encryptionTag: enc.tag,
+          isMembershipActive: true,
+          telegramChatId: String(msg.chat.id),
+          autoSnipeEnabled: true,
+        });
+
+        await bot.sendMessage(
+          msg.chat.id,
+          `🔐 <b>SNIPER WALLET CONNECTED SECURELY!</b>\n\n` +
+          `🔑 <b>Address:</b> <code>${pubkey}</code>\n` +
+          `🛡️ <b>Security:</b> Your private key was encrypted with AES-256-GCM. Your message was purged immediately from chat.\n` +
+          `💵 <b>Snipe Rule:</b> Locked at <b>$10.00 USD</b> per gem.\n` +
+          `⚡ <b>Auto-Snipe:</b> 🟢 <b>ACTIVE</b>\n\n` +
+          `💡 <i>Deposit SOL to fund trades and gas. You will receive private execution receipts directly here!</i>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '💼 View Wallet Dashboard', callback_data: 'cmd_wallet' }],
+                [{ text: '🔴 Disable Auto-Snipe', callback_data: 'snipe_disable' }],
+              ],
+            },
+          }
+        );
+      } catch (err: any) {
+        await bot.sendMessage(msg.chat.id, `❌ Failed to parse or encrypt key: ${err.message}`);
+      }
+      return;
+    }
+
+    if (text.startsWith('/')) return;
 
     // Ignore known persistent button labels already handled by bot.onText
     const knownButtons = [
@@ -1475,9 +1942,98 @@ ${flagsText}
           reply_markup: { inline_keyboard: predButtons },
         });
       } else if (data === 'cmd_wallet') {
-        const wallet = env.USER_SOLANA_WALLET;
-        const mode = env.SNIPER_PRIVATE_KEY ? '🟢 Live On-Chain' : '⚡ Paper Trading';
-        await bot.sendMessage(chatId, `💼 <b>Wallet:</b> <code>${wallet}</code>\n🔗 <a href="https://solscan.io/account/${wallet}">View on Solscan</a>\n⚡ <b>Mode:</b> ${mode}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+        const isGroup = query.message?.chat?.type === 'group' || query.message?.chat?.type === 'supergroup';
+        if (isGroup) {
+          const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+          const confirm = await bot.sendMessage(
+            chatId,
+            `🔒 @${query.from.username || query.from.first_name}, <a href="https://t.me/${botUser}?start=connect">open private chat to manage your sniper wallet safely</a>.`,
+            { parse_mode: 'HTML', disable_web_page_preview: true }
+          );
+          setTimeout(() => {
+            bot.deleteMessage(chatId, confirm.message_id).catch(() => {});
+          }, 15_000);
+        } else {
+          await sendUserWalletDashboard(chatId, userId, msgId);
+        }
+      } else if (data === 'wallet_generate_burner') {
+        const membership = await verifyGroupMembership(userId);
+        if (!membership.isMember) {
+          await bot.sendMessage(
+            chatId,
+            `⛔ <b>Access Denied:</b> You must be an active member of our official group to generate a sniper wallet.`,
+            { parse_mode: 'HTML' }
+          );
+          return;
+        }
+
+        const burner = generateBurnerWallet();
+        await setUserPreferences(userId, {
+          solanaWallet: burner.publicKey,
+          encryptedSecret: burner.encrypted.ciphertext,
+          encryptionIv: burner.encrypted.iv,
+          encryptionTag: burner.encrypted.tag,
+          isMembershipActive: true,
+          telegramChatId: String(chatId),
+          autoSnipeEnabled: true,
+        });
+
+        const burnerMsg = `
+✨ <b>DEDICATED SNIPER WALLET GENERATED!</b> ✨
+
+🔑 <b>Public Address:</b>
+<code>${burner.publicKey}</code>
+<i>(Deposit SOL here to fund trades and network gas)</i>
+
+🔐 <b>Private Key (Export / Backup):</b>
+<code>${burner.privateKeyBase58}</code>
+
+⚠️ <b>CRITICAL SECURITY RULES:</b>
+1. <b>Copy and import this private key into Phantom or Solflare right now!</b>
+2. Never store your life savings here — this is a high-speed sniper burner.
+3. Universal Rule: All trades are strictly <b>$10.00 USD</b>.
+4. Once you have safely backed up your private key, tap the button below to permanently delete this message!
+`.trim();
+
+        await bot.sendMessage(chatId, burnerMsg, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🗑️ I Have Backed Up - Delete This Message', callback_data: 'delete_burner_msg' }],
+              [{ text: '💼 Open Wallet Dashboard', callback_data: 'cmd_wallet' }],
+            ],
+          },
+        });
+      } else if (data === 'delete_burner_msg') {
+        if (msgId) {
+          await bot.deleteMessage(chatId, msgId).catch(() => {});
+        }
+        await bot.sendMessage(
+          chatId,
+          `🔒 <b>Sensitive credentials message deleted from chat.</b>\n\n` +
+          `Your wallet remains safely encrypted with AES-256-GCM in the bot's secure vault.\n` +
+          `You are all set to snipe gems!`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '💼 Open Wallet Dashboard', callback_data: 'cmd_wallet' }],
+              ],
+            },
+          }
+        );
+      } else if (data === 'wallet_withdraw') {
+        await bot.sendMessage(
+          chatId,
+          `💸 <b>WITHDRAW SOL</b>\n\n` +
+          `To withdraw your SOL back to your personal Phantom/Solflare or Exchange wallet, send the following command:\n\n` +
+          `<code>/withdraw &lt;your_solana_address&gt; [amount|all]</code>\n\n` +
+          `<b>Examples:</b>\n` +
+          `• <code>/withdraw 8xPt... 0.5</code> (Withdraws 0.5 SOL)\n` +
+          `• <code>/withdraw 8xPt... all</code> (Withdraws entire balance minus gas)\n\n` +
+          `<i>Note: Withdrawals must be sent here in private DM, never in the public group!</i>`,
+          { parse_mode: 'HTML' }
+        );
       } else if (data === 'cmd_learner') {
         const { getLearnedLossDashboard } = await import('./lossLearner.js');
         const dash = getLearnedLossDashboard();
@@ -1517,7 +2073,7 @@ ${flagsText}
       } else if (data === 'cmd_milestones') {
         await handlePriceMilestonesCommand(chatId);
       } else if (data === 'cmd_positions') {
-        await handlePositionsCommand(chatId);
+        await handlePositionsCommand(chatId, userId);
       } else if (data === 'cmd_snipe_menu') {
         await handleSnipeStatus(chatId, userId, msgId);
       } else if (data?.startsWith('daily_card_')) {
@@ -1552,7 +2108,7 @@ ${flagsText}
         await sendWelcomeDashboard(chatId);
       } else if (data === 'snipe_enable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: true });
-        await bot.sendMessage(chatId, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved trades.', { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, '🟢 <b>Auto-Snipe is now ENABLED!</b>\nThe bot will automatically snipe approved $10 trades.', { parse_mode: 'HTML' });
       } else if (data === 'snipe_disable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
         await bot.sendMessage(chatId, '🔴 <b>Auto-Snipe is now DISABLED!</b>\nYou will receive alert signals only.', { parse_mode: 'HTML' });
@@ -1564,21 +2120,100 @@ ${flagsText}
         }
       } else if (data?.startsWith('snipe_quick_')) {
         const parts = data.split('_');
-        const amount = parseFloat(parts[2]);
-        const mint = parts[3];
-        if (!isNaN(amount) && mint) {
-          await bot.sendMessage(chatId, `⏳ <i>Executing 1-tap snipe of ${amount} SOL for token <code>${mint.slice(0, 6)}...${mint.slice(-4)}</code>...</i>`, { parse_mode: 'HTML' });
-          const snipeResult = await executeSnipeTrade(mint, amount);
-          await dispatchSnipeNotification(snipeResult, chatId);
+        const mint = parts[3] || parts[2];
+        if (mint) {
+          const membership = await verifyGroupMembership(userId);
+          if (!membership.isMember) {
+            await bot.sendMessage(chatId, `⛔ <b>Access Denied:</b> You must be an active member of our official group to execute trades.`, { parse_mode: 'HTML' });
+            return;
+          }
+
+          const pref = await getUserPreferences(userId);
+          if (!pref.encryptedSecret || !pref.encryptionIv || !pref.encryptionTag) {
+            const botUser = env.TELEGRAM_BOT_USERNAME || 'MySolanaSBot';
+            const promptMsg = await bot.sendMessage(
+              chatId,
+              `⚠️ @${query.from.username || query.from.first_name || 'Trader'}, you haven't linked a sniper wallet yet!\n👉 <a href="https://t.me/${botUser}?start=connect">Click here to generate or connect your wallet</a>`,
+              { parse_mode: 'HTML' }
+            );
+            setTimeout(() => {
+              bot.deleteMessage(chatId, promptMsg.message_id).catch(() => {});
+            }, 20_000);
+            return;
+          }
+
+          try {
+            const keypair = decryptUserKeypair(pref.encryptedSecret, pref.encryptionIv, pref.encryptionTag);
+            const tradeSol = await getSolForFixedUsd(pref.fixedTradeSizeUsd || 10.0);
+
+            // Execute personalized trade
+            const snipeResult = await executeUserSnipeTrade(
+              {
+                userId,
+                telegramChatId: userId,
+                keypair,
+                slippageBps: Math.round((pref.maxSlippagePercent || 15) * 100),
+                priorityFeeLamports: pref.priorityFeeLamports || 100_000,
+              },
+              mint,
+              tradeSol
+            );
+
+            // Route receipt strictly to user's private DM
+            await dispatchSnipeNotification(snipeResult, userId);
+
+            // In group, show subtle ephemeral confirmation
+            if (String(chatId) !== userId) {
+              const confirmMsg = await bot.sendMessage(
+                chatId,
+                `⚡ @${query.from.username || query.from.first_name || 'Trader'}, your <b>$10.00</b> snipe was submitted! Check your private DM for receipt.`,
+                { parse_mode: 'HTML' }
+              );
+              setTimeout(() => {
+                bot.deleteMessage(chatId, confirmMsg.message_id).catch(() => {});
+              }, 15_000);
+            }
+          } catch (err: any) {
+            await bot.sendMessage(userId, `⚠️ Snipe execution error: ${err.message}`).catch(() => {});
+          }
         }
       } else if (data?.startsWith('sell_quick_')) {
         const parts = data.split('_');
         const pct = parseFloat(parts[2]) || 100;
         const mint = parts[3];
         if (mint) {
-          await bot.sendMessage(chatId, `⏳ <i>Executing ${pct}% exit for token <code>${mint.slice(0, 6)}...${mint.slice(-4)}</code>...</i>`, { parse_mode: 'HTML' });
-          const sellResult = await executeSnipeSell(mint, undefined, undefined, pct);
-          await dispatchSnipeSellNotification(sellResult, chatId);
+          const pref = await getUserPreferences(userId);
+          if (pref.encryptedSecret && pref.encryptionIv && pref.encryptionTag) {
+            try {
+              const sellResult = await executeUserSnipeSell(
+                userId,
+                mint,
+                undefined,
+                undefined,
+                pct
+              );
+
+              // Route sell receipt strictly to user's private DM
+              await dispatchSnipeSellNotification(sellResult, userId);
+
+              if (String(chatId) !== userId) {
+                const confirmMsg = await bot.sendMessage(
+                  chatId,
+                  `🚪 @${query.from.username || query.from.first_name || 'Trader'}, sell order executed! Check your private DM.`,
+                  { parse_mode: 'HTML' }
+                );
+                setTimeout(() => {
+                  bot.deleteMessage(chatId, confirmMsg.message_id).catch(() => {});
+                }, 15_000);
+              }
+            } catch (err: any) {
+              await bot.sendMessage(userId, `⚠️ Sell execution error: ${err.message}`).catch(() => {});
+            }
+          } else {
+            // Paper / operator fallback
+            const sellResult = await executeSnipeSell(mint, undefined, undefined, pct);
+            await dispatchSnipeSellNotification(sellResult, chatId);
+          }
         }
       } else if (data === 'cmd_exit_all') {
         await bot.sendMessage(chatId, '⏳ <i>Liquidating all active trades & returning money to account...</i>', { parse_mode: 'HTML' });
@@ -2366,9 +3001,11 @@ export async function handleWeeklyReportCommand(chatId: number | string): Promis
 /**
  * Displays Active Sniped Positions, Live PnL, and TP/SL status (/positions)
  */
-async function handlePositionsCommand(chatId: number | string): Promise<void> {
+async function handlePositionsCommand(chatId: number | string, userId?: string): Promise<void> {
   try {
-    const active = getActivePositions();
+    const effectiveUserId = userId || String(chatId);
+    const userPositions = getUserActivePositions(effectiveUserId);
+    const active = userPositions.length > 0 ? userPositions : getActivePositions();
     const all = getAllPositions();
 
     if (active.length === 0 && all.length === 0) {
@@ -2452,14 +3089,15 @@ async function handlePositionsCommand(chatId: number | string): Promise<void> {
 async function handleSnipeStatus(chatId: number | string, userId: string, messageIdToEdit?: number): Promise<void> {
   const pref = await getUserPreferences(userId);
   const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE' : '🔴 DISABLED';
-  const walletAddr = env.USER_SOLANA_WALLET || '6hb1Nmj9C8xZe5oWAKYBgJcPMZnqxAGTHPBqouuy5NmM';
-  const walletTrunc = `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}`;
+  const walletAddr = pref.solanaWallet || env.USER_SOLANA_WALLET || 'Not Connected';
+  const walletTrunc = walletAddr.length > 10 ? `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}` : walletAddr;
 
   const message = `
-🎯 <b>AI AUTO-SNIPER</b>
+🎯 <b>AI AUTO-SNIPER DASHBOARD</b>
 
 Status: <b>${statusEmoji}</b>
-Allocation: <code>${pref.autoSnipeSolAmount.toFixed(2)} SOL</code> • Slippage: <code>${pref.maxSlippagePercent}%</code>
+Allocation: <b>$10.00 USD</b> (Universal fixed rule)
+Slippage: <code>${pref.maxSlippagePercent}%</code> • Priority Gas: <code>${((pref.priorityFeeLamports || 100000) / 1e9).toFixed(5)} SOL</code>
 Strategy: <b>2X De-Risk (Sell 50%) ➔ Infinite Trend Runner</b>
 Wallet: <code>${walletTrunc}</code>
   `.trim();
@@ -2471,9 +3109,8 @@ Wallet: <code>${walletTrunc}</code>
         : { text: '🟢 Turn Auto-Snipe ON', callback_data: 'snipe_enable' },
     ],
     [
-      { text: '⚡ Set 0.5 SOL', callback_data: 'snipe_set_0.5' },
-      { text: '⚡ Set 1.0 SOL', callback_data: 'snipe_set_1.0' },
-      { text: '⚡ Set 2.0 SOL', callback_data: 'snipe_set_2.0' },
+      { text: '💼 Sniper Wallet Dashboard', callback_data: 'cmd_wallet' },
+      { text: '💸 Withdraw SOL', callback_data: 'wallet_withdraw' },
     ],
     [
       { text: '💼 My Positions', callback_data: 'cmd_positions' },
@@ -2766,7 +3403,7 @@ export async function handlePaperPortfolioCommand(chatId: number | string): Prom
 }
 
 /**
- * Resets the paper trading wallet to a fresh $1,000.00 USD balance
+ * Resets the paper trading wallet to a fresh $500.00 USD balance
  */
 export async function handlePaperResetCommand(chatId: number | string): Promise<void> {
   try {
@@ -2774,9 +3411,9 @@ export async function handlePaperResetCommand(chatId: number | string): Promise<
     const wallet = await resetPaperTradingWallet();
     await bot.sendMessage(
       chatId,
-      `🔄 <b>[PAPER TRADING WALLET RESET TO $1,000]</b> 💸\n\n` +
+      `🔄 <b>[PAPER TRADING WALLET RESET TO $500]</b> 💸\n\n` +
         `💰 <b>Liquid Cash:</b> <code>$${wallet.liquidCashUsd.toFixed(2)} USD</code> (<code>${wallet.liquidCashSol.toFixed(4)} SOL</code>)\n` +
-        `🏦 <b>Initial Balance:</b> <code>$1,000.00 USD</code>\n` +
+        `🏦 <b>Initial Balance:</b> <code>$500.00 USD</code>\n` +
         `📊 <b>Active Trades:</b> 0 (Clean Slate)\n` +
         `🎯 <b>Stats & Streaks:</b> Freshly re-initialized\n\n` +
         `<i>The engine is armed and ready to execute $10.00 base conviction trades from radar breakout alerts.</i>`,
