@@ -36,6 +36,7 @@ const envSchema = z.object({
   PHOTON_REF_CODE: z.string().default(''),
 
   APP_BASE_URL: z.string().optional(),
+  RENDER_EXTERNAL_URL: z.string().optional(),
   TELEGRAM_BOT_USERNAME: z.string().default('solearlytrending_bot'),
 
   USER_SOLANA_WALLET: z.string().default('6hb1Nmj9C8xZe5oWAKYBgJcPMZnqxAGTHPBqouuy5NmM'),
