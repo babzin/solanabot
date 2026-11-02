@@ -17,6 +17,12 @@ import {
   executeSolWithdrawal,
   SnipeResult,
   SnipedPosition,
+  VALID_TRADE_SIZES_USD,
+  ValidTradeSizeUsd,
+  sanitizeTradeSizeUsd,
+  isValidTradeSizeUsd,
+  BOT_ENTRY_FEE_PCT,
+  BOT_PROFIT_FEE_PCT,
 } from './sniper.js';
 import {
   encryptPrivateKey,
@@ -265,16 +271,20 @@ export async function dispatchSnipeNotification(
   const symbol = snipe.tokenSymbol || 'TOKEN';
 
   const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
+  const feeInfo = snipe.entryFeeSol !== undefined
+    ? `\n🧾 <b>Bot Fee (1% Entry):</b> <code>${snipe.entryFeeSol.toFixed(4)} SOL</code>`
+    : '';
+
   const message = `
 🤖 <b>[AUTO-SNIPE EXECUTED]</b>
 
 🪙 <b>Target Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
-💰 <b>Allocation Spent:</b> <code>${snipe.solAmount.toFixed(2)} SOL</code>
+💰 <b>Allocation Spent:</b> <code>${snipe.solAmount.toFixed(4)} SOL</code>${feeInfo}
 📦 <b>Estimated Acquired:</b> <code>${formatTokenQuantity(snipe.tokenAmount)} ${symbol}</code>
 ⚡ <b>Routing Strategy:</b> <i>${escapeHtml(snipe.routePlan || 'Jupiter v6 Aggregator')}</i>
 🔗 <b>Transaction Receipt:</b> <a href="${explorerUrl}">${snipe.signature.slice(0, 16)}...</a>
 
-💡 <i>Auto-snipe settings can be tuned with <code>/snipe &lt;amount&gt;</code> or toggled via <code>/autosnipe</code></i>
+💡 <i>Auto-snipe volume can be changed via <code>/tradesize</code> or toggled via <code>/autosnipe</code></i>
 `.trim();
 
   if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
@@ -303,16 +313,29 @@ export async function dispatchSnipeSellNotification(
   const symbol = snipe.tokenSymbol || 'TOKEN';
   const dexscreenerUrl = `https://dexscreener.com/solana/${snipe.tokenMint}`;
 
+  let pnlLine = '';
+  if (snipe.grossProfitSol !== undefined) {
+    if (snipe.isProfitable) {
+      pnlLine = `\n📈 <b>Gross Profit:</b> <code>+${snipe.grossProfitSol.toFixed(4)} SOL</code>` +
+                `\n🧾 <b>Bot Fee (15% on Profit):</b> <code>-${(snipe.profitFeeSol || 0).toFixed(4)} SOL</code>` +
+                `\n💵 <b>Net SOL Credited:</b> <code>+${snipe.solAmount.toFixed(4)} SOL</code>`;
+    } else {
+      pnlLine = `\n🩸 <b>Outcome:</b> <code>${snipe.grossProfitSol.toFixed(4)} SOL</code>` +
+                `\n🧾 <b>Profit Fee:</b> <code>0.00 SOL</code> (0% on losses)` +
+                `\n💵 <b>Capital Preserved:</b> <code>+${snipe.solAmount.toFixed(4)} SOL</code>`;
+    }
+  }
+
   const message = `
 🚨 <b>[AI AUTO-SELL EXECUTED]</b>
 
 🪙 <b>Sold Token:</b> <a href="${dexscreenerUrl}"><b>$${escapeHtml(symbol)}</b></a> (<code>${snipe.tokenMint.slice(0, 6)}...${snipe.tokenMint.slice(-4)}</code>)
-💰 <b>SOL Reclaimed:</b> <code>+${snipe.solAmount.toFixed(3)} SOL</code>
+💰 <b>SOL Reclaimed:</b> <code>+${snipe.solAmount.toFixed(4)} SOL</code>${pnlLine}
 📦 <b>Quantity Exited:</b> <code>${formatTokenQuantity(snipe.tokenAmount)} ${symbol}</code>
 ⚡ <b>Routing Strategy:</b> <i>${escapeHtml(snipe.routePlan || 'Jupiter Instant Take-Profit Exit')}</i>
 🔗 <b>Transaction Receipt:</b> <a href="${explorerUrl}">${snipe.signature.slice(0, 16)}...</a>
 
-💡 <i>AI detected smart-money dump/exit signal and automatically sold to protect capital!</i>
+💡 <i>Fee Rule: 15% applied to net profits on profitable exits. 0% extra fee on losing trades.</i>
 `.trim();
 
   if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {
@@ -696,6 +719,7 @@ export async function sendUserWalletDashboard(
 
   const statusEmoji = pref.autoSnipeEnabled ? '🟢 <b>ACTIVE</b>' : '🔴 <b>DISABLED</b>';
   const walletDisplay = walletAddr ? `<code>${walletAddr}</code>` : '<i>Not Connected (Click button below)</i>';
+  const currentTradeSize = (pref.fixedTradeSizeUsd ? pref.fixedTradeSizeUsd : 10.0).toFixed(2);
 
   let msg = `
 💼 <b>SNIPER WALLET DASHBOARD</b>
@@ -703,8 +727,13 @@ export async function sendUserWalletDashboard(
 🔑 <b>Wallet:</b> ${walletDisplay}
 💰 <b>Balance:</b> <code>${solBal.toFixed(4)} SOL</code>
 ⚡ <b>Auto-Snipe:</b> ${statusEmoji}
-💵 <b>Trade Size:</b> <b>$10.00 USD</b> (Universal locked rule)
+💵 <b>Trade Allocation:</b> <b>$${currentTradeSize} USD</b> per trade
 🛡️ <b>Strategy:</b> 2X De-Risk (Sell 50%) ➔ Infinite Trend Runner
+💳 <b>Bot Fee Structure:</b>
+  • 1% fee on every executed trade
+  • 15% fee on profit when trade exits in profit
+  • 0% fee on losing trades (only entry fee incurred)
+📢 <b>Bankroll Requirement:</b> Minimum deposit of $1,000 required for optimal operation
 `.trim();
 
   if (walletAddr) {
@@ -724,6 +753,9 @@ export async function sendUserWalletDashboard(
       pref.autoSnipeEnabled
         ? { text: '🔴 Turn Auto-Snipe OFF', callback_data: 'snipe_disable' }
         : { text: '🟢 Turn Auto-Snipe ON', callback_data: 'snipe_enable' },
+    ]);
+    inlineKeyboard.push([
+      { text: `💵 Set Trade Volume ($${currentTradeSize})`, callback_data: 'cmd_tradesize' },
     ]);
     inlineKeyboard.push([
       { text: '✨ Generate New Burner', callback_data: 'wallet_generate_burner' },
@@ -755,6 +787,92 @@ export async function sendUserWalletDashboard(
     parse_mode: 'HTML',
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
+/**
+ * Builds the interactive keyboard with discrete trade volume amounts:
+ * $10, $15, $20, $30, $40, $45, or $50 USD
+ */
+export function buildTradeSizeKeyboard(currentSize: number = 10): any {
+  const options = [10, 15, 20, 30, 40, 45, 50];
+  const row1 = options.slice(0, 3).map((amt) => ({
+    text: amt === currentSize ? `✅ $${amt}` : `$${amt}`,
+    callback_data: `set_tradesize_${amt}`,
+  }));
+  const row2 = options.slice(3, 6).map((amt) => ({
+    text: amt === currentSize ? `✅ $${amt}` : `$${amt}`,
+    callback_data: `set_tradesize_${amt}`,
+  }));
+  const row3 = options.slice(6).map((amt) => ({
+    text: amt === currentSize ? `✅ $${amt}` : `$${amt}`,
+    callback_data: `set_tradesize_${amt}`,
+  }));
+
+  return {
+    inline_keyboard: [
+      row1,
+      row2,
+      row3,
+      [
+        { text: '⚙️ Auto-Snipe Config', callback_data: 'cmd_autosnipe' },
+        { text: '💼 Wallet Dashboard', callback_data: 'cmd_wallet' },
+      ],
+      [
+        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+      ],
+    ],
+  };
+}
+
+/**
+ * Sends or edits the trade volume selection menu
+ */
+export async function sendTradeSizeSelectionMenu(
+  chatId: number | string,
+  userId: string,
+  messageIdToEdit?: number
+): Promise<void> {
+  const pref = await getUserPreferences(userId);
+  const currentSize = pref.fixedTradeSizeUsd || 10;
+  const keyboard = buildTradeSizeKeyboard(currentSize);
+
+  const text = `
+⚙️ <b>DEFINE TRADING VOLUME ALLOCATION</b>
+
+Select the trade volume allocated to each bot transaction from the authorized discrete amounts:
+👉 <b>$10, $15, $20, $30, $40, $45, or $50 USD</b>
+
+Current Allocation: <b>$${currentSize.toFixed(2)} USD</b>
+
+🛡️ <b>FEE STRUCTURE:</b>
+• <b>1% Execution Fee:</b> Applied to every trade executed by the bot.
+• <b>15% Profit Fee:</b> Applied to the profit generated by any trade that is exited in a profitable state (levied regardless of whether the user manually initiates the exit, e.g. via "exit all", provided the trade is in profit).
+• <b>0% Extra on Losses:</b> No additional percentage-based fee is charged on losing trades; the only cost incurred for such trades is the initial 1% entry fee.
+
+📢 <b>MINIMUM DEPOSIT REQUIREMENT:</b>
+A <b>minimum deposit of $1,000</b> (in SOL) is required for the optimal operation of the bot.
+
+👇 <i>Tap a discrete amount below to update your allocation:</i>
+  `.trim();
+
+  if (messageIdToEdit) {
+    try {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageIdToEdit,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: keyboard,
+      });
+      return;
+    } catch {}
+  }
+
+  await bot.sendMessage(chatId, text, {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: keyboard,
   });
 }
 
@@ -847,6 +965,7 @@ export function initTelegramCommands(): void {
   // Register native Telegram Command Menu
   bot.setMyCommands([
     { command: 'start', description: '🚀 Main Menu & Dashboard' },
+    { command: 'tradesize', description: '💵 Set Trade Volume ($10, $15, $20, $30, $40, $45, $50)' },
     { command: 'portfolio', description: '💼 $1,000 Alpha Portfolio & Live PnL' },
     { command: 'top', description: '🏆 Daily Top Gainers & 5X-20X Hall of Fame' },
     { command: 'flops', description: '📉 Daily Flopped Coins & Dips (-50%+)' },
@@ -886,7 +1005,7 @@ export function initTelegramCommands(): void {
   // Initialize the 6-Hour Group Pinned Dashboard Scheduler
   initGroupPinnedDashboardScheduler();
 
-  // 1. New Group Members Listener: Send Transient 60s Welcome Explaining $10 Rule
+  // 1. New Group Members Listener: Send Transient 60s Welcome Explaining Core Operating Principles & Fees
   bot.on('new_chat_members', async (msg) => {
     const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
     if (String(msg.chat.id) !== String(groupChatId)) return;
@@ -899,12 +1018,19 @@ export function initTelegramCommands(): void {
       const welcomeText = `
 👋 <b>Welcome to the Alpha Radar, ${escapeHtml(name)}!</b>
 
-⚡ <b>Core Trading Rule:</b>
-• <b>Fixed Trade Size:</b> Strictly <b>$10.00 USD</b> per trade (+ network gas).
-• <b>The Strategy:</b> At 2X, the bot sells 50% to recover your $10 principal risk-free; the remaining bag rides trends indefinitely.
-• <b>Recommended Deposit:</b> 0.5 – 1.0 SOL in your sniper wallet covers 8–15 gem plays.
+📢 <b>NOTICE FOR NEW USERS & CAPITAL REQUIREMENTS:</b>
+• <b>Minimum Deposit Requirement:</b> A <b>minimum deposit of $1,000</b> (in SOL) is required for the optimal operation of the bot to ensure proper multi-trade diversification and runway.
 
-👇 <i>Tap below to securely connect your wallet in private:</i>
+🛡️ <b>CORE OPERATING PRINCIPLES:</b>
+• <b>Customizable Trading Volume:</b> Define your allocated per-trade volume from discrete amounts: <b>$10, $15, $20, $30, $40, $45, or $50 USD</b> (default: $10.00).
+• <b>Transparent Fee Structure:</b>
+  - <b>1% Execution Fee:</b> Applied to every trade executed by the bot.
+  - <b>15% Profit Fee:</b> Applied to the profit generated by any trade exited in profit (levied whether exited autonomously or manually via "exit all").
+  - <b>0% Extra on Losses:</b> No additional percentage-based fee is charged on losing trades (only the initial 1% entry fee is incurred).
+• <b>Infinite Trend Rider:</b> At 2X, the bot sells 50% to recover initial capital risk-free; remaining tokens ride parabolic trends indefinitely.
+
+📌 <i>Be sure to review the pinned Operating Guide at the top of the group!</i>
+👇 <i>Tap below to securely set your volume and connect your wallet in private DM:</i>
       `.trim();
 
       try {
@@ -912,6 +1038,7 @@ export function initTelegramCommands(): void {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
+              [{ text: '⚙️ Set Trade Volume ($10-$50)', url: `https://t.me/${botUser}?start=tradesize` }],
               [{ text: '🔐 Connect Sniper Wallet (Private DM)', url: `https://t.me/${botUser}?start=connect` }],
             ],
           },
@@ -1000,11 +1127,14 @@ export function initTelegramCommands(): void {
       } catch {}
     }
 
+    const currentTradeSize = pref.fixedTradeSizeUsd || 10.0;
     const welcome = `
 ⚡ <b>Solana Trading Bot</b>
 ${capitalLine}
 • <b>Auto-Snipe:</b> ${snipeBadge}
-• <b>Allocation:</b> $10.00 max per trade (+ gas)
+• <b>Trade Volume:</b> <b>$${currentTradeSize.toFixed(2)} USD</b> / trade (Options: $10, $15, $20, $30, $40, $45, $50)
+• <b>Fee Structure:</b> 1% entry fee | 15% profit fee on win | 0% extra on loss
+• <b>Optimal Capital:</b> $1,000.00 USD minimum recommended for optimal diversified operation
 • <b>Strategy:</b> Infinite Trend Rider (2X de-risk ➔ Moonbag)
 • <b>Coins Alerted Today:</b> <code>${dailyCoinCount}</code>
 
@@ -1029,11 +1159,14 @@ ${capitalLine}
         { text: '💼 My Positions', callback_data: 'cmd_positions' },
       ],
       [
+        { text: `💵 Set Trade Volume ($${currentTradeSize})`, callback_data: 'cmd_tradesize' },
         { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
-        { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
       ],
       [
+        { text: '💰 Wallet & Solscan', callback_data: 'cmd_wallet' },
         { text: '🧠 Loss Learner', callback_data: 'cmd_learner' },
+      ],
+      [
         { text: '❓ How It Works', callback_data: 'cmd_help' },
       ],
     ];
@@ -1075,6 +1208,11 @@ ${capitalLine}
 
     if (payload === 'connect') {
       await sendUserWalletDashboard(msg.chat.id, userId);
+      return;
+    }
+
+    if (payload === 'tradesize' || payload === 'volume' || payload === 'allocation') {
+      await sendTradeSizeSelectionMenu(msg.chat.id, userId);
       return;
     }
 
@@ -1174,15 +1312,27 @@ ${capitalLine}
       const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
       const snipeExit = await exitAllSnipedPositions();
 
-      let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n`;
-      if (paperExit.count > 0 || snipeExit.count > 0) {
-        const totalCount = paperExit.count + snipeExit.count;
-        exitMsg += `• Closed: <b>${totalCount} trade(s)</b>\n`;
+      let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n\n`;
+      const totalCount = paperExit.count + snipeExit.count;
+      if (totalCount > 0) {
+        const totalProfitable = paperExit.profitableCount + snipeExit.profitableCount;
+        const totalLosing = paperExit.losingCount + snipeExit.losingCount;
+
+        exitMsg += `• <b>Total Closed:</b> <b>${totalCount} trade(s)</b>\n`;
+        exitMsg += `• <b>Profitable Exits:</b> <b>${totalProfitable}</b> (15% profit fee applied)\n`;
+        if (paperExit.totalProfitFeesUsd > 0) {
+          exitMsg += `  └ <i>Model Profit Fees: -$${paperExit.totalProfitFeesUsd.toFixed(2)} USD</i>\n`;
+        }
+        if (snipeExit.totalProfitFeeSol > 0) {
+          exitMsg += `  └ <i>Live Profit Fees: -${snipeExit.totalProfitFeeSol.toFixed(4)} SOL</i>\n`;
+        }
+        exitMsg += `• <b>Losing Exits:</b> <b>${totalLosing}</b> (0% fee charged; 1% entry fee only)\n\n`;
+
         if (paperExit.totalReturnedUsd > 0) {
-          exitMsg += `• Returned to Cash: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
+          exitMsg += `💰 <b>Returned to Cash:</b> <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
         }
         if (snipeExit.totalSol > 0) {
-          exitMsg += `• Returned SOL: <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
+          exitMsg += `💰 <b>Returned SOL:</b> <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
         }
         exitMsg += `💼 <b>Liquid Cash:</b> <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`;
       } else {
@@ -1222,10 +1372,30 @@ ${capitalLine}
         const { exitAllPaperPositions } = await import('./paperTrading.js');
         const { exitAllSnipedPositions } = await import('./sniper.js');
         const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
-        await exitAllSnipedPositions();
+        const snipeExit = await exitAllSnipedPositions();
+
+        let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n\n`;
+        const totalCount = paperExit.count + snipeExit.count;
+        if (totalCount > 0) {
+          const totalProfitable = paperExit.profitableCount + snipeExit.profitableCount;
+          const totalLosing = paperExit.losingCount + snipeExit.losingCount;
+          exitMsg += `• <b>Total Closed:</b> <b>${totalCount} trade(s)</b>\n`;
+          exitMsg += `• <b>Profitable Exits:</b> <b>${totalProfitable}</b> (15% profit fee applied)\n`;
+          exitMsg += `• <b>Losing Exits:</b> <b>${totalLosing}</b> (0% fee charged; 1% entry fee only)\n`;
+          if (paperExit.totalReturnedUsd > 0) {
+            exitMsg += `• <b>Returned to Cash:</b> <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
+          }
+          if (snipeExit.totalSol > 0) {
+            exitMsg += `• <b>Returned SOL:</b> <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
+          }
+          exitMsg += `💼 <b>Liquid Cash:</b> <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`;
+        } else {
+          exitMsg += `ℹ️ <i>No open trades. Cash balance: $${paperExit.newLiquidCashUsd.toFixed(2)} USD</i>`;
+        }
+
         await bot.sendMessage(
           msg.chat.id,
-          `🚨 <b>ALL TRADES EXITED</b>\n• Closed: <b>${paperExit.count} trade(s)</b>\n• Returned: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n💼 Cash: <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`,
+          exitMsg,
           { parse_mode: 'HTML' }
         );
       } catch (err: any) {
@@ -1610,6 +1780,60 @@ ${flagsText}
     }
   });
 
+  // /tradesize, /volume, or /allocation [10|15|20|30|40|45|50]
+  onTextCmd(/\/tradesize(?:\s+(\S+))?|\/volume(?:\s+(\S+))?|\/allocation(?:\s+(\S+))?/i, async (msg, match) => {
+    const userId = String(msg.from?.id || msg.chat.id);
+    const rawVal = (match?.[1] || match?.[2] || match?.[3])?.trim();
+
+    if (!rawVal) {
+      await sendTradeSizeSelectionMenu(msg.chat.id, userId);
+      return;
+    }
+
+    const cleanNum = parseInt(rawVal.replace(/^\$/, ''), 10);
+    if (!isValidTradeSizeUsd(cleanNum)) {
+      const pref = await getUserPreferences(userId);
+      await bot.sendMessage(
+        msg.chat.id,
+        `⚠️ <b>Invalid Trade Volume: "${escapeHtml(rawVal)}"</b>\n\n` +
+        `Users may only allocate from the authorized discrete amounts:\n` +
+        `👉 <b>$10, $15, $20, $30, $40, $45, or $50 USD</b>\n\n` +
+        `<i>Tap an option below:</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: buildTradeSizeKeyboard(pref.fixedTradeSizeUsd || 10),
+        }
+      );
+      return;
+    }
+
+    await setUserAutoSnipeConfig(userId, { fixedTradeSizeUsd: cleanNum });
+    await bot.sendMessage(
+      msg.chat.id,
+      `✅ <b>TRADING VOLUME ALLOCATION UPDATED!</b>\n\n` +
+      `• <b>Per-Trade Volume:</b> <b>$${cleanNum.toFixed(2)} USD</b>\n` +
+      `• <b>Execution Fee:</b> 1% applied to every executed trade\n` +
+      `• <b>Profit Fee:</b> 15% applied to profit on winning trades (including manual exits/exit all)\n` +
+      `• <b>Losing Trades:</b> 0% fee (only the initial 1% entry fee)\n` +
+      `• <b>Recommended Minimum Deposit:</b> $1,000 for optimal operation\n\n` +
+      `<i>Your bot will deploy $${cleanNum.toFixed(2)} per position on future trades!</i>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '⚙️ Change Volume', callback_data: 'cmd_tradesize' },
+              { text: '💼 Wallet Dashboard', callback_data: 'cmd_wallet' },
+            ],
+            [
+              { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+            ],
+          ],
+        },
+      }
+    );
+  });
+
   // /scan or "⚡ Scan Now"
   onTextCmd(/\/scan|⚡ Scan Now|Scan/i, async (msg) => {
     await bot.sendMessage(msg.chat.id, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
@@ -1752,16 +1976,25 @@ ${flagsText}
   onTextCmd(/\/help|❓ Help/i, async (msg) => {
     await bot.sendMessage(
       msg.chat.id,
-      `📖 <b>SOLANA BOT GUIDE</b>\n\n` +
-      `• <b>Radar:</b> Scans early breakout gems with strict RugCheck security.\n` +
-      `• <b>Money Management:</b> $10.00 base USD cap per trade (+ gas).\n` +
-      `• <b>Trend Rider:</b> 2X de-risks initial capital ➔ Moonbag rides trends indefinitely.\n` +
+      `📖 <b>SOLANA BOT GUIDE & OPERATING PRINCIPLES</b>\n\n` +
+      `📢 <b>CAPITAL REQUIREMENT:</b>\n` +
+      `• A <b>minimum deposit of $1,000</b> (in SOL) is required for the optimal operation of the bot.\n\n` +
+      `🛡️ <b>CORE OPERATING PRINCIPLES:</b>\n` +
+      `• <b>Customizable Trade Volume:</b> Users can allocate per-trade volume from discrete amounts: <b>$10, $15, $20, $30, $40, $45, or $50 USD</b>.\n` +
+      `• <b>Fee Structure:</b>\n` +
+      `  - <b>1% Execution Fee:</b> Applied to every trade executed by the bot.\n` +
+      `  - <b>15% Profit Fee:</b> Applied to profit on winning trades (including manual exits/exit all).\n` +
+      `  - <b>0% Extra on Losses:</b> Only the initial 1% entry fee is incurred.\n` +
+      `• <b>Radar & Safety:</b> Scans breakout gems &lt;2m old with strict RugCheck security (100% LP burnt, mint & freeze revoked).\n` +
+      `• <b>Trend Rider:</b> At 2X, the bot sells 50% to recover initial capital risk-free; remainder rides moonbag runners.\n` +
       `• <b>Exit Controls:</b> Use <code>/exitall</code> or <code>/exit &lt;mint&gt;</code> anytime to return money to cash.\n\n` +
       `<b>Quick Commands:</b>\n` +
+      `• /tradesize — Set Volume ($10, $15, $20, $30, $40, $45, $50)\n` +
       `• /portfolio — Live $1,000 Alpha Portfolio\n` +
       `• /positions — Active Trades & Exits\n` +
       `• /exitall — Sell All & Cash Out\n` +
-      `• /autosnipe — Automated Sniping`,
+      `• /autosnipe — Automated Sniping Settings\n` +
+      `• /wallet — Sniper Wallet Dashboard`,
       { parse_mode: 'HTML' }
     );
   });
@@ -2112,6 +2345,19 @@ ${flagsText}
 
       if (data === 'cmd_start') {
         await sendWelcomeDashboard(chatId);
+      } else if (data === 'cmd_tradesize') {
+        await sendTradeSizeSelectionMenu(chatId, userId, msgId);
+      } else if (data === 'cmd_autosnipe') {
+        await handleSnipeStatus(chatId, userId, msgId);
+      } else if (data?.startsWith('set_tradesize_')) {
+        const amt = parseInt(data.replace('set_tradesize_', ''), 10);
+        if (isValidTradeSizeUsd(amt)) {
+          await setUserAutoSnipeConfig(userId, { fixedTradeSizeUsd: amt });
+          try {
+            await bot.answerCallbackQuery(query.id, { text: `✅ Trade volume updated to $${amt}!`, show_alert: false });
+          } catch {}
+          await sendTradeSizeSelectionMenu(chatId, userId, msgId);
+        }
       } else if (data === 'cmd_paper_portfolio') {
         await handlePaperPortfolioCommand(chatId, userId);
       } else if (data === 'cmd_view_alpha_benchmark') {
@@ -2257,7 +2503,17 @@ ${flagsText}
           },
         });
       } else if (data === 'cmd_help') {
-        await bot.sendMessage(chatId, `📖 <b>Quick Guide:</b>\n• Continuous radar scans every 35s\n• Strict LP burnt & revoked authority audit\n• Instant +50% to 79X pump tracking & alerts\n• 1-Tap Snipe buttons on every alert card\n• <code>/predict</code> for AI predicted coins to buy\n• <code>/audit &lt;token&gt;</code> for reasons to buy or avoid`, { parse_mode: 'HTML' });
+        await bot.sendMessage(
+          chatId,
+          `📖 <b>Quick Bot Guide & Operating Principles:</b>\n` +
+          `• <b>Optimal Capital:</b> Minimum deposit of $1,000 (in SOL) recommended for optimal operation\n` +
+          `• <b>Customizable Volume:</b> Select $10, $15, $20, $30, $40, $45, or $50 per trade (/tradesize)\n` +
+          `• <b>Transparent Fees:</b> 1% entry fee • 15% profit fee on winning trades (including manual exits) • 0% fee on loss\n` +
+          `• <b>Continuous Radar:</b> Scans breakout gems every 35s with strict RugCheck security\n` +
+          `• <b>Trend Rider:</b> At 2X, sells 50% to recover initial capital risk-free; moonbag rides uncapped\n` +
+          `• <b>Commands:</b> <code>/tradesize</code>, <code>/portfolio</code>, <code>/positions</code>, <code>/exitall</code>, <code>/predict</code>`,
+          { parse_mode: 'HTML' }
+        );
       } else if (data === 'cmd_early') {
         await handleEarlyTrendingCommand(chatId);
       } else if (data === 'cmd_top') {
@@ -2438,15 +2694,27 @@ ${flagsText}
         const paperExit = await exitAllPaperPositions('MANUAL_EXIT_ALL');
         const snipeExit = await exitAllSnipedPositions();
 
-        let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n`;
-        if (paperExit.count > 0 || snipeExit.count > 0) {
-          const totalCount = paperExit.count + snipeExit.count;
-          exitMsg += `• Closed: <b>${totalCount} trade(s)</b>\n`;
+        let exitMsg = `🚨 <b>ALL TRADES EXITED</b>\n\n`;
+        const totalCount = paperExit.count + snipeExit.count;
+        if (totalCount > 0) {
+          const totalProfitable = paperExit.profitableCount + snipeExit.profitableCount;
+          const totalLosing = paperExit.losingCount + snipeExit.losingCount;
+
+          exitMsg += `• <b>Total Closed:</b> <b>${totalCount} trade(s)</b>\n`;
+          exitMsg += `• <b>Profitable Exits:</b> <b>${totalProfitable}</b> (15% profit fee applied)\n`;
+          if (paperExit.totalProfitFeesUsd > 0) {
+            exitMsg += `  └ <i>Model Profit Fees: -$${paperExit.totalProfitFeesUsd.toFixed(2)} USD</i>\n`;
+          }
+          if (snipeExit.totalProfitFeeSol > 0) {
+            exitMsg += `  └ <i>Live Profit Fees: -${snipeExit.totalProfitFeeSol.toFixed(4)} SOL</i>\n`;
+          }
+          exitMsg += `• <b>Losing Exits:</b> <b>${totalLosing}</b> (0% fee charged; 1% entry fee only)\n\n`;
+
           if (paperExit.totalReturnedUsd > 0) {
-            exitMsg += `• Returned to Cash: <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
+            exitMsg += `💰 <b>Returned to Cash:</b> <b>+$${paperExit.totalReturnedUsd.toFixed(2)} USD</b>\n`;
           }
           if (snipeExit.totalSol > 0) {
-            exitMsg += `• Returned SOL: <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
+            exitMsg += `💰 <b>Returned SOL:</b> <b>+${snipeExit.totalSol.toFixed(3)} SOL</b>\n`;
           }
           exitMsg += `💼 <b>Liquid Cash:</b> <code>$${paperExit.newLiquidCashUsd.toFixed(2)} USD</code>`;
         } else {
@@ -3287,15 +3555,22 @@ async function handleSnipeStatus(chatId: number | string, userId: string, messag
   const statusEmoji = pref.autoSnipeEnabled ? '🟢 ACTIVE' : '🔴 DISABLED';
   const walletAddr = pref.solanaWallet || env.USER_SOLANA_WALLET || 'Not Connected';
   const walletTrunc = walletAddr.length > 10 ? `${walletAddr.slice(0, 4)}...${walletAddr.slice(-4)}` : walletAddr;
+  const currentTradeSize = pref.fixedTradeSizeUsd || 10.0;
 
   const message = `
 🎯 <b>AI AUTO-SNIPER DASHBOARD</b>
 
 Status: <b>${statusEmoji}</b>
-Allocation: <b>$10.00 USD</b> (Universal fixed rule)
+Volume Allocation: <b>$${currentTradeSize.toFixed(2)} USD</b> (Discrete: $10, $15, $20, $30, $40, $45, $50)
 Slippage: <code>${pref.maxSlippagePercent}%</code> • Priority Gas: <code>${((pref.priorityFeeLamports || 100000) / 1e9).toFixed(5)} SOL</code>
 Strategy: <b>2X De-Risk (Sell 50%) ➔ Infinite Trend Runner</b>
 Wallet: <code>${walletTrunc}</code>
+
+🛡️ <b>FEE STRUCTURE & CAPITAL REQUIREMENTS:</b>
+• <b>1% Execution Fee:</b> Applied to every trade executed by the bot.
+• <b>15% Profit Fee:</b> Applied to profit on winning trades (including manual exits/exit all).
+• <b>0% Extra on Losses:</b> Only the initial 1% entry fee is incurred.
+• <b>Optimal Capital:</b> <b>$1,000.00 USD minimum deposit</b> recommended for optimal bot operation.
   `.trim();
 
   const keyboard = [
@@ -3305,14 +3580,15 @@ Wallet: <code>${walletTrunc}</code>
         : { text: '🟢 Turn Auto-Snipe ON', callback_data: 'snipe_enable' },
     ],
     [
+      { text: `💵 Set Trade Volume ($${currentTradeSize})`, callback_data: 'cmd_tradesize' },
       { text: '💼 Sniper Wallet Dashboard', callback_data: 'cmd_wallet' },
+    ],
+    [
       { text: '💸 Withdraw SOL', callback_data: 'wallet_withdraw' },
-    ],
-    [
       { text: '💼 My Positions', callback_data: 'cmd_positions' },
-      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
     ],
     [
+      { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ],
   ];
