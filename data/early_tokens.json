@@ -37400,8 +37400,8 @@
     "entryPriceUsd": 0.0000204,
     "entryMarketCap": 20409.38,
     "peakPriceUsd": 0.0000204,
-    "lowestPriceUsd": 0.000004168,
-    "lastAlertedPriceUsd": 0.000004168,
+    "lowestPriceUsd": 0.000002798,
+    "lastAlertedPriceUsd": 0.000002798,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -37410,7 +37410,7 @@
     "dailyQuotaIndex": 18,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:13:32.282Z",
-    "updatedAt": "2026-10-29T14:15:18.114Z"
+    "updatedAt": "2026-11-04T14:56:49.940Z"
   },
   {
     "id": "early_1793276091790_7WjF",
@@ -37550,17 +37550,17 @@
     "entryPriceUsd": 0.00001922,
     "entryMarketCap": 19220.13,
     "peakPriceUsd": 0.00002325,
-    "lowestPriceUsd": 0.00001193,
-    "lastAlertedPriceUsd": 0.00001193,
+    "lowestPriceUsd": 0.000003144,
+    "lastAlertedPriceUsd": 0.000003144,
     "lastMilestonePct": 0,
-    "lastDipMilestonePct": 0,
+    "lastDipMilestonePct": -50,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
     "whaleSolAmount": 2.5,
     "dailyQuotaIndex": 23,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:26:11.382Z",
-    "updatedAt": "2026-10-29T13:26:12.206Z"
+    "updatedAt": "2026-11-04T14:56:48.336Z"
   },
   {
     "id": "early_1793276772101_7fyv",
@@ -37732,8 +37732,8 @@
     "entryPriceUsd": 0.000009895,
     "entryMarketCap": 9451,
     "peakPriceUsd": 0.00001215,
-    "lowestPriceUsd": 0.000004504,
-    "lastAlertedPriceUsd": 0.000004504,
+    "lowestPriceUsd": 0.000002037,
+    "lastAlertedPriceUsd": 0.000002037,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -37742,7 +37742,7 @@
     "dailyQuotaIndex": 31,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:31:10.335Z",
-    "updatedAt": "2026-10-29T14:14:42.678Z"
+    "updatedAt": "2026-11-04T14:56:46.189Z"
   },
   {
     "id": "early_1793277129337_AVCo",
@@ -37882,8 +37882,8 @@
     "entryPriceUsd": 0.0001062,
     "entryMarketCap": 212465,
     "peakPriceUsd": 0.0001666,
-    "lowestPriceUsd": 8.267e-8,
-    "lastAlertedPriceUsd": 8.267e-8,
+    "lowestPriceUsd": 2.588e-8,
+    "lastAlertedPriceUsd": 2.588e-8,
     "lastMilestonePct": 50,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -37892,7 +37892,7 @@
     "dailyQuotaIndex": 40,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:36:21.402Z",
-    "updatedAt": "2026-10-29T13:43:26.222Z"
+    "updatedAt": "2026-11-04T14:56:44.113Z"
   },
   {
     "id": "early_1793277570698_CxFt",
@@ -38002,8 +38002,8 @@
     "entryPriceUsd": 0.00003756,
     "entryMarketCap": 37561.17,
     "peakPriceUsd": 0.0000934,
-    "lowestPriceUsd": 0.00000746,
-    "lastAlertedPriceUsd": 0.00000746,
+    "lowestPriceUsd": 0.000002623,
+    "lastAlertedPriceUsd": 0.000002623,
     "lastMilestonePct": 100,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38012,7 +38012,7 @@
     "dailyQuotaIndex": 47,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:49:26.390Z",
-    "updatedAt": "2026-10-29T14:10:16.938Z"
+    "updatedAt": "2026-11-04T14:56:42.357Z"
   },
   {
     "id": "early_1793278174327_ANdP",
@@ -38092,8 +38092,8 @@
     "entryPriceUsd": 0.0000431,
     "entryMarketCap": 43102,
     "peakPriceUsd": 0.0000808,
-    "lowestPriceUsd": 0.00003457,
-    "lastAlertedPriceUsd": 0.00003457,
+    "lowestPriceUsd": 0.000007251,
+    "lastAlertedPriceUsd": 0.000007251,
     "lastMilestonePct": 50,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38102,7 +38102,7 @@
     "dailyQuotaIndex": 50,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:52:17.849Z",
-    "updatedAt": "2026-10-29T13:59:17.793Z"
+    "updatedAt": "2026-11-04T15:15:58.712Z"
   },
   {
     "id": "early_1793278394153_D1rF",
@@ -38152,8 +38152,8 @@
     "entryPriceUsd": 0.00003789,
     "entryMarketCap": 37895,
     "peakPriceUsd": 0.00004341,
-    "lowestPriceUsd": 0.000004751,
-    "lastAlertedPriceUsd": 0.000004751,
+    "lowestPriceUsd": 0.000001954,
+    "lastAlertedPriceUsd": 0.000001954,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -38162,7 +38162,7 @@
     "dailyQuotaIndex": 53,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:56:01.425Z",
-    "updatedAt": "2026-10-29T14:02:19.889Z"
+    "updatedAt": "2026-11-04T14:56:38.568Z"
   },
   {
     "id": "early_1793278573759_4h5p",
@@ -38272,8 +38272,8 @@
     "entryPriceUsd": 0.00001087,
     "entryMarketCap": 10873.81,
     "peakPriceUsd": 0.00003109,
-    "lowestPriceUsd": 0.000009817,
-    "lastAlertedPriceUsd": 0.00003109,
+    "lowestPriceUsd": 0.000003179,
+    "lastAlertedPriceUsd": 0.000003179,
     "lastMilestonePct": 150,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38282,7 +38282,7 @@
     "dailyQuotaIndex": 59,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:05:42.181Z",
-    "updatedAt": "2026-10-29T13:50:30.851Z"
+    "updatedAt": "2026-11-04T14:56:36.688Z"
   },
   {
     "id": "early_1793279350050_J92G",
@@ -38302,8 +38302,8 @@
     "entryPriceUsd": 0.00004403,
     "entryMarketCap": 44033,
     "peakPriceUsd": 0.0001171,
-    "lowestPriceUsd": 0.00004218,
-    "lastAlertedPriceUsd": 0.0001171,
+    "lowestPriceUsd": 0.0000025,
+    "lastAlertedPriceUsd": 0.0000025,
     "lastMilestonePct": 150,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38312,7 +38312,7 @@
     "dailyQuotaIndex": 61,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:09:10.050Z",
-    "updatedAt": "2026-10-29T14:08:16.339Z"
+    "updatedAt": "2026-11-04T14:56:34.772Z"
   },
   {
     "id": "early_1793279473054_7e21",
@@ -38362,8 +38362,8 @@
     "entryPriceUsd": 0.00003376,
     "entryMarketCap": 33770,
     "peakPriceUsd": 0.00003727,
-    "lowestPriceUsd": 0.000006541,
-    "lastAlertedPriceUsd": 0.000006541,
+    "lowestPriceUsd": 0.000002981,
+    "lastAlertedPriceUsd": 0.000002981,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -38372,7 +38372,7 @@
     "dailyQuotaIndex": 66,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:21:34.274Z",
-    "updatedAt": "2026-10-29T13:48:46.086Z"
+    "updatedAt": "2026-11-04T14:56:32.845Z"
   },
   {
     "id": "early_1793280401700_Sdp2",
@@ -38392,8 +38392,8 @@
     "entryPriceUsd": 0.00002347,
     "entryMarketCap": 23470.31,
     "peakPriceUsd": 0.00005712,
-    "lowestPriceUsd": 0.00000741,
-    "lastAlertedPriceUsd": 0.00000741,
+    "lowestPriceUsd": 0.000005017,
+    "lastAlertedPriceUsd": 0.000005017,
     "lastMilestonePct": 100,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38402,7 +38402,7 @@
     "dailyQuotaIndex": 68,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:26:41.700Z",
-    "updatedAt": "2026-10-29T14:10:52.894Z"
+    "updatedAt": "2026-11-04T14:56:31.099Z"
   },
   {
     "id": "early_1793280572159_CB2E",
@@ -38484,8 +38484,8 @@
     "entryPriceUsd": 0.0000288,
     "entryMarketCap": 28078,
     "peakPriceUsd": 0.00003085,
-    "lowestPriceUsd": 0.00000221,
-    "lastAlertedPriceUsd": 0.00000221,
+    "lowestPriceUsd": 0.000001581,
+    "lastAlertedPriceUsd": 0.000001581,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -38494,7 +38494,7 @@
     "dailyQuotaIndex": 73,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:35:40.749Z",
-    "updatedAt": "2026-10-29T14:12:48.084Z"
+    "updatedAt": "2026-11-04T14:56:25.787Z"
   },
   {
     "id": "early_1793281032907_6kD6",
@@ -38514,8 +38514,8 @@
     "entryPriceUsd": 0.00008697,
     "entryMarketCap": 86974,
     "peakPriceUsd": 0.00008846,
-    "lowestPriceUsd": 0.000002348,
-    "lastAlertedPriceUsd": 0.000002348,
+    "lowestPriceUsd": 0.000002083,
+    "lastAlertedPriceUsd": 0.000002083,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -38524,7 +38524,7 @@
     "dailyQuotaIndex": 76,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:37:12.907Z",
-    "updatedAt": "2026-10-29T14:15:16.688Z"
+    "updatedAt": "2026-11-04T14:56:23.891Z"
   },
   {
     "id": "early_1793281017616_D5Vq",
@@ -38663,10 +38663,10 @@
     "devHoldingPct": 0,
     "entryPriceUsd": 0.00004627,
     "entryMarketCap": 46275,
-    "peakPriceUsd": 0.00005023,
+    "peakPriceUsd": 0.00008153,
     "lowestPriceUsd": 0.00003227,
-    "lastAlertedPriceUsd": 0.00005023,
-    "lastMilestonePct": 0,
+    "lastAlertedPriceUsd": 0.00008153,
+    "lastMilestonePct": 50,
     "lastDipMilestonePct": 0,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
@@ -38674,7 +38674,7 @@
     "dailyQuotaIndex": 86,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:43:16.381Z",
-    "updatedAt": "2026-10-29T13:59:51.641Z"
+    "updatedAt": "2026-11-04T14:56:22.231Z"
   },
   {
     "id": "early_1793281409054_ABkr",
@@ -38724,8 +38724,8 @@
     "entryPriceUsd": 0.00007094,
     "entryMarketCap": 70946,
     "peakPriceUsd": 0.00007273,
-    "lowestPriceUsd": 0.00001734,
-    "lastAlertedPriceUsd": 0.00001734,
+    "lowestPriceUsd": 0.000002513,
+    "lastAlertedPriceUsd": 0.000002513,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -38734,7 +38734,7 @@
     "dailyQuotaIndex": 88,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:44:41.099Z",
-    "updatedAt": "2026-10-29T14:05:38.304Z"
+    "updatedAt": "2026-11-04T14:56:20.063Z"
   },
   {
     "id": "early_1793281542767_9B5u",
@@ -38755,8 +38755,8 @@
     "entryPriceUsd": 0.0002077,
     "entryMarketCap": 207497,
     "peakPriceUsd": 0.0006606,
-    "lowestPriceUsd": 0.000002054,
-    "lastAlertedPriceUsd": 0.000002054,
+    "lowestPriceUsd": 0.000001974,
+    "lastAlertedPriceUsd": 0.000001974,
     "lastMilestonePct": 200,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38765,7 +38765,7 @@
     "dailyQuotaIndex": 89,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:45:42.767Z",
-    "updatedAt": "2026-10-29T14:13:33.599Z"
+    "updatedAt": "2026-11-04T15:19:00.109Z"
   },
   {
     "id": "early_1793281605804_8FDW",
@@ -38785,17 +38785,17 @@
     "entryPriceUsd": 0.00007182,
     "entryMarketCap": 71821,
     "peakPriceUsd": 0.0001537,
-    "lowestPriceUsd": 0.00007108,
-    "lastAlertedPriceUsd": 0.0001537,
+    "lowestPriceUsd": 0.000004921,
+    "lastAlertedPriceUsd": 0.000004921,
     "lastMilestonePct": 100,
-    "lastDipMilestonePct": 0,
+    "lastDipMilestonePct": -999,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
     "whaleSolAmount": 2.9,
     "dailyQuotaIndex": 91,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:46:45.804Z",
-    "updatedAt": "2026-10-29T13:50:59.702Z"
+    "updatedAt": "2026-11-04T14:56:18.449Z"
   },
   {
     "id": "early_1793281900141_Bcrm",
@@ -38815,17 +38815,17 @@
     "entryPriceUsd": 0.00003889,
     "entryMarketCap": 38895,
     "peakPriceUsd": 0.00004174,
-    "lowestPriceUsd": 0.0000237,
-    "lastAlertedPriceUsd": 0.0000237,
+    "lowestPriceUsd": 0.000002615,
+    "lastAlertedPriceUsd": 0.000002615,
     "lastMilestonePct": 0,
-    "lastDipMilestonePct": 0,
+    "lastDipMilestonePct": -50,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
     "whaleSolAmount": 2.5,
     "dailyQuotaIndex": 93,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:51:40.141Z",
-    "updatedAt": "2026-10-29T14:01:36.214Z"
+    "updatedAt": "2026-11-04T14:56:16.576Z"
   },
   {
     "id": "early_1793281951858_Bh9y",
@@ -38905,8 +38905,8 @@
     "entryPriceUsd": 0.00004037,
     "entryMarketCap": 40378,
     "peakPriceUsd": 0.0001047,
-    "lowestPriceUsd": 0.00004037,
-    "lastAlertedPriceUsd": 0.00005194,
+    "lowestPriceUsd": 0.000009627,
+    "lastAlertedPriceUsd": 0.000009627,
     "lastMilestonePct": 150,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38915,7 +38915,7 @@
     "dailyQuotaIndex": 97,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:59:02.532Z",
-    "updatedAt": "2026-10-29T14:13:32.639Z"
+    "updatedAt": "2026-11-04T14:56:12.658Z"
   },
   {
     "id": "early_1793282632784_6HnD",
@@ -38998,17 +38998,17 @@
     "entryPriceUsd": 0.00003949,
     "entryMarketCap": 39497,
     "peakPriceUsd": 0.00003949,
-    "lowestPriceUsd": 0.00002205,
-    "lastAlertedPriceUsd": 0.00002205,
+    "lowestPriceUsd": 0.000005723,
+    "lastAlertedPriceUsd": 0.000005723,
     "lastMilestonePct": 0,
-    "lastDipMilestonePct": 0,
+    "lastDipMilestonePct": -50,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
     "whaleSolAmount": 2.5,
     "dailyQuotaIndex": 102,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T14:07:15.925Z",
-    "updatedAt": "2026-10-29T14:15:12.455Z"
+    "updatedAt": "2026-11-04T15:12:56.796Z"
   },
   {
     "id": "early_1793282883982_5wsj",
@@ -39028,10 +39028,10 @@
     "xUrl": "https://x.com/stankonsf",
     "entryPriceUsd": 0.00008925,
     "entryMarketCap": 89256,
-    "peakPriceUsd": 0.00008939,
+    "peakPriceUsd": 0.0004241,
     "lowestPriceUsd": 0.00007795,
-    "lastAlertedPriceUsd": 0.00007795,
-    "lastMilestonePct": 0,
+    "lastAlertedPriceUsd": 0.0004241,
+    "lastMilestonePct": 350,
     "lastDipMilestonePct": 0,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
@@ -39039,7 +39039,7 @@
     "dailyQuotaIndex": 103,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T14:08:03.982Z",
-    "updatedAt": "2026-10-29T14:14:35.470Z"
+    "updatedAt": "2026-11-04T15:18:56.665Z"
   },
   {
     "id": "early_1793282953607_6tNE",
@@ -39090,8 +39090,8 @@
     "entryPriceUsd": 0.00002235,
     "entryMarketCap": 22350.64,
     "peakPriceUsd": 0.00002235,
-    "lowestPriceUsd": 0.00000552,
-    "lastAlertedPriceUsd": 0.00000552,
+    "lowestPriceUsd": 0.000002991,
+    "lastAlertedPriceUsd": 0.000002991,
     "lastMilestonePct": 0,
     "lastDipMilestonePct": -50,
     "status": "ACTIVE",
@@ -39100,7 +39100,7 @@
     "dailyQuotaIndex": 106,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T14:10:03.580Z",
-    "updatedAt": "2026-10-29T14:13:59.492Z"
+    "updatedAt": "2026-11-04T14:56:02.487Z"
   },
   {
     "id": "early_1793283307904_4ZWp",
@@ -39120,16 +39120,16 @@
     "entryPriceUsd": 0.00001542,
     "entryMarketCap": 15422,
     "peakPriceUsd": 0.00001542,
-    "lowestPriceUsd": 0.00001524,
-    "lastAlertedPriceUsd": 0.00001524,
+    "lowestPriceUsd": 0.000002404,
+    "lastAlertedPriceUsd": 0.000002404,
     "lastMilestonePct": 0,
-    "lastDipMilestonePct": 0,
+    "lastDipMilestonePct": -50,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
     "whaleSolAmount": 2.5,
     "dailyQuotaIndex": 109,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T14:15:07.905Z",
-    "updatedAt": "2026-10-29T14:15:11.777Z"
+    "updatedAt": "2026-11-04T14:56:00.846Z"
   }
 ]

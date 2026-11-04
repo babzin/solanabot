@@ -1174,8 +1174,8 @@ export function initTelegramCommands(): void {
     is_persistent: true,
   };
 
-  const sendWelcomeDashboard = async (chatId: number | string) => {
-    const userId = String(chatId);
+  const sendWelcomeDashboard = async (chatId: number | string, customUserId?: string) => {
+    const userId = customUserId || String(chatId);
     const pref = await getUserPreferences(userId);
     const { fetchLiveSolPrice } = await import('./paperTrading.js');
     const solPrice = await fetchLiveSolPrice();
@@ -2372,7 +2372,10 @@ ${flagsText}
       '⚡ scan now', '💎 daily coins', '🏆 top gainers', '📉 daily flops',
       '🗓️ weekly report', '🤖 ai co-pilot', '📈 price milestones', '💼 my positions',
       '⚙️ auto-snipe', '🟢 auto-snipe on', '🔴 auto-snipe off', '💰 wallet', '❓ help',
-      '🚨 exit all trades', 'exit all trades', 'exit all'
+      '🚨 exit all trades', 'exit all trades', 'exit all',
+      '🚀 /start', '🚀 start', '💼 $1,000 portfolio', '💼 $500 portfolio',
+      '💼 $1,000 paper', '💼 $500 paper', '💼 $100 paper', '💼 portfolio',
+      '💼 positions', '📊 admin analytics', '💼 set fee wallet'
     ];
     if (knownButtons.some((b) => b === text.toLowerCase())) return;
 
@@ -2621,10 +2624,13 @@ ${flagsText}
         return;
       }
 
-      await bot.answerCallbackQuery(query.id);
+      try {
+        await bot.answerCallbackQuery(query.id);
+      } catch {}
 
       if (data === 'cmd_start') {
-        await sendWelcomeDashboard(chatId);
+        adminAwaitingWalletInput.delete(userId);
+        await sendWelcomeDashboard(chatId, userId);
       } else if (data === 'cmd_tradesize') {
         await sendTradeSizeSelectionMenu(chatId, userId, msgId);
       } else if (data === 'cmd_autosnipe') {
@@ -2857,6 +2863,9 @@ ${flagsText}
           '🟢 <b>Auto-Snipe is now ENABLED!</b>\nYour deposited funds will be automatically used to snipe verified radar gems ($10.00 / entry).',
           { parse_mode: 'HTML' }
         );
+        if (msgId) {
+          await handleSnipeStatus(chatId, userId, msgId).catch(() => {});
+        }
       } else if (data === 'snipe_disable') {
         await setUserAutoSnipeConfig(userId, { autoSnipeEnabled: false });
         await bot.sendMessage(
@@ -2864,6 +2873,9 @@ ${flagsText}
           '⏸️ <b>Auto-Snipe is now DISABLED!</b>\nNo funds will be allocated for trading unless you manually initiate a transaction.',
           { parse_mode: 'HTML' }
         );
+        if (msgId) {
+          await handleSnipeStatus(chatId, userId, msgId).catch(() => {});
+        }
       } else if (data?.startsWith('snipe_set_')) {
         const amt = parseFloat(data.replace('snipe_set_', ''));
         if (!isNaN(amt)) {
@@ -3044,6 +3056,7 @@ ${flagsText}
           },
         });
       } else if (data === 'cmd_admin_analytics') {
+        adminAwaitingWalletInput.delete(userId);
         const isAdmin = await isGroupAdminOrOwner(chatId, userId);
         if (!isAdmin) {
           try {

@@ -12,6 +12,14 @@ export interface MembershipStatus {
  * Checks in real time whether a user is an active member of the designated Telegram group
  */
 export async function verifyGroupMembership(telegramUserId: string): Promise<MembershipStatus> {
+  const sUserId = String(telegramUserId);
+  const ownerId = String(env.TELEGRAM_CHAT_ID || '');
+
+  // Owner and configured admins are always verified with full access
+  if (sUserId && ownerId && (sUserId === ownerId || ownerId.split(',').map((x) => x.trim()).includes(sUserId))) {
+    return { isMember: true, status: 'creator' };
+  }
+
   // If no group chat ID configured or testing with dummy, allow access
   const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
   if (!groupChatId || groupChatId === '0' || env.TELEGRAM_BOT_TOKEN.includes('dummy')) {

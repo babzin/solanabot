@@ -6,9 +6,9 @@
   "entryFeesUsd": 0,
   "profitFeesSol": 0,
   "profitFeesUsd": 0,
-  "totalModelFeesUsd": 0,
-  "totalModelFeesSol": 0,
+  "totalModelFeesUsd": 4.3,
+  "totalModelFeesSol": 0.045316,
   "totalTransferredSol": 0,
   "transferHistory": [],
-  "lastUpdated": "2026-11-04T14:00:00.000Z"
+  "lastUpdated": "2026-11-04T14:58:39.441Z"
 }
