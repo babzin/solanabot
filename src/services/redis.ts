@@ -2,13 +2,29 @@ import { Redis } from 'ioredis';
 import { env } from '../config/env.js';
 import { RiskTier, ScoredWallet } from '../types/index.js';
 
+let redisLimitHit = false;
+
 export const redis = new Redis(env.REDIS_URL, {
-  maxRetriesPerRequest: null,
+  maxRetriesPerRequest: 1,
   enableReadyCheck: false,
+  connectTimeout: 5000,
+  lazyConnect: true,
   retryStrategy(times: number) {
-    const delay = Math.min(times * 50, 2000);
-    return delay;
+    if (redisLimitHit || times > 3) {
+      return null; // Stop reconnecting after 3 attempts or on quota error
+    }
+    return Math.min(times * 100, 2000);
   },
+});
+
+// Try to connect gracefully without unhandled rejection
+redis.connect().catch((err: Error) => {
+  if (err.message.includes('Fixed plan limits') || err.message.includes('quota') || err.message.includes('limit')) {
+    redisLimitHit = true;
+    console.warn('⚠️ [Redis Notice] Upstash database quota reached. Switching seamlessly to in-memory/disk store.');
+  } else {
+    console.warn('⚠️ [Redis Connect Notice]:', err.message);
+  }
 });
 
 redis.on('connect', () => {
@@ -16,7 +32,17 @@ redis.on('connect', () => {
 });
 
 redis.on('error', (err: Error) => {
-  console.error('⚠️ Redis error:', err.message);
+  if (err.message.includes('Fixed plan limits') || err.message.includes('quota') || err.message.includes('limit')) {
+    if (!redisLimitHit) {
+      redisLimitHit = true;
+      console.warn('⚠️ [Redis Notice] Upstash quota limit hit. Seamlessly falling back to local memory and disk JSON.');
+      try {
+        redis.disconnect();
+      } catch {}
+    }
+  } else {
+    console.warn('⚠️ Redis notice:', err.message);
+  }
 });
 
 // Keys
@@ -32,16 +58,31 @@ export const REDIS_KEYS = {
 
 // Fast-path in-memory set for 0ms lookup across hundreds of accounts in swap transactions
 const localTrackedSet = new Set<string>();
+const inMemorySignatures = new Set<string>();
 
 /**
  * Checks if a transaction signature was already ingested/processed.
  * Sets key with 24-hour expiration if new.
  */
 export async function isDuplicateSignature(signature: string): Promise<boolean> {
-  const key = REDIS_KEYS.SIG_DEDUP(signature);
-  const result = await redis.set(key, '1', 'EX', 86400, 'NX');
-  // NX returns 'OK' if the key was set (meaning it's new), or null if it already existed
-  return result === null;
+  if (inMemorySignatures.has(signature)) return true;
+  inMemorySignatures.add(signature);
+  if (inMemorySignatures.size > 10000) {
+    const first = inMemorySignatures.values().next().value;
+    if (first) inMemorySignatures.delete(first);
+  }
+
+  if (redisLimitHit || redis.status !== 'ready') {
+    return false;
+  }
+
+  try {
+    const key = REDIS_KEYS.SIG_DEDUP(signature);
+    const result = await redis.set(key, '1', 'EX', 86400, 'NX');
+    return result === null;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -53,32 +94,34 @@ export async function syncWalletsToRedis(wallets: ScoredWallet[]): Promise<void>
     localTrackedSet.add(w.address);
   }
 
-  const pipeline = redis.pipeline();
+  if (redisLimitHit || redis.status !== 'ready') return;
 
-  // Clear previous active sets
-  pipeline.del(REDIS_KEYS.WALLETS_ALL);
-  pipeline.del(REDIS_KEYS.WALLETS_SAFE);
-  pipeline.del(REDIS_KEYS.WALLETS_RISK);
+  try {
+    const pipeline = redis.pipeline();
 
-  for (const w of wallets) {
-    pipeline.sadd(REDIS_KEYS.WALLETS_ALL, w.address);
-    if (w.tier === RiskTier.SAFE) {
-      pipeline.sadd(REDIS_KEYS.WALLETS_SAFE, w.address);
-    } else {
-      pipeline.sadd(REDIS_KEYS.WALLETS_RISK, w.address);
+    pipeline.del(REDIS_KEYS.WALLETS_ALL);
+    pipeline.del(REDIS_KEYS.WALLETS_SAFE);
+    pipeline.del(REDIS_KEYS.WALLETS_RISK);
+
+    for (const w of wallets) {
+      pipeline.sadd(REDIS_KEYS.WALLETS_ALL, w.address);
+      if (w.tier === RiskTier.SAFE) {
+        pipeline.sadd(REDIS_KEYS.WALLETS_SAFE, w.address);
+      } else {
+        pipeline.sadd(REDIS_KEYS.WALLETS_RISK, w.address);
+      }
+
+      pipeline.set(
+        REDIS_KEYS.WALLET_META(w.address),
+        JSON.stringify(w),
+        'EX',
+        86400 * 7
+      );
     }
 
-    // Save wallet metadata
-    pipeline.set(
-      REDIS_KEYS.WALLET_META(w.address),
-      JSON.stringify(w),
-      'EX',
-      86400 * 7 // 7 days retention
-    );
-  }
-
-  await pipeline.exec();
-  console.log(`💾 Synced ${wallets.length} active wallets to Redis.`);
+    await pipeline.exec();
+    console.log(`💾 Synced ${wallets.length} active wallets to Redis.`);
+  } catch {}
 }
 
 /**
@@ -88,11 +131,16 @@ export async function isWalletTracked(address: string): Promise<boolean> {
   if (localTrackedSet.size > 0) {
     return localTrackedSet.has(address);
   }
-  const isMember = await redis.sismember(REDIS_KEYS.WALLETS_ALL, address);
-  if (isMember === 1) {
-    localTrackedSet.add(address);
-    return true;
+  if (redisLimitHit || redis.status !== 'ready') {
+    return false;
   }
+  try {
+    const isMember = await redis.sismember(REDIS_KEYS.WALLETS_ALL, address);
+    if (isMember === 1) {
+      localTrackedSet.add(address);
+      return true;
+    }
+  } catch {}
   return false;
 }
 
@@ -104,9 +152,10 @@ export function getLocalTrackedAddresses(): string[] {
  * Gets cached wallet metadata
  */
 export async function getWalletMetadata(address: string): Promise<ScoredWallet | null> {
-  const data = await redis.get(REDIS_KEYS.WALLET_META(address));
-  if (!data) return null;
+  if (redisLimitHit || redis.status !== 'ready') return null;
   try {
+    const data = await redis.get(REDIS_KEYS.WALLET_META(address));
+    if (!data) return null;
     return JSON.parse(data) as ScoredWallet;
   } catch {
     return null;
@@ -117,25 +166,21 @@ export async function getWalletMetadata(address: string): Promise<ScoredWallet |
  * Generic cached fetch helper with JSON serialization
  */
 export async function getCached<T>(key: string): Promise<T | null> {
-  if (redis.status !== 'ready') return null;
+  if (redisLimitHit || redis.status !== 'ready') return null;
   try {
     const data = await redis.get(key);
     if (!data) return null;
-    try {
-      return JSON.parse(data) as T;
-    } catch {
-      return null;
-    }
+    return JSON.parse(data) as T;
   } catch {
     return null;
   }
 }
 
 export async function setCached<T>(key: string, data: T, ttlSeconds: number = env.CACHE_TTL_SECONDS): Promise<void> {
-  if (redis.status !== 'ready') return;
+  if (redisLimitHit || redis.status !== 'ready') return;
   try {
     await redis.set(key, JSON.stringify(data), 'EX', ttlSeconds);
   } catch {
-    // Ignore cache set error if redis is offline
+    // Ignore cache set error if redis is offline or over quota
   }
 }

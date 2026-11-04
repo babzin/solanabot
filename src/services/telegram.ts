@@ -3314,11 +3314,21 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
       return;
     }
 
+    // Sort tokens by top milestone percentage descending (highest pumps first)
+    const sortedTokens = [...tokens].sort((a, b) => {
+      const pctA = Math.max(a.lastMilestonePct || 0, a.entryPriceUsd > 0 ? ((a.lastAlertedPriceUsd - a.entryPriceUsd) / a.entryPriceUsd) * 100 : 0);
+      const pctB = Math.max(b.lastMilestonePct || 0, b.entryPriceUsd > 0 ? ((b.lastAlertedPriceUsd - b.entryPriceUsd) / b.entryPriceUsd) * 100 : 0);
+      return pctB - pctA;
+    });
+
+    // Display top 8 tokens so message cleanly stays under Telegram 4,096 limit
+    const displayTokens = sortedTokens.slice(0, 8);
+
     let report = isPaperMilestone
       ? `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS ($1,000 Model)</b> 🎯\n<i>Tracking real-time price milestones from the $1,000 Paper Money Model Portfolio.</i>\n\n`
-      : `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS</b> 🎯\n<i>Continuous price checks every 30s (Zero RPC credit usage via DexScreener).</i>\n\n`;
+      : `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS</b> 🎯\n<i>Continuous price checks every 60s (Zero RPC credit usage via DexScreener).</i>\n\n`;
 
-    for (const t of tokens) {
+    for (const t of displayTokens) {
       const dexscreenerUrl = getDexScreenerUrl(t);
       const entryPrice = formatUnitPrice(t.entryPriceUsd);
       const lastPrice = formatUnitPrice(t.lastAlertedPriceUsd);
@@ -3330,12 +3340,12 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
 
       report += `🪙 <a href="${dexscreenerUrl}"><b>$${escapeHtml(t.tokenSymbol)}</b></a> (${emoji} <code>${isPositive ? '+' : ''}${gainPct}%</code>)\n`;
       report += `   💵 Entry: <code>${entryPrice}</code> ➔ Last: <code>${lastPrice}</code>\n`;
-      report += `   🎯 Top Milestone: <code>+${t.lastMilestonePct}%</code> | Dip: <code>${t.lastDipMilestonePct}%</code>\n`;
+      report += `   🎯 Top Milestone: <code>+${t.lastMilestonePct || 0}%</code> | Dip: <code>${t.lastDipMilestonePct || 0}%</code>\n`;
       report += `   🔗 <a href="${dexscreenerUrl}">[DexScreener Chart]</a>\n\n`;
     }
 
     const milestoneButtons: any[][] = [];
-    tokens.slice(0, 10).forEach((t) => {
+    displayTokens.slice(0, 4).forEach((t) => {
       milestoneButtons.push([
         { text: `📊 $${t.tokenSymbol} Chart`, url: getDexScreenerUrl(t) },
       ]);
@@ -3348,7 +3358,7 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
       { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
     ]);
 
-    await bot.sendMessage(chatId, report.trim(), {
+    await safeSendTelegramMessage(chatId, report.trim(), {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
       reply_markup: {
@@ -3569,7 +3579,8 @@ Price: <b>$${market.priceUsd.toFixed(6)}</b> | 24h Vol: <b>${formatUsd(market.an
 export async function handleTopCommand(chatId: number | string): Promise<void> {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const dateFormatted = formatDisplayDate(today);
+    let dateFormatted = formatDisplayDate(today);
+    let displayDate = today;
 
     // Strictly fetch today's alerted coins (with resilient fallback to token store)
     let tokens: any[] = [];
@@ -3583,6 +3594,19 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
 
     if (!tokens || tokens.length === 0) {
       tokens = await getTokensForDate(today);
+    }
+
+    // Seamless Fallback: If no tokens recorded yet for today, show most recent active session
+    if (!tokens || tokens.length === 0) {
+      const allActive = await getActiveTrackedTokens();
+      if (allActive.length > 0) {
+        const dates = [...new Set(allActive.map((t) => t.alertDate).filter(Boolean))].sort().reverse();
+        if (dates.length > 0) {
+          displayDate = dates[0];
+          tokens = allActive.filter((t) => t.alertDate === displayDate);
+          dateFormatted = `${formatDisplayDate(displayDate)} (Latest Active Session)`;
+        }
+      }
     }
 
     // Sort by highest actual multiplier
@@ -3623,7 +3647,7 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
       return;
     }
 
-    const report = renderTopLeaderboardText(gainers.slice(0, 15), today);
+    const report = renderTopLeaderboardText(gainers.slice(0, 15), displayDate);
 
     const inlineKeyboard = [
       [
@@ -3673,7 +3697,7 @@ export async function handleTopCommand(chatId: number | string): Promise<void> {
 export async function handleDailyFlopsCommand(chatId: number | string): Promise<void> {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const dateFormatted = formatDisplayDate(today);
+    let dateFormatted = formatDisplayDate(today);
 
     // Strictly fetch today's alerted coins (with resilient fallback to token store)
     let tokens: any[] = [];
@@ -3686,6 +3710,19 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
 
     if (!tokens || tokens.length === 0) {
       tokens = await getTokensForDate(today);
+    }
+
+    // Seamless Fallback: If no tokens for today, show most recent active session's drops
+    if (!tokens || tokens.length === 0) {
+      const allActive = await getActiveTrackedTokens();
+      if (allActive.length > 0) {
+        const dates = [...new Set(allActive.map((t) => t.alertDate).filter(Boolean))].sort().reverse();
+        if (dates.length > 0) {
+          const latestDate = dates[0];
+          tokens = allActive.filter((t) => t.alertDate === latestDate);
+          dateFormatted = `${formatDisplayDate(latestDate)} (Latest Active Session)`;
+        }
+      }
     }
 
     // Calculate drop and retracement metrics
@@ -3820,7 +3857,19 @@ export async function handleDailyFlopsCommand(chatId: number | string): Promise<
 export async function handleWeeklyReportCommand(chatId: number | string): Promise<void> {
   try {
     const { calculateWeeklyStats, renderWeeklyReportText } = await import('./weeklyReport.js');
-    const stats = await calculateWeeklyStats(0);
+    let stats = await calculateWeeklyStats(0);
+
+    // If current week has 0 signals (e.g. at the start of a week or while offline), fall back to most recent active week!
+    if (!stats || stats.totalSignals === 0) {
+      for (let offset = -1; offset >= -4; offset--) {
+        const pastStats = await calculateWeeklyStats(offset);
+        if (pastStats && pastStats.totalSignals > 0) {
+          stats = pastStats;
+          break;
+        }
+      }
+    }
+
     const report = renderWeeklyReportText(stats);
 
     const inlineKeyboard = [

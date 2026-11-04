@@ -154,10 +154,12 @@ async function persistTokens(): Promise<void> {
     fs.writeFileSync(BACKUP_FILE, JSON.stringify(tokenList, null, 2), 'utf-8');
   } catch {}
 
-  // 2. Write to Redis
-  try {
-    await redis.set(REDIS_KEY_TRACKED_TOKENS, JSON.stringify(tokenList));
-  } catch {}
+  // 2. Write to Redis (only if connected and ready)
+  if (redis.status === 'ready') {
+    try {
+      await redis.set(REDIS_KEY_TRACKED_TOKENS, JSON.stringify(tokenList));
+    } catch {}
+  }
 }
 
 /**

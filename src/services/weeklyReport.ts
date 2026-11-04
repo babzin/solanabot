@@ -1,6 +1,6 @@
 import { prisma } from './db.js';
 import { env } from '../config/env.js';
-import { getTokensForPastDays } from './earlyTokenStore.js';
+import { getTokensForPastDays, getActiveTrackedTokens } from './earlyTokenStore.js';
 
 export interface DayHighlight {
   date: string;
@@ -151,9 +151,9 @@ export async function calculateWeeklyStats(weekOffset = 0, baseTradeSol = 0.1, s
   } catch {}
 
   if (!tokens || tokens.length === 0) {
-    const allWeekly = await getTokensForPastDays(14);
+    const allTokens = await getActiveTrackedTokens();
     const dateSet = new Set(dates);
-    tokens = allWeekly.filter((t) => dateSet.has(t.alertDate));
+    tokens = allTokens.filter((t) => dateSet.has(t.alertDate));
   }
 
   const totalSignals = tokens.length;
