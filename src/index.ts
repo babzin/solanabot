@@ -13,6 +13,15 @@ import { redis } from './services/redis.js';
 import { bot, initTelegramCommands } from './services/telegram.js';
 import { initWeeklyReportCron } from './services/weeklyCron.js';
 
+// Process-level resilience guards to prevent background crashes on network drops or unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.warn('⚠️ [Process Guard] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err, origin) => {
+  console.error('🚨 [Process Guard] Uncaught Exception:', err, 'origin:', origin);
+});
+
 const server = Fastify({
   logger: {
     level: env.NODE_ENV === 'development' ? 'info' : 'warn',
@@ -81,11 +90,15 @@ async function main() {
     console.log(`📡 Early Radar Live Feed available at: http://localhost:${env.PORT}/api/trending`);
     console.log(`⚡ Real-Time SSE Stream active at: http://localhost:${env.PORT}/api/events`);
 
-    // Keep-Alive Engine: Pings public URL every 8 minutes to prevent Render Free tier from sleeping
-    const externalUrl = env.RENDER_EXTERNAL_URL || env.APP_BASE_URL;
+    // Keep-Alive Engine: Pings public URL every 5 minutes to prevent Render Free tier from sleeping
+    const renderHostname = process.env.RENDER_EXTERNAL_HOSTNAME
+      ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`
+      : undefined;
+    const externalUrl = env.RENDER_EXTERNAL_URL || renderHostname || env.APP_BASE_URL;
+
     if (externalUrl && !externalUrl.includes('localhost')) {
       const pingTarget = `${externalUrl.replace(/\/$/, '')}/health`;
-      console.log(`💓 [Keep-Alive Engine] Automated self-ping active for: ${pingTarget} (every 8 mins)`);
+      console.log(`💓 [Keep-Alive Engine] Automated self-ping active for: ${pingTarget} (every 5 mins)`);
       setInterval(async () => {
         try {
           const { default: axios } = await import('axios');
@@ -94,7 +107,7 @@ async function main() {
         } catch (pingErr: any) {
           console.warn('⚠️ [Keep-Alive Engine] Ping warning:', pingErr?.message);
         }
-      }, 8 * 60 * 1000);
+      }, 5 * 60 * 1000);
     }
   } catch (err) {
     server.log.error(err);

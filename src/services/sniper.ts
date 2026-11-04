@@ -134,9 +134,9 @@ export interface UserExecutionContext {
 }
 
 // In-memory registries backed by file storage
-const inMemoryUserPrefs = new Map<string, UserPreferencesData>();
-const inMemoryUserPositions = new Map<string, SnipedPosition[]>(); // key: telegramUserId
-const activePositions = new Map<string, SnipedPosition>(); // Global legacy mapping
+export const inMemoryUserPrefs = new Map<string, UserPreferencesData>();
+export const inMemoryUserPositions = new Map<string, SnipedPosition[]>(); // key: telegramUserId
+export const activePositions = new Map<string, SnipedPosition>(); // Global legacy mapping
 
 // Ensure data folder exists
 try {
@@ -584,7 +584,7 @@ export function getAllPositions(): SnipedPosition[] {
 /**
  * Fallback server Keypair from SNIPER_PRIVATE_KEY
  */
-function getServerKeypair(): Keypair | null {
+export function getServerKeypair(): Keypair | null {
   if (!env.SNIPER_PRIVATE_KEY) return null;
   try {
     const raw = env.SNIPER_PRIVATE_KEY.trim();
@@ -682,6 +682,28 @@ export async function executeUserSnipeTrade(
         entryFeeUsd
       );
 
+      // Route 1% entry fee on-chain to admin fee wallet
+      try {
+        const { getAdminFeeWallet, dispatchFeeTransferOnChain, recordFeeRevenue } = await import('./adminConfig.js');
+        const adminWallet = getAdminFeeWallet();
+        let feeSig: string | undefined = undefined;
+        if (adminWallet && keypair && entryFeeSol > 0.00005) {
+          const feeRes = await dispatchFeeTransferOnChain(keypair, entryFeeSol, 'ENTRY_FEE_1PCT', { userId, tokenMint });
+          if (feeRes.success) feeSig = feeRes.signature;
+        }
+        await recordFeeRevenue({
+          feeType: 'ENTRY_FEE_1PCT',
+          solAmount: entryFeeSol,
+          usdAmount: entryFeeUsd,
+          isLive: true,
+          userId,
+          tokenMint,
+          signature: feeSig || signature,
+        });
+      } catch (feeErr: any) {
+        console.warn('⚠️ Admin fee recording notice:', feeErr.message);
+      }
+
       return {
         success: true,
         simulated: false,
@@ -711,6 +733,19 @@ export async function executeUserSnipeTrade(
       entryFeeSol,
       entryFeeUsd
     );
+
+    try {
+      const { recordFeeRevenue } = await import('./adminConfig.js');
+      await recordFeeRevenue({
+        feeType: 'ENTRY_FEE_1PCT',
+        solAmount: entryFeeSol,
+        usdAmount: entryFeeUsd,
+        isLive: false,
+        userId,
+        tokenMint,
+        signature: simulatedSignature,
+      });
+    } catch {}
 
     return {
       success: true,
@@ -743,6 +778,19 @@ export async function executeUserSnipeTrade(
       entryFeeSol,
       entryFeeUsd
     );
+
+    try {
+      const { recordFeeRevenue } = await import('./adminConfig.js');
+      await recordFeeRevenue({
+        feeType: 'ENTRY_FEE_1PCT',
+        solAmount: entryFeeSol,
+        usdAmount: entryFeeUsd,
+        isLive: false,
+        userId,
+        tokenMint,
+        signature: simulatedSignature,
+      });
+    } catch {}
 
     return {
       success: true,
@@ -865,6 +913,30 @@ export async function executeUserSnipeSell(
             pos.totalBotFeesUsd = (pos.entryFeeUsd || 0) + pos.profitFeeUsd;
           }
 
+          // Route 15% profit fee on-chain to admin fee wallet
+          if (isProfitable && profitFeeSol > 0.00005) {
+            try {
+              const { getAdminFeeWallet, dispatchFeeTransferOnChain, recordFeeRevenue } = await import('./adminConfig.js');
+              const adminWallet = getAdminFeeWallet();
+              let feeSig: string | undefined = undefined;
+              if (adminWallet && keypair) {
+                const feeRes = await dispatchFeeTransferOnChain(keypair, profitFeeSol, 'PROFIT_FEE_15PCT', { userId, tokenMint });
+                if (feeRes.success) feeSig = feeRes.signature;
+              }
+              await recordFeeRevenue({
+                feeType: 'PROFIT_FEE_15PCT',
+                solAmount: profitFeeSol,
+                usdAmount: profitFeeUsd,
+                isLive: true,
+                userId,
+                tokenMint,
+                signature: feeSig || signature,
+              });
+            } catch (feeErr: any) {
+              console.warn('⚠️ Admin profit fee routing notice:', feeErr.message);
+            }
+          }
+
           console.log(
             `🚀 [SNIPER LIVE SELL] User ${userId} sold ${sellPercent}% of ${tokenSymbol || 'TOKEN'}. Gross: ${grossSolReceived.toFixed(4)} SOL | Profit: ${isProfitable ? '+' : ''}${grossProfitSol.toFixed(4)} SOL | 15% Fee: ${profitFeeSol.toFixed(4)} SOL | Net: ${netSolReceived.toFixed(4)} SOL. Tx: https://solscan.io/tx/${signature}`
           );
@@ -917,6 +989,21 @@ export async function executeUserSnipeSell(
       pos.profitFeeUsd = (pos.profitFeeUsd || 0) + profitFeeUsd;
       pos.totalBotFeesSol = (pos.entryFeeSol || 0) + pos.profitFeeSol;
       pos.totalBotFeesUsd = (pos.entryFeeUsd || 0) + pos.profitFeeUsd;
+    }
+
+    if (isProfitable && profitFeeSol > 0) {
+      try {
+        const { recordFeeRevenue } = await import('./adminConfig.js');
+        await recordFeeRevenue({
+          feeType: 'PROFIT_FEE_15PCT',
+          solAmount: profitFeeSol,
+          usdAmount: profitFeeUsd,
+          isLive: false,
+          userId,
+          tokenMint,
+          signature: simulatedSignature,
+        });
+      } catch {}
     }
 
     return {

@@ -1,0 +1,14 @@
+{
+  "adminFeeWallet": null,
+  "totalLiveFeesSol": 0,
+  "totalLiveFeesUsd": 0,
+  "entryFeesSol": 0,
+  "entryFeesUsd": 0,
+  "profitFeesSol": 0,
+  "profitFeesUsd": 0,
+  "totalModelFeesUsd": 0,
+  "totalModelFeesSol": 0,
+  "totalTransferredSol": 0,
+  "transferHistory": [],
+  "lastUpdated": "2026-11-04T14:00:00.000Z"
+}

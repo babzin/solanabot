@@ -42,6 +42,13 @@ import {
   handleSendDashboardToDm,
   postOrUpdateGroupPinnedDashboard,
 } from './groupPinnedDashboard.js';
+import {
+  getAdminAnalyticsSummary,
+  setAdminFeeWallet,
+  getAdminFeeWallet,
+  isValidSolanaAddress,
+  sweepServerFeesToAdmin,
+} from './adminConfig.js';
 
 export const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, {
   polling: {
@@ -95,6 +102,9 @@ interface CachedAdmin {
 }
 const adminCache = new Map<string, CachedAdmin>();
 const ADMIN_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// State tracking for admins currently inputting a fee wallet address
+export const adminAwaitingWalletInput = new Map<string, number>();
 
 /**
  * Pre-populates the cache with all current group administrators
@@ -157,24 +167,31 @@ export async function isGroupAdminOrOwner(chatId: number | string, userId: numbe
   const sChatId = String(chatId);
   const ownerId = String(env.TELEGRAM_CHAT_ID || '');
 
-  // Owner is always authorized
-  if (sUserId && ownerId && sUserId === ownerId) {
+  // Owner is always authorized (supports single ID or comma-separated list)
+  if (sUserId && ownerId && (sUserId === ownerId || ownerId.split(',').map((x) => x.trim()).includes(sUserId))) {
     return true;
   }
 
-  const cacheKey = `${sChatId}_${sUserId}`;
+  // If this check happens in a private DM (where sChatId === sUserId or sChatId > 0),
+  // fallback to verifying group admin status in the official group chat.
+  const targetGroupChatId =
+    (sChatId === sUserId && env.TELEGRAM_GROUP_CHAT_ID && env.TELEGRAM_GROUP_CHAT_ID !== '0')
+      ? env.TELEGRAM_GROUP_CHAT_ID
+      : chatId;
+
+  const cacheKey = `${targetGroupChatId}_${sUserId}`;
   const cached = adminCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < ADMIN_CACHE_TTL_MS) {
     return cached.isAdmin;
   }
 
   try {
-    const member = await bot.getChatMember(chatId, Number(userId));
+    const member = await bot.getChatMember(targetGroupChatId, Number(userId));
     const isAdmin = member.status === 'creator' || member.status === 'administrator';
     adminCache.set(cacheKey, { isAdmin, timestamp: Date.now() });
     return isAdmin;
   } catch (err: any) {
-    console.warn(`⚠️ [Admin Check] Could not verify permissions for user ${userId} in ${chatId}:`, err.message);
+    console.warn(`⚠️ [Admin Check] Could not verify permissions for user ${userId} in ${targetGroupChatId}:`, err.message);
     return false;
   }
 }
@@ -952,6 +969,58 @@ export async function handleUserDeepLinkSnipe(
 }
 
 /**
+ * Builds rich Admin Analytics and Fee status message for owners/admins
+ */
+export async function buildAdminAnalyticsMessage(): Promise<{ text: string; keyboard: any[][] }> {
+  const summary = await getAdminAnalyticsSummary();
+
+  const walletDisplay = summary.adminFeeWallet
+    ? `<code>${summary.adminFeeWallet}</code> (<a href="https://solscan.io/account/${summary.adminFeeWallet}">Solscan</a>)`
+    : `❌ <i>None configured (Tap [💼 Set Fee Wallet] below to paste address)</i>`;
+
+  const text = `
+📊 <b>ADMIN BUSINESS INTELLIGENCE & ANALYTICS</b> 🛡️
+
+👥 <b>User Adoption & Community:</b>
+• <b>Total Registered Users:</b> <code>${summary.totalUsers}</code>
+• <b>Active Trading Users:</b> <code>${summary.activeUsers}</code>
+• <b>Funded User Wallets:</b> <code>${summary.fundedUsersCount}</code>
+• <b>Auto-Snipe Active:</b> <code>${summary.autoSnipeUsersCount}</code>
+• <b>Unfunded / Paper Users:</b> <code>${summary.unfundedUsersCount}</code>
+
+💰 <b>Bot Fee Revenue (Money Made from Users):</b>
+• <b>Total Live Revenue:</b> <b>${summary.totalLiveFeesSol.toFixed(4)} SOL</b> (~<b>$${summary.totalLiveFeesUsd.toFixed(2)} USD</b>)
+  ├ <b>1% Trade Entry Fees:</b> <code>${summary.entryFeesSol.toFixed(4)} SOL</code> ($${summary.entryFeesUsd.toFixed(2)})
+  └ <b>15% Profit Exit Fees:</b> <code>${summary.profitFeesSol.toFixed(4)} SOL</code> ($${summary.profitFeesUsd.toFixed(2)})
+• <b>Model / Paper Trading Fees:</b> <code>$${summary.totalModelFeesUsd.toFixed(2)} USD</code> (${summary.totalModelFeesSol.toFixed(4)} SOL)
+• <b>Total Transferred On-Chain:</b> <b>${summary.totalTransferredSol.toFixed(4)} SOL</b>
+
+💼 <b>Fee Destination Wallet:</b>
+${walletDisplay}
+<i>All 1% entry and 15% profit fees are transferred to this wallet address on-chain.</i>
+
+🏦 <b>Server Vault Keypair:</b>
+• <b>Address:</b> <code>${summary.serverWalletAddress}</code>
+• <b>Available Balance:</b> <code>${summary.serverWalletBalanceSol.toFixed(4)} SOL</code>
+  `.trim();
+
+  const keyboard: any[][] = [
+    [
+      { text: '🔄 Refresh Analytics', callback_data: 'cmd_admin_analytics' },
+      { text: '💼 Set Fee Wallet', callback_data: 'cmd_admin_set_wallet' },
+    ],
+    [
+      { text: '💸 Sweep Server Balance to Fee Wallet', callback_data: 'cmd_admin_sweep_fees' },
+    ],
+    [
+      { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+    ],
+  ];
+
+  return { text, keyboard };
+}
+
+/**
  * Initializes Telegram Bot interactive command handlers:
  * Dedicated 6-button menu: Start, Daily Coins, Top Gainers, Price Milestones, My Positions, and Auto-Snipe
  */
@@ -980,6 +1049,7 @@ export function initTelegramCommands(): void {
     { command: 'wallet', description: '💼 Sniper Wallet, Deposit & Withdraw' },
     { command: 'withdraw', description: '💸 Withdraw SOL to External Wallet' },
     { command: 'connect', description: '🔐 Connect / Generate Sniper Wallet' },
+    { command: 'admin', description: '📊 Admin Analytics & Fee Destination' },
     { command: 'help', description: '❓ How It Works & Trading Guide' },
   ]).catch((err: any) => {
     console.warn('⚠️ Could not register Telegram menu commands:', err.message);
@@ -1170,6 +1240,14 @@ ${capitalLine}
         { text: '❓ How It Works', callback_data: 'cmd_help' },
       ],
     ];
+
+    const isAdmin = await isGroupAdminOrOwner(chatId, userId);
+    if (isAdmin) {
+      inlineKeyboard.push([
+        { text: '📊 Admin Analytics', callback_data: 'cmd_admin_analytics' },
+        { text: '💼 Set Fee Wallet', callback_data: 'cmd_admin_set_wallet' },
+      ]);
+    }
 
     try {
       await bot.sendMessage(chatId, welcome, {
@@ -1834,6 +1912,88 @@ ${flagsText}
     );
   });
 
+  // Admin Analytics: /admin or /analytics
+  onTextCmd(/\/admin|\/analytics/i, async (msg) => {
+    const userId = String(msg.from?.id || msg.chat.id);
+    const isAdmin = await isGroupAdminOrOwner(msg.chat.id, userId);
+    if (!isAdmin) {
+      await bot.sendMessage(msg.chat.id, '⛔ <b>Admin Access Required:</b> This command is restricted to bot administrators.', { parse_mode: 'HTML' });
+      return;
+    }
+    const { text, keyboard } = await buildAdminAnalyticsMessage();
+    await bot.sendMessage(msg.chat.id, text, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: keyboard },
+    });
+  });
+
+  // Admin Fee Wallet Configuration: /feewallet or /setfeewallet [address]
+  onTextCmd(/\/feewallet(?:\s+(\S+))?|\/setfeewallet(?:\s+(\S+))?/i, async (msg, match) => {
+    const userId = String(msg.from?.id || msg.chat.id);
+    const isAdmin = await isGroupAdminOrOwner(msg.chat.id, userId);
+    if (!isAdmin) {
+      await bot.sendMessage(msg.chat.id, '⛔ <b>Admin Access Required:</b> This command is restricted to bot administrators.', { parse_mode: 'HTML' });
+      return;
+    }
+
+    const rawAddr = (match?.[1] || match?.[2])?.trim();
+    if (!rawAddr) {
+      adminAwaitingWalletInput.set(userId, Date.now());
+      const cur = getAdminFeeWallet();
+      await bot.sendMessage(
+        msg.chat.id,
+        `💼 <b>CONFIGURE ADMIN FEE WALLET</b> 🎯\n\n` +
+        `Current destination: ${cur ? `<code>${cur}</code>` : '<i>None configured</i>'}\n\n` +
+        `👉 <b>Please paste your Solana wallet address</b> into this chat now:\n` +
+        `<i>(Or type /cancel to abort)</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📊 View Analytics', callback_data: 'cmd_admin_analytics' }],
+            ],
+          },
+        }
+      );
+      return;
+    }
+
+    const res = await setAdminFeeWallet(rawAddr);
+    if (res.success) {
+      adminAwaitingWalletInput.delete(userId);
+      await bot.sendMessage(
+        msg.chat.id,
+        `✅ <b>FEE DESTINATION WALLET SAVED!</b> 💼\n\n` +
+        `• <b>Destination Address:</b> <code>${rawAddr}</code>\n` +
+        `• <b>Fees Routed:</b> 1% trade entries + 15% profitable exits\n` +
+        `• <b>Solscan:</b> <a href="https://solscan.io/account/${rawAddr}">View Account</a>\n\n` +
+        `All future fees collected will now be dispatched directly to this address on-chain.`,
+        {
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📊 View Analytics', callback_data: 'cmd_admin_analytics' }],
+              [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+            ],
+          },
+        }
+      );
+    } else {
+      await bot.sendMessage(msg.chat.id, `⚠️ <b>Error:</b> ${res.error}`, { parse_mode: 'HTML' });
+    }
+  });
+
+  // /cancel command for aborting awaiting input states
+  onTextCmd(/\/cancel/i, async (msg) => {
+    const userId = String(msg.from?.id || msg.chat.id);
+    if (adminAwaitingWalletInput.has(userId)) {
+      adminAwaitingWalletInput.delete(userId);
+      await bot.sendMessage(msg.chat.id, '👌 Fee wallet configuration cancelled.');
+    }
+  });
+
   // /scan or "⚡ Scan Now"
   onTextCmd(/\/scan|⚡ Scan Now|Scan/i, async (msg) => {
     await bot.sendMessage(msg.chat.id, '🔍 <i>Scanning DexScreener & Pump.fun for fresh 2-minute breakout gems...</i>', { parse_mode: 'HTML' });
@@ -2101,6 +2261,54 @@ ${flagsText}
         await bot.sendMessage(msg.chat.id, `❌ Failed to parse or encrypt key: ${err.message}`);
       }
       return;
+    }
+
+    // Check if an admin is currently inputting a fee wallet address
+    const senderUserId = String(msg.from?.id || msg.chat.id);
+    if (adminAwaitingWalletInput.has(senderUserId)) {
+      if (text.toLowerCase() === '/cancel' || text.toLowerCase() === 'cancel') {
+        adminAwaitingWalletInput.delete(senderUserId);
+        await bot.sendMessage(msg.chat.id, '👌 Setting fee wallet was cancelled.');
+        return;
+      }
+
+      if (isValidSolanaAddress(text)) {
+        adminAwaitingWalletInput.delete(senderUserId);
+        const setRes = await setAdminFeeWallet(text);
+        if (setRes.success) {
+          await bot.sendMessage(
+            msg.chat.id,
+            `✅ <b>FEE DESTINATION WALLET CONFIGURED!</b> 💼\n\n` +
+            `• <b>Destination Address:</b> <code>${text}</code>\n` +
+            `• <b>Fees Routed:</b> 1% trade entries + 15% profitable exits\n` +
+            `• <b>Solscan:</b> <a href="https://solscan.io/account/${text}">View on Solscan</a>\n\n` +
+            `All future fees collected by the bot will now be routed directly to this wallet address.`,
+            {
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '📊 View Admin Analytics', callback_data: 'cmd_admin_analytics' }],
+                  [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
+                ],
+              },
+            }
+          );
+          return;
+        } else {
+          await bot.sendMessage(msg.chat.id, `⚠️ <b>Error:</b> ${setRes.error}`, { parse_mode: 'HTML' });
+          return;
+        }
+      } else {
+        await bot.sendMessage(
+          msg.chat.id,
+          `⚠️ <b>Invalid Solana Address:</b> "${escapeHtml(text)}"\n\n` +
+          `A Solana public key must be 32–44 base58 characters.\n` +
+          `Please paste a valid wallet address or send /cancel to abort.`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
     }
 
     if (text.startsWith('/')) return;
@@ -2763,6 +2971,88 @@ ${flagsText}
             ],
           },
         });
+      } else if (data === 'cmd_admin_analytics') {
+        const isAdmin = await isGroupAdminOrOwner(chatId, userId);
+        if (!isAdmin) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: '⛔ Admin access required.', show_alert: true });
+          } catch {}
+          return;
+        }
+        const { text: adminText, keyboard: adminKeyboard } = await buildAdminAnalyticsMessage();
+        await bot.sendMessage(chatId, adminText, {
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: adminKeyboard },
+        });
+      } else if (data === 'cmd_admin_set_wallet') {
+        const isAdmin = await isGroupAdminOrOwner(chatId, userId);
+        if (!isAdmin) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: '⛔ Admin access required.', show_alert: true });
+          } catch {}
+          return;
+        }
+        adminAwaitingWalletInput.set(userId, Date.now());
+        const currentWallet = getAdminFeeWallet();
+        const curWalletText = currentWallet
+          ? `Current destination: <code>${currentWallet}</code>\n\n`
+          : `Current destination: <i>None configured</i>\n\n`;
+
+        await bot.sendMessage(
+          chatId,
+          `💼 <b>CONFIGURE ADMIN FEE WALLET</b> 🎯\n\n` +
+          curWalletText +
+          `Whenever users trade with the bot, collected fees are automatically transferred to this address:\n` +
+          `• <b>1% Fee</b> on every user trade entry\n` +
+          `• <b>15% Fee</b> on profitable trade exits\n\n` +
+          `👉 <b>Please paste your Solana wallet address</b> (Phantom, Solflare, Ledger, etc.) directly into this chat:\n\n` +
+          `<i>(Or type /cancel to abort)</i>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '❌ Cancel', callback_data: 'cmd_admin_cancel_wallet' }],
+                [{ text: '📊 Back to Analytics', callback_data: 'cmd_admin_analytics' }],
+              ],
+            },
+          }
+        );
+      } else if (data === 'cmd_admin_cancel_wallet') {
+        adminAwaitingWalletInput.delete(userId);
+        try {
+          await bot.answerCallbackQuery(query.id, { text: 'Cancelled.', show_alert: false });
+        } catch {}
+        await bot.sendMessage(chatId, '👌 Setting fee wallet was cancelled.');
+      } else if (data === 'cmd_admin_sweep_fees') {
+        const isAdmin = await isGroupAdminOrOwner(chatId, userId);
+        if (!isAdmin) {
+          try {
+            await bot.answerCallbackQuery(query.id, { text: '⛔ Admin access required.', show_alert: true });
+          } catch {}
+          return;
+        }
+        await bot.sendMessage(chatId, '⏳ <i>Sweeping server wallet fees on-chain to configured admin wallet...</i>', { parse_mode: 'HTML' });
+        const sweepRes = await sweepServerFeesToAdmin();
+        if (sweepRes.success) {
+          await bot.sendMessage(
+            chatId,
+            `✅ <b>FEE SWEEP SUCCESSFUL!</b> 💸\n\n` +
+            `• <b>Transferred:</b> <code>${sweepRes.solTransferred} SOL</code>\n` +
+            `• <b>Transaction:</b> <a href="https://solscan.io/tx/${sweepRes.signature}">View on Solscan</a>`,
+            {
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '📊 Refresh Analytics', callback_data: 'cmd_admin_analytics' }],
+                ],
+              },
+            }
+          );
+        } else {
+          await bot.sendMessage(chatId, `⚠️ <b>Fee sweep notice:</b> ${escapeHtml(sweepRes.error || 'Unknown error')}`, { parse_mode: 'HTML' });
+        }
       }
     } catch (err: any) {
       console.warn('Callback query error:', err.message);
@@ -2890,21 +3180,48 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
       tokens = await getActiveTrackedTokens();
     }
 
+    let isPaperMilestone = false;
+    if (tokens.length === 0) {
+      const { getPaperPortfolioSummary } = await import('./paperTrading.js');
+      const paperSummary = await getPaperPortfolioSummary();
+      if (paperSummary.activePositions.length > 0) {
+        isPaperMilestone = true;
+        tokens = paperSummary.activePositions.map((pos) => {
+          const curPrice = pos.currentPriceUsd || pos.entryPriceUsd;
+          const gainPct = pos.entryPriceUsd > 0
+            ? ((curPrice - pos.entryPriceUsd) / pos.entryPriceUsd) * 100
+            : 0;
+          const topMilestone = Math.max(0, Math.floor(gainPct / 50) * 50);
+          const dipMilestone = gainPct < 0 ? Math.floor(gainPct / 50) * 50 : 0;
+          return {
+            tokenMint: pos.tokenMint,
+            tokenSymbol: pos.tokenSymbol,
+            entryPriceUsd: pos.entryPriceUsd,
+            lastAlertedPriceUsd: curPrice,
+            lastMilestonePct: topMilestone,
+            lastDipMilestonePct: dipMilestone,
+            dexUrl: pos.dexUrl || `https://dexscreener.com/solana/${pos.tokenMint}`,
+            pairAddress: null,
+          };
+        });
+      }
+    }
+
     if (tokens.length === 0) {
       await bot.sendMessage(
         chatId,
-        `📈 <b>Price Milestone Trackers</b> 🎯\n\n` +
-          `⚠️ <b>No report found.</b>\n` +
-          `<i>No tokens are currently in active milestone tracking (+50% pumps / -50% dips).</i>\n\n` +
-          `Whenever a daily gem is alerted, it is tracked in real-time for +50% pumps and -50% dips!`,
+        `📈 <b>Price Milestone Trackers ($1,000 Model Baseline)</b> 🎯\n\n` +
+          `ℹ️ <b>Awaiting Active Breakout Gems</b>\n` +
+          `<i>The bot scans DexScreener continuously. As soon as a gem is sniped in the $1,000 Paper Model Portfolio, its real-time +50% pumps and -50% dips will appear here!</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
               [
+                { text: '💼 $1,000 Portfolio', callback_data: 'cmd_paper_portfolio' },
                 { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-                { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
               ],
+              [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
             ],
           },
         }
@@ -2912,8 +3229,9 @@ async function handlePriceMilestonesCommand(chatId: number | string): Promise<vo
       return;
     }
 
-    let report = `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS</b> 🎯\n`;
-    report += `<i>Continuous price checks every 30s (Zero RPC credit usage via DexScreener).</i>\n\n`;
+    let report = isPaperMilestone
+      ? `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS ($1,000 Model)</b> 🎯\n<i>Tracking real-time price milestones from the $1,000 Paper Money Model Portfolio.</i>\n\n`
+      : `📈 <b>ACTIVE 50% PRICE MILESTONE TRACKERS</b> 🎯\n<i>Continuous price checks every 30s (Zero RPC credit usage via DexScreener).</i>\n\n`;
 
     for (const t of tokens) {
       const dexscreenerUrl = getDexScreenerUrl(t);
@@ -3469,19 +3787,32 @@ async function handlePositionsCommand(chatId: number | string, userId?: string):
   try {
     const effectiveUserId = userId || String(chatId);
     const userPositions = getUserActivePositions(effectiveUserId);
-    const active = userPositions.length > 0 ? userPositions : getActivePositions();
+    let active = userPositions.length > 0 ? userPositions : getActivePositions();
     const all = getAllPositions();
 
-    if (active.length === 0 && all.length === 0) {
+    let isPaperFallback = false;
+    let paperPositions: any[] = [];
+
+    // Unfunded / Paper Money Fallback: If no live positions exist, use the $1,000 Paper Money portfolio!
+    if (active.length === 0) {
+      const { getPaperPortfolioSummary } = await import('./paperTrading.js');
+      const paperSummary = await getPaperPortfolioSummary();
+      if (paperSummary.activePositions.length > 0) {
+        isPaperFallback = true;
+        paperPositions = paperSummary.activePositions;
+      }
+    }
+
+    if (active.length === 0 && paperPositions.length === 0 && all.length === 0) {
       await bot.sendMessage(
         chatId,
-        `💼 <b>POSITIONS</b>\n\nℹ️ <i>No open positions right now. Tap a coin alert or enable Auto-Snipe to trade.</i>`,
+        `💼 <b>POSITIONS ($1,000 Model Baseline)</b>\n\nℹ️ <i>No open positions right now. Tap a coin alert or enable Auto-Snipe to trade.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+                { text: '💼 $1,000 Portfolio', callback_data: 'cmd_paper_portfolio' },
                 { text: '⚙️ Auto-Snipe Settings', callback_data: 'cmd_snipe_menu' },
               ],
               [{ text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' }],
@@ -3489,6 +3820,55 @@ async function handlePositionsCommand(chatId: number | string, userId?: string):
           },
         }
       );
+      return;
+    }
+
+    if (isPaperFallback) {
+      let report = `💼 <b>POSITIONS ($1,000 Paper Model • Unfunded)</b> (${paperPositions.length} active)\n\n`;
+      report += `ℹ️ <i>Showing open positions from the $1,000 Alpha Model Portfolio. Deposit SOL into your dedicated wallet to trade with live funds.</i>\n\n`;
+
+      const maxToShow = 10;
+      paperPositions.slice(0, maxToShow).forEach((pos, idx) => {
+        const gainPct = (((pos.currentPriceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100).toFixed(1);
+        const isUp = Number(gainPct) >= 0;
+        const emoji = isUp ? '🟢' : '🔴';
+        const chartUrl = pos.dexUrl || `https://dexscreener.com/solana/${pos.tokenMint}`;
+        const statusBadge = pos.status === 'PARTIAL_TP_2X' ? ' [🌙 MOONBAG]' : '';
+        const mult = (pos.currentPriceUsd / Math.max(0.00000001, pos.entryPriceUsd)).toFixed(2);
+
+        report += `${emoji} <b>#${idx + 1}.</b> <a href="${chartUrl}"><b>$${escapeHtml(pos.tokenSymbol)}</b></a>${statusBadge} • <b>${isUp ? '+' : ''}${gainPct}%</b> (<code>${mult}X</code>)\n`;
+        report += `   Entry: <code>${formatUnitPrice(pos.entryPriceUsd)}</code> ➔ Now: <code>${formatUnitPrice(pos.currentPriceUsd)}</code>\n`;
+        report += `   Invested: <code>$${pos.investedUsd.toFixed(2)} USD</code> | Peak: <code>${pos.peakMultiplier.toFixed(2)}X</code>\n\n`;
+      });
+
+      if (paperPositions.length > maxToShow) {
+        report += `<i>... and ${paperPositions.length - maxToShow} more active model positions</i>\n\n`;
+      }
+
+      const posButtons: any[][] = [];
+      paperPositions.slice(0, 6).forEach((pos) => {
+        posButtons.push([
+          { text: `📊 $${pos.tokenSymbol} Chart`, url: pos.dexUrl || `https://dexscreener.com/solana/${pos.tokenMint}` },
+          { text: `🔴 Exit $${pos.tokenSymbol}`, callback_data: `cmd_exit_single_${pos.tokenMint}` },
+        ]);
+      });
+      posButtons.push([
+        { text: '🚨 Exit All Model Positions', callback_data: 'cmd_exit_all' },
+        { text: '🔄 Refresh Positions', callback_data: 'cmd_positions' },
+      ]);
+      posButtons.push([
+        { text: '💼 $1,000 Portfolio', callback_data: 'cmd_paper_portfolio' },
+        { text: '🔐 Deposit Funds', callback_data: 'cmd_wallet' },
+      ]);
+      posButtons.push([
+        { text: '🚀 /start (Main Menu)', callback_data: 'cmd_start' },
+      ]);
+
+      await safeSendTelegramMessage(chatId, report.trim(), {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: posButtons },
+      });
       return;
     }
 

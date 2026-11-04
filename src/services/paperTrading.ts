@@ -641,6 +641,17 @@ export async function processPaperTradeBuy(
   cachedWallet.totalFeesPaidUsd += (feeUsd + botEntryFeeUsd);
   cachedWallet.totalTrades += 1;
 
+  try {
+    const { recordFeeRevenue } = await import('./adminConfig.js');
+    await recordFeeRevenue({
+      feeType: 'ENTRY_FEE_1PCT',
+      solAmount: botEntryFeeSol,
+      usdAmount: botEntryFeeUsd,
+      isLive: false,
+      tokenMint: candidate.tokenMint,
+    });
+  } catch {}
+
   // 11. Extract Bounded Autonomy Strategy Profile & Targets
   const strategyProfile = candidate.aiScore?.strategyProfile || 'BALANCED_MOMENTUM';
   const targetMultiplier = candidate.aiScore?.targetMultiplier || (strategyProfile === 'VIRAL_RUNNER' ? 10 : strategyProfile === 'BALANCED_MOMENTUM' ? 3 : 2);
@@ -1296,6 +1307,17 @@ export async function exitPaperPosition(
     botProfitFeeUsd = Number((grossProfitUsd * BOT_PROFIT_FEE_RATE).toFixed(2));
     botProfitFeeSol = Number((botProfitFeeUsd / solPrice).toFixed(6));
     netCreditedCashUsd = Number((netReturnUsd - botProfitFeeUsd).toFixed(2));
+
+    try {
+      const { recordFeeRevenue } = await import('./adminConfig.js');
+      await recordFeeRevenue({
+        feeType: 'PROFIT_FEE_15PCT',
+        solAmount: botProfitFeeSol,
+        usdAmount: botProfitFeeUsd,
+        isLive: false,
+        tokenMint: pos.tokenMint,
+      });
+    } catch {}
   }
 
   pos.botProfitFeeUsd = (pos.botProfitFeeUsd || 0) + botProfitFeeUsd;
@@ -1452,6 +1474,18 @@ export async function exitAllPaperPositions(reason: string = 'MANUAL_EXIT_ALL'):
   // Check if zero active positions left and cash <= $20 floor
   if (cachedWallet.liquidCashUsd <= PAPER_RESERVE_FLOOR_USD) {
     await checkAndRefillIfNoProfit(`Manual exit all completed - zero active positions remaining`);
+  }
+
+  if (totalProfitFeesUsd > 0) {
+    try {
+      const { recordFeeRevenue } = await import('./adminConfig.js');
+      await recordFeeRevenue({
+        feeType: 'PROFIT_FEE_15PCT',
+        solAmount: totalProfitFeesUsd / solPrice,
+        usdAmount: totalProfitFeesUsd,
+        isLive: false,
+      });
+    } catch {}
   }
 
   console.log(
