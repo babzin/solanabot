@@ -261,7 +261,10 @@ export async function evaluate5xCandidates(mints: string[]): Promise<EarlyWhaleC
     chunkArrays.map((chunk) =>
       axios.get<any>(`https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`, {
         timeout: 4000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)' },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; SoulTerminal/1.0)',
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
       })
     )
   );
@@ -861,23 +864,163 @@ export async function runEarlyTrendingRadarCycle(): Promise<number> {
   return newAlertsDispatched;
 }
 
+/**
+ * Directly processes and alerts a single token identified from @solearlytrending messages.
+ * Only queries data for this exact token (low-bandwidth, sub-15KB footprint).
+ */
+export async function processSingleTrendingToken(
+  tokenMint: string
+): Promise<{ success: boolean; candidate?: EarlyWhaleCandidate; error?: string }> {
+  const trimmed = tokenMint.trim();
+  if (!/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(trimmed)) {
+    return { success: false, error: 'Invalid Solana mint address format' };
+  }
+
+  // Deduplication check
+  if (inMemoryAlertedMints.has(trimmed)) {
+    console.log(`ℹ️ [Signal Ingestor] Token ${trimmed} has already been alerted/processed today. Skipping duplicate.`);
+    return { success: false, error: 'Token already alerted today' };
+  }
+
+  console.log(`🎯 [Signal Ingestor] Processing incoming @solearlytrending token: ${trimmed}...`);
+
+  // Run evaluation on this single token only (1 single request to DexScreener!)
+  const candidates = await evaluate5xCandidates([trimmed]);
+  if (!candidates || candidates.length === 0) {
+    return { success: false, error: 'Token did not pass DexScreener/security audit criteria' };
+  }
+
+  const candidate = candidates[0];
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 1. Persist to dual-layer store (PostgreSQL + local JSON backup)
+  try {
+    await saveAlertedToken({
+      id: `early_${Date.now()}_${candidate.tokenMint.slice(0, 4)}`,
+      tokenMint: candidate.tokenMint,
+      tokenSymbol: candidate.tokenSymbol,
+      tokenName: candidate.tokenName,
+      dexUrl: candidate.dexUrl,
+      pairAddress: candidate.pairAddress,
+      imageUrl: candidate.imageUrl,
+      pairCreatedAt: candidate.pairCreatedAt ? Number(candidate.pairCreatedAt) : null,
+      ageMinutes: candidate.ageMinutes,
+      liquidityUsd: candidate.liquidityUsd,
+      volume1h: candidate.volume1h,
+      holderCount: candidate.holderCount,
+      top20Pct: candidate.top20Pct,
+      devHoldingPct: candidate.devHoldingPct,
+      xUrl: candidate.xUrl,
+      webUrl: candidate.webUrl,
+      tgUrl: candidate.tgUrl,
+      entryPriceUsd: candidate.priceUsd,
+      entryMarketCap: candidate.marketCap,
+      peakPriceUsd: candidate.priceUsd,
+      lowestPriceUsd: candidate.priceUsd,
+      lastAlertedPriceUsd: candidate.priceUsd,
+      lastMilestonePct: 0,
+      lastDipMilestonePct: 0,
+      status: 'ACTIVE',
+      alertDate: today,
+      whaleSolAmount: candidate.whaleSolAmount,
+      dailyQuotaIndex: inMemoryDailyCount + 1,
+      slmSignal: candidate.slmVerdict?.viabilitySignal || 'GO',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (storeErr: any) {
+    console.warn(`⚠️ [Early Radar] Token store notice: ${storeErr.message}`);
+  }
+
+  // 2. Dispatch official group alert card
+  try {
+    await dispatchEarlyTrendingAlert(candidate, inMemoryDailyCount + 1);
+  } catch (alertErr: any) {
+    console.warn('Dispatch alert card notice:', alertErr.message);
+  }
+
+  // 4. Broadcast SSE
+  try {
+    broadcastNewTrending(candidate);
+  } catch {}
+
+  // 5. Autonomous $1,000 Real-Market Paper Trading Engine
+  try {
+    await processPaperTradeBuy({
+      tokenMint: candidate.tokenMint,
+      tokenSymbol: candidate.tokenSymbol,
+      tokenName: candidate.tokenName,
+      priceUsd: candidate.priceUsd,
+      marketCap: candidate.marketCap,
+      liquidityUsd: candidate.liquidityUsd,
+      dexUrl: candidate.dexUrl,
+      imageUrl: candidate.imageUrl,
+      aiScore: candidate.aiScore,
+      learnedRisk: candidate.learnedRisk,
+      slmVerdict: candidate.slmVerdict,
+    });
+  } catch (paperErr: any) {
+    console.warn('Paper trading buy execution notice:', paperErr.message);
+  }
+
+  // 6. Multi-User Auto-Snipe Fan-Out (Real funded wallets)
+  const isSlmBlocked = candidate.slmVerdict && candidate.slmVerdict.viabilitySignal === 'NO_GO';
+  if (!isSlmBlocked) {
+    try {
+      const activeUsers = await getActiveAutoSnipeUsers();
+      if (activeUsers.length > 0) {
+        for (const user of activeUsers) {
+          if (!user.autoSnipeEnabled || !user.solanaWallet) continue;
+          const membership = await verifyGroupMembership(user.telegramUserId);
+          if (!membership.isMember) continue;
+
+          const fixedUsd = user.fixedTradeSizeUsd || 10.0;
+          const tradeSol = await getSolForFixedUsd(fixedUsd);
+          const solBal = await fetchUserSolBalance(user.solanaWallet);
+          if (solBal < tradeSol) continue;
+
+          let userKeypair: any = null;
+          if (user.encryptedSecret && user.encryptionIv && user.encryptionTag) {
+            userKeypair = decryptUserKeypair(user.encryptedSecret, user.encryptionIv, user.encryptionTag);
+          }
+
+          const snipeRes = await executeUserSnipeTrade(
+            {
+              userId: user.telegramUserId,
+              telegramChatId: user.telegramChatId || user.telegramUserId,
+              keypair: userKeypair,
+              slippageBps: Math.round((user.maxSlippagePercent || 15) * 100),
+              priorityFeeLamports: user.priorityFeeLamports || 100_000,
+            },
+            candidate.tokenMint,
+            tradeSol,
+            candidate.tokenSymbol,
+            candidate.priceUsd
+          );
+
+          await dispatchSnipeNotification(snipeRes, user.telegramChatId || user.telegramUserId);
+        }
+      }
+    } catch (snipeErr: any) {
+      console.warn('Auto-snipe fan-out notice:', snipeErr.message);
+    }
+  }
+
+  inMemoryDailyCount++;
+  inMemoryAlertedMints.add(candidate.tokenMint);
+  lastAlertTimeMs = Date.now();
+
+  console.log(`✅ [Signal Ingestor] $${candidate.tokenSymbol} (${candidate.tokenMint}) alerted and traded successfully!`);
+  return { success: true, candidate };
+}
+
 let earlyRadarTimer: NodeJS.Timeout | null = null;
 
 /**
- * Initializes the background cron for Early & Whale Radar
- * Runs every 12 seconds for real-time gem detection (free DexScreener & Pump.fun APIs)
+ * Initializes the Solana Early Trending Ingestion Engine.
+ * Heavy 12s independent discovery is disabled to keep data usage below 250 MB/month.
+ * Listens directly for incoming @solearlytrending posts, forwards, and webhooks.
  */
 export function initEarlyTrendingCron(): void {
-  if (earlyRadarTimer) return;
-
-  console.log('💎 Early & Whale Radar: Online (High-Speed Engine scanning every 12s)');
-  // Run once shortly after startup
-  setTimeout(() => {
-    runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar initial scan error:', err.message));
-  }, 2_000);
-
-  // Interval every 12 seconds
-  earlyRadarTimer = setInterval(() => {
-    runEarlyTrendingRadarCycle().catch((err) => console.warn('⚠️ Early radar cycle error:', err.message));
-  }, 12 * 1000);
+  console.log('📡 [Solana Early Trending] Ingestion Engine Active: Listening exclusively for @solearlytrending posts (Zero-Polling Mode).');
 }

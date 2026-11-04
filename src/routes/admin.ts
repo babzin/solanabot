@@ -41,6 +41,21 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   /**
+   * Ingest a trending signal message or token from @solearlytrending
+   */
+  fastify.post('/api/admin/ingest-signal', async (req: FastifyRequest<{ Body: { text?: string; mint?: string } }>, reply: FastifyReply) => {
+    const { text, mint } = (req.body as any) || {};
+    const payload = text || mint;
+    if (!payload) {
+      return reply.code(400).send({ error: 'Missing text or mint in request body.' });
+    }
+
+    const { ingestTrendingSignal } = await import('../services/signalIngestor.js');
+    const result = await ingestTrendingSignal(payload, { source: 'admin_api' });
+    return reply.send(result);
+  });
+
+  /**
    * System health and database status
    */
   fastify.get('/api/admin/health', async (_req: FastifyRequest, reply: FastifyReply) => {

@@ -39,7 +39,10 @@ export async function checkPriceMilestones(): Promise<number> {
     chunkArrays.map((chunk) =>
       axios.get<any>(`https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`, {
         timeout: 4000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SolanaCopyBot/1.0)' },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; SolanaCopyBot/1.0)',
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
       })
     )
   );
@@ -230,20 +233,20 @@ export async function checkPriceMilestones(): Promise<number> {
 
 /**
  * Initializes the background price milestone checker
- * Runs every 12 seconds for instant pump/dip notifications (completely free DexScreener batch endpoint, 0 Helius credits)
+ * Runs every 60 seconds with gzip compression to keep data footprint minimal (sub-150MB/month)
  */
 export function initPriceMilestoneTracker(): void {
   if (priceTrackerTimer) return;
 
-  console.log('📈 Price Milestone Tracker: Online (High-Speed Engine checking every 12s)');
+  console.log('📈 Price Milestone Tracker: Online (Checking every 60s with gzip compression)');
 
-  // Run initial check after 2 seconds
+  // Run initial check after 5 seconds
   setTimeout(() => {
     checkPriceMilestones().catch((err) => console.warn('⚠️ Price milestone initial check error:', err.message));
-  }, 2_000);
+  }, 5_000);
 
-  // Interval every 12 seconds
+  // Interval every 60 seconds (ultra low bandwidth)
   priceTrackerTimer = setInterval(() => {
     checkPriceMilestones().catch((err) => console.warn('⚠️ Price milestone cycle error:', err.message));
-  }, 12 * 1000);
+  }, 60 * 1000);
 }

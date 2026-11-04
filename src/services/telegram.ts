@@ -1075,6 +1075,22 @@ export function initTelegramCommands(): void {
   // Initialize the 6-Hour Group Pinned Dashboard Scheduler
   initGroupPinnedDashboardScheduler();
 
+  // Channel Post Listener (catches broadcasts in channels where bot is present or connected)
+  bot.on('channel_post', async (msg) => {
+    const text = msg.text || msg.caption || '';
+    if (!text) return;
+    try {
+      const { ingestTrendingSignal, isSolearlytrendingSignature } = await import('./signalIngestor.js');
+      const isSig = isSolearlytrendingSignature(text);
+      if (isSig || /^[1-9A-HJ-NP-za-km-z]{32,44}/.test(text.trim())) {
+        console.log(`📡 [Channel Post Detected] Processing signal from channel ${msg.chat.title || msg.chat.id}...`);
+        await ingestTrendingSignal(text, { source: `channel_${msg.chat.id}` });
+      }
+    } catch (err: any) {
+      console.warn('Channel post processing notice:', err.message);
+    }
+  });
+
   // 1. New Group Members Listener: Send Transient 60s Welcome Explaining Core Operating Principles & Fees
   bot.on('new_chat_members', async (msg) => {
     const groupChatId = env.TELEGRAM_GROUP_CHAT_ID || env.TELEGRAM_CHAT_ID;
@@ -1985,6 +2001,44 @@ ${flagsText}
     }
   });
 
+  // Ingest @solearlytrending signal command: /ingest <post_text_or_mint>
+  onTextCmd(/\/ingest(?:\s+([\s\S]+))?/i, async (msg, match) => {
+    const userId = String(msg.from?.id || msg.chat.id);
+    const isAdmin = await isGroupAdminOrOwner(msg.chat.id, userId);
+    if (!isAdmin) {
+      await bot.sendMessage(msg.chat.id, '⛔ <b>Admin Access Required:</b> Only administrators can ingest signals.', { parse_mode: 'HTML' });
+      return;
+    }
+
+    const payload = match?.[1]?.trim();
+    if (!payload) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `📥 <b>Ingest @solearlytrending Signal</b>\n\n` +
+        `Usage: <code>/ingest &lt;paste post text or mint&gt;</code>\n\n` +
+        `<i>The bot will extract the contract, run the audit, broadcast the alert card, and auto-snipe for all active users.</i>`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    await bot.sendMessage(msg.chat.id, '⏳ <i>Processing @solearlytrending signal...</i>', { parse_mode: 'HTML' });
+    const { ingestTrendingSignal } = await import('./signalIngestor.js');
+    const res = await ingestTrendingSignal(payload, { source: 'admin_command', senderId: userId });
+    if (res.success) {
+      await bot.sendMessage(
+        msg.chat.id,
+        `✅ <b>Signal Ingested & Alerted!</b>\n` +
+        `• <b>Token(s):</b> <code>${res.processedMints.join(', ')}</code>\n` +
+        `• <b>Alert Card:</b> Sent to official group\n` +
+        `• <b>Auto-Snipe:</b> Dispatched for funded members`,
+        { parse_mode: 'HTML' }
+      );
+    } else {
+      await bot.sendMessage(msg.chat.id, `⚠️ Ingest notice: ${res.message}`, { parse_mode: 'HTML' });
+    }
+  });
+
   // /cancel command for aborting awaiting input states
   onTextCmd(/\/cancel/i, async (msg) => {
     const userId = String(msg.from?.id || msg.chat.id);
@@ -2321,6 +2375,24 @@ ${flagsText}
       '🚨 exit all trades', 'exit all trades', 'exit all'
     ];
     if (knownButtons.some((b) => b === text.toLowerCase())) return;
+
+    // Check if message is forwarded from @solearlytrending or has its signature format
+    const isForwardedFromTrending = (msg as any).forward_from_chat?.username?.toLowerCase() === 'solearlytrending';
+    const { isSolearlytrendingSignature, ingestTrendingSignal } = await import('./signalIngestor.js');
+    if (isForwardedFromTrending || isSolearlytrendingSignature(text)) {
+      console.log(`🔥 [Telegram Signal] @solearlytrending signal detected in chat ${msg.chat.id}! Ingesting...`);
+      const ingestRes = await ingestTrendingSignal(text, { source: 'telegram_signal' });
+      if (ingestRes.success) {
+        if (msg.chat.type === 'private') {
+          await bot.sendMessage(
+            msg.chat.id,
+            `✅ <b>Signal Ingested!</b>\nToken(s) alerted and sniped: <code>${ingestRes.processedMints.join(', ')}</code>`,
+            { parse_mode: 'HTML' }
+          );
+        }
+        return;
+      }
+    }
 
     // Check if the user pasted a raw Solana Mint address (base58 32-44 characters)
     if (/^[1-9A-HJ-NP-za-km-z]{32,44}$/.test(text)) {
