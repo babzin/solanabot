@@ -1045,11 +1045,26 @@ ${walletDisplay}
  * Dedicated 6-button menu: Start, Daily Coins, Top Gainers, Price Milestones, My Positions, and Auto-Snipe
  */
 export function initTelegramCommands(): void {
-  // Graceful polling error suppression for test/dummy tokens
+  // Graceful debounced polling error logging to prevent log flooding on network drops
+  let lastPollingErrorLog = 0;
   bot.on('polling_error', (err: any) => {
     if (env.TELEGRAM_BOT_TOKEN.includes('dummy')) return;
-    console.warn('⚠️ Telegram polling issue:', err.message);
+    const now = Date.now();
+    if (now - lastPollingErrorLog > 30000) {
+      lastPollingErrorLog = now;
+      console.warn('⚠️ Telegram polling issue:', err.message);
+    }
   });
+
+  // Polling Watchdog: Automatically re-establishes polling if network drops or system wakes from sleep
+  setInterval(() => {
+    if (env.TELEGRAM_ENABLE_POLLING && !bot.isPolling()) {
+      console.log('🔄 [Polling Watchdog] Telegram polling stream inactive. Resuming connection...');
+      bot.startPolling().catch((e: any) => {
+        console.warn('⚠️ [Polling Watchdog] Restart notice:', e.message);
+      });
+    }
+  }, 20000);
 
   // Register native Telegram Command Menu
   bot.setMyCommands([

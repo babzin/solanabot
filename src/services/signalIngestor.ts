@@ -22,29 +22,37 @@ const IGNORED_PROGRAM_ADDRESSES = new Set([
 export function extractSolanaMints(text: string): string[] {
   if (!text || typeof text !== 'string') return [];
 
-  // Match 32 to 44 alphanumeric base58 characters
-  const potentialMatches = text.match(/\b[1-9A-HJ-NP-za-km-z]{32,44}\b/g) || [];
-  const validMints = new Set<string>();
+  const tokenMints = new Set<string>();
+
+  // 1. Explicit token URL indicators (DexScreener, SoulTerminal, Solscan token, Pump.fun, Photon, Sniper deep-links)
+  const tokenUrlRegex = /(?:dexscreener\.com\/solana\/|solscan\.io\/token\/|soulterminal\.ai\/token\/|pump\.fun\/coin\/|photon-sol\.tinyastro\.com\/en\/lp\/|(?:start=|startapp=)(?:15_et[bc]|ets|ett_track|fakevol|ivb_bundle|ivf_first20)_)([1-9A-HJ-NP-za-km-z]{32,44})/gi;
+  let urlMatch;
+  while ((urlMatch = tokenUrlRegex.exec(text)) !== null) {
+    const mint = urlMatch[1];
+    if (!IGNORED_PROGRAM_ADDRESSES.has(mint) && isValidSolanaAddress(mint)) {
+      tokenMints.add(mint);
+    }
+  }
+
+  // If we found explicit token mints from URLs, return them directly (ignoring holder accounts)
+  if (tokenMints.size > 0) {
+    return Array.from(tokenMints);
+  }
+
+  // 2. Fallback: Standalone base58 words (if no explicit URL matched)
+  // Exclude solscan.io/account/ links so we don't accidentally treat holder accounts as tokens
+  const textWithoutAccounts = text.replace(/solscan\.io\/account\/[1-9A-HJ-NP-za-km-z]{32,44}/gi, '');
+  const potentialMatches = textWithoutAccounts.match(/\b[1-9A-HJ-NP-za-km-z]{32,44}\b/g) || [];
 
   for (const match of potentialMatches) {
     const trimmed = match.trim();
     if (IGNORED_PROGRAM_ADDRESSES.has(trimmed)) continue;
     if (isValidSolanaAddress(trimmed)) {
-      validMints.add(trimmed);
+      tokenMints.add(trimmed);
     }
   }
 
-  // Also check URL parameters (e.g. dexscreener.com/solana/<mint>, solscan.io/token/<mint>)
-  const urlRegex = /(?:dexscreener\.com\/solana\/|solscan\.io\/token\/|pump\.fun\/coin\/|photon-sol\.tinyastro\.com\/en\/lp\/)([1-9A-HJ-NP-za-km-z]{32,44})/gi;
-  let urlMatch;
-  while ((urlMatch = urlRegex.exec(text)) !== null) {
-    const mint = urlMatch[1];
-    if (!IGNORED_PROGRAM_ADDRESSES.has(mint) && isValidSolanaAddress(mint)) {
-      validMints.add(mint);
-    }
-  }
-
-  return Array.from(validMints);
+  return Array.from(tokenMints);
 }
 
 /**

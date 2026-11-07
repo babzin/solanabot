@@ -1,10 +1,11 @@
 {
   "chatId": "-1004355581425",
   "pastPerformanceMessageIds": [
-    290
+    290,
+    2423
   ],
-  "guideMessageId": 2435,
-  "performanceMessageId": 2423,
-  "lastCycleTimeMs": 1793804162200,
-  "lastUpdatedTimeMs": 1794031410880
+  "guideMessageId": 2448,
+  "performanceMessageId": 2442,
+  "lastCycleTimeMs": 1794032193575,
+  "lastUpdatedTimeMs": 1794045206204
 }

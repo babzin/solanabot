@@ -37882,8 +37882,8 @@
     "entryPriceUsd": 0.0001062,
     "entryMarketCap": 212465,
     "peakPriceUsd": 0.0001666,
-    "lowestPriceUsd": 2.588e-8,
-    "lastAlertedPriceUsd": 2.588e-8,
+    "lowestPriceUsd": 2.478e-8,
+    "lastAlertedPriceUsd": 2.478e-8,
     "lastMilestonePct": 50,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -37892,7 +37892,7 @@
     "dailyQuotaIndex": 40,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T12:36:21.402Z",
-    "updatedAt": "2026-11-04T14:56:44.113Z"
+    "updatedAt": "2026-11-07T09:53:27.058Z"
   },
   {
     "id": "early_1793277570698_CxFt",
@@ -38785,8 +38785,8 @@
     "entryPriceUsd": 0.00007182,
     "entryMarketCap": 71821,
     "peakPriceUsd": 0.0001537,
-    "lowestPriceUsd": 0.000003438,
-    "lastAlertedPriceUsd": 0.000003438,
+    "lowestPriceUsd": 0.000003037,
+    "lastAlertedPriceUsd": 0.000003037,
     "lastMilestonePct": 100,
     "lastDipMilestonePct": -999,
     "status": "ACTIVE",
@@ -38795,7 +38795,7 @@
     "dailyQuotaIndex": 91,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T13:46:45.804Z",
-    "updatedAt": "2026-11-07T05:37:18.949Z"
+    "updatedAt": "2026-11-07T10:21:21.208Z"
   },
   {
     "id": "early_1793281900141_Bcrm",
@@ -39028,10 +39028,10 @@
     "xUrl": "https://x.com/stankonsf",
     "entryPriceUsd": 0.00008925,
     "entryMarketCap": 89256,
-    "peakPriceUsd": 0.001788,
+    "peakPriceUsd": 0.002003,
     "lowestPriceUsd": 0.00007795,
-    "lastAlertedPriceUsd": 0.001788,
-    "lastMilestonePct": 1900,
+    "lastAlertedPriceUsd": 0.002003,
+    "lastMilestonePct": 2100,
     "lastDipMilestonePct": 0,
     "status": "ACTIVE",
     "alertDate": "2026-10-29",
@@ -39039,7 +39039,7 @@
     "dailyQuotaIndex": 103,
     "slmSignal": "NO_GO",
     "createdAt": "2026-10-29T14:08:03.982Z",
-    "updatedAt": "2026-11-07T06:04:13.946Z"
+    "updatedAt": "2026-11-07T07:29:28.595Z"
   },
   {
     "id": "early_1793282953607_6tNE",

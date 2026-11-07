@@ -1014,13 +1014,15 @@ export async function processSingleTrendingToken(
   return { success: true, candidate };
 }
 
+import { initTrendingChannelMonitor } from './trendingChannelMonitor.js';
+
 let earlyRadarTimer: NodeJS.Timeout | null = null;
 
 /**
  * Initializes the Solana Early Trending Ingestion Engine.
- * Heavy 12s independent discovery is disabled to keep data usage below 250 MB/month.
- * Listens directly for incoming @solearlytrending posts, forwards, and webhooks.
+ * Heavy independent discovery is replaced with direct 24/7 @solearlytrending monitoring (sub-3GB/month).
+ * Automatically detects incoming posts, audits tokens, broadcasts alerts, and triggers auto-sniping.
  */
 export function initEarlyTrendingCron(): void {
-  console.log('📡 [Solana Early Trending] Ingestion Engine Active: Listening exclusively for @solearlytrending posts (Zero-Polling Mode).');
+  initTrendingChannelMonitor();
 }
