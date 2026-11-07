@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { prisma } from '../services/db.js';
 import { terminalEvents, TerminalEventType } from '../services/events.js';
 import { executeSnipeTrade, getActivePositions, getAllPositions } from '../services/sniper.js';
+import { getTokensForDate, getActiveTrackedTokens, getTrackedToken } from '../services/earlyTokenStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,18 +55,21 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const today = new Date().toISOString().slice(0, 10);
       const targetDate = request.query?.date || today;
 
-      let tokens = await prisma.earlyTrendingToken.findMany({
-        where: { alertDate: targetDate },
-        orderBy: { createdAt: 'desc' },
-      });
+      let tokens: any[] = [];
+      try {
+        tokens = await prisma.earlyTrendingToken.findMany({
+          where: { alertDate: targetDate },
+          orderBy: { createdAt: 'desc' },
+        });
+      } catch {}
+
+      if (!tokens || tokens.length === 0) {
+        tokens = await getTokensForDate(targetDate);
+      }
 
       // If queried today and it's a fresh day with 0 tokens, fallback to active tokens
-      if (tokens.length === 0 && !request.query?.date) {
-        tokens = await prisma.earlyTrendingToken.findMany({
-          where: { status: 'ACTIVE' },
-          orderBy: { createdAt: 'desc' },
-          take: 30,
-        });
+      if ((!tokens || tokens.length === 0) && !request.query?.date) {
+        tokens = await getActiveTrackedTokens();
       }
 
       // Format BigInt fields safely for JSON serialization
@@ -98,9 +102,16 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/api/token/:mint', async (request: FastifyRequest<{ Params: { mint: string } }>, reply: FastifyReply) => {
     const { mint } = request.params;
     try {
-      const token = await prisma.earlyTrendingToken.findUnique({
-        where: { tokenMint: mint },
-      });
+      let token: any = null;
+      try {
+        token = await prisma.earlyTrendingToken.findUnique({
+          where: { tokenMint: mint },
+        });
+      } catch {}
+
+      if (!token) {
+        token = await getTrackedToken(mint);
+      }
 
       if (!token) {
         return reply.code(404).send({ error: 'Token not found' });
@@ -123,11 +134,27 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
       const today = new Date().toISOString().slice(0, 10);
       const targetDate = request.query?.date || today;
 
-      // Strictly query the requested day (no fallback to earlier days)
-      const tokens = await prisma.earlyTrendingToken.findMany({
-        where: { alertDate: targetDate },
-        orderBy: { createdAt: 'desc' },
-      });
+      let tokens: any[] = [];
+      try {
+        tokens = await prisma.earlyTrendingToken.findMany({
+          where: { alertDate: targetDate },
+          orderBy: { createdAt: 'desc' },
+        });
+      } catch {}
+
+      if (!tokens || tokens.length === 0) {
+        tokens = await getTokensForDate(targetDate);
+      }
+
+      if (!tokens || tokens.length === 0) {
+        const allActive = await getActiveTrackedTokens();
+        if (allActive.length > 0) {
+          const dates = [...new Set(allActive.map((t) => t.alertDate).filter(Boolean))].sort().reverse();
+          if (dates.length > 0) {
+            tokens = allActive.filter((t) => t.alertDate === dates[0]);
+          }
+        }
+      }
 
       const flopped = tokens
         .map((t) => {
@@ -178,10 +205,27 @@ export async function terminalRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/api/stats/24h', async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const tokens = await prisma.earlyTrendingToken.findMany({
-        where: { alertDate: today },
-        orderBy: { createdAt: 'desc' },
-      });
+      let tokens: any[] = [];
+      try {
+        tokens = await prisma.earlyTrendingToken.findMany({
+          where: { alertDate: today },
+          orderBy: { createdAt: 'desc' },
+        });
+      } catch {}
+
+      if (!tokens || tokens.length === 0) {
+        tokens = await getTokensForDate(today);
+      }
+
+      if (!tokens || tokens.length === 0) {
+        const allActive = await getActiveTrackedTokens();
+        if (allActive.length > 0) {
+          const dates = [...new Set(allActive.map((t) => t.alertDate).filter(Boolean))].sort().reverse();
+          if (dates.length > 0) {
+            tokens = allActive.filter((t) => t.alertDate === dates[0]);
+          }
+        }
+      }
 
       const totalSignals = tokens.length;
       let winsCount = 0;

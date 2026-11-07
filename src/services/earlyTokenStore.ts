@@ -215,6 +215,54 @@ export async function saveAlertedToken(token: TrackedTokenRecord): Promise<void>
 }
 
 /**
+ * Retrieves a single tracked token record by mint address with database & disk fallback
+ */
+export async function getTrackedToken(tokenMint: string): Promise<TrackedTokenRecord | null> {
+  await hydrateTrackedTokens();
+  try {
+    const dbToken = await prisma.earlyTrendingToken.findUnique({
+      where: { tokenMint },
+    });
+    if (dbToken) {
+      return {
+        id: dbToken.id,
+        tokenMint: dbToken.tokenMint,
+        tokenSymbol: dbToken.tokenSymbol,
+        tokenName: dbToken.tokenName,
+        pairAddress: dbToken.pairAddress || undefined,
+        dexUrl: dbToken.dexUrl || undefined,
+        imageUrl: dbToken.imageUrl,
+        pairCreatedAt: dbToken.pairCreatedAt ? Number(dbToken.pairCreatedAt) : null,
+        ageMinutes: dbToken.ageMinutes || undefined,
+        liquidityUsd: dbToken.liquidityUsd || undefined,
+        volume1h: dbToken.volume1h || undefined,
+        holderCount: dbToken.holderCount || undefined,
+        top20Pct: dbToken.top20Pct || undefined,
+        devHoldingPct: dbToken.devHoldingPct || undefined,
+        xUrl: dbToken.xUrl || undefined,
+        webUrl: dbToken.webUrl || undefined,
+        tgUrl: dbToken.tgUrl || undefined,
+        entryPriceUsd: dbToken.entryPriceUsd,
+        entryMarketCap: dbToken.entryMarketCap,
+        peakPriceUsd: dbToken.peakPriceUsd,
+        lowestPriceUsd: dbToken.lowestPriceUsd,
+        lastAlertedPriceUsd: dbToken.lastAlertedPriceUsd,
+        lastMilestonePct: dbToken.lastMilestonePct,
+        lastDipMilestonePct: dbToken.lastDipMilestonePct,
+        status: dbToken.status as any,
+        alertDate: dbToken.alertDate,
+        whaleSolAmount: dbToken.whaleSolAmount || undefined,
+        dailyQuotaIndex: dbToken.dailyQuotaIndex,
+        slmSignal: (dbToken as any).slmSignal || undefined,
+        createdAt: dbToken.createdAt.toISOString(),
+        updatedAt: dbToken.updatedAt.toISOString(),
+      };
+    }
+  } catch {}
+  return trackedTokensMap.get(tokenMint) || null;
+}
+
+/**
  * Returns all tokens currently being tracked for price milestones & dips
  */
 export async function getActiveTrackedTokens(): Promise<TrackedTokenRecord[]> {
