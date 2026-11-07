@@ -301,15 +301,26 @@ export function buildPrivateDashboardKeyboard(): any {
     inline_keyboard: [
       [
         { text: '💼 View Portfolio', callback_data: 'cmd_paper_portfolio' },
-        { text: '⚙️ Auto-Snipe Config', callback_data: 'cmd_autosnipe' },
+        { text: '🚨 Exit All Trades', callback_data: 'cmd_exit_all' },
+      ],
+      [
+        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
+        { text: '📉 Daily Flops', callback_data: 'cmd_flops' },
+      ],
+      [
+        { text: '📈 Price Milestones', callback_data: 'cmd_milestones' },
+        { text: '🗓️ Weekly Report', callback_data: 'cmd_weekly' },
       ],
       [
         { text: '💵 Set Trade Volume ($10-$50)', callback_data: 'cmd_tradesize' },
         { text: '💰 Sniper Wallet', callback_data: 'cmd_wallet' },
       ],
       [
-        { text: '🏆 Top Gainers', callback_data: 'cmd_top' },
-        { text: '🔄 Refresh Stats', callback_data: 'refresh_pinned_dashboard' },
+        { text: '🤖 AI Co-Pilot', callback_data: 'cmd_copilot' },
+        { text: '⚙️ Auto-Snipe Config', callback_data: 'cmd_autosnipe' },
+      ],
+      [
+        { text: '🚀 Full Dashboard Menu', callback_data: 'cmd_start' },
       ],
     ],
   };

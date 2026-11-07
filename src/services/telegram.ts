@@ -720,9 +720,19 @@ export async function sendUserWalletDashboard(
   if (!membership.isMember) {
     await bot.sendMessage(
       chatId,
-      `⛔ <b>Access Denied:</b> You must be an active member of our official group to configure a sniper wallet.\n\n` +
-      `<i>Please join the group before setting up your sniper wallet.</i>`,
-      { parse_mode: 'HTML' }
+      `⛔ <b>Official Group Membership Required</b>\n\n` +
+      `To configure a sniper wallet and execute live automated trades, you must be a member of our official community.\n\n` +
+      `👉 <b>Join our official group below</b>, then tap <b>[Verify Access]</b> to unlock your wallet dashboard:`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+            [{ text: '🔄 Verify Access & Open Wallet', callback_data: 'cmd_wallet' }],
+            [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+          ],
+        },
+      }
     );
     return;
   }
@@ -905,8 +915,18 @@ export async function handleUserDeepLinkSnipe(
   if (!membership.isMember) {
     await bot.sendMessage(
       chatId,
-      `⛔ <b>Access Denied:</b> You must be an active member of our official group to execute snipes.`,
-      { parse_mode: 'HTML' }
+      `⛔ <b>Official Group Membership Required</b>\n\n` +
+      `You must be an active member of our official community to execute live snipes.\n\n` +
+      `👉 <b>Join our official group below:</b>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+            [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+          ],
+        },
+      }
     );
     return;
   }
@@ -1283,8 +1303,8 @@ ${capitalLine}
     }
   };
 
-  // /start or Start button (supports deep-linking: /start <payload>)
-  onTextCmd(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start/i, async (msg, match) => {
+  // /start, start, /menu, /dashboard, /help (supports deep-linking: /start <payload>)
+  onTextCmd(/\/start(?:\s+(.+))?|🚀 \/start|🚀 Start|^\/?start$|^\/?menu$|^\/?dashboard$|^\/?help$/i, async (msg, match) => {
     const payload = match?.[1]?.trim();
     const userId = String(msg.from?.id || msg.chat.id);
 
@@ -1296,6 +1316,12 @@ ${capitalLine}
         parse_mode: 'HTML',
         disable_web_page_preview: true,
         reply_markup: keyboard,
+      });
+
+      // Also ensure the docked bottom reply keyboard is activated in DM
+      await bot.sendMessage(msg.chat.id, '📱 <i>Quick 1-tap navigation docked below:</i>', {
+        parse_mode: 'HTML',
+        reply_markup: persistentReplyKeyboard,
       });
       return;
     }
@@ -2106,8 +2132,18 @@ ${flagsText}
     if (!membership.isMember) {
       await bot.sendMessage(
         msg.chat.id,
-        `⛔ <b>Access Denied:</b> You must be an active member of our official group to use wallet functions.`,
-        { parse_mode: 'HTML' }
+        `⛔ <b>Official Group Membership Required</b>\n\n` +
+        `You must be an active member of our official group to use wallet functions.\n\n` +
+        `👉 <b>Join our official group below:</b>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+              [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+            ],
+          },
+        }
       );
       return;
     }
@@ -2271,9 +2307,18 @@ ${flagsText}
       if (!membership.isMember) {
         await bot.sendMessage(
           msg.chat.id,
-          `⛔ <b>Access Denied:</b> You must be an active member of our official group to configure a sniper wallet.\n\n` +
-          `<i>Please join the group before setting up your wallet.</i>`,
-          { parse_mode: 'HTML' }
+          `⛔ <b>Official Group Membership Required</b>\n\n` +
+          `To configure a sniper wallet and execute live automated trades, you must be a member of our official community.\n\n` +
+          `👉 <b>Join our official group below:</b>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+                [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+              ],
+            },
+          }
         );
         return;
       }
@@ -2701,8 +2746,19 @@ ${flagsText}
         if (!membership.isMember) {
           await bot.sendMessage(
             chatId,
-            `⛔ <b>Access Denied:</b> You must be an active member of our official group to generate a sniper wallet.`,
-            { parse_mode: 'HTML' }
+            `⛔ <b>Official Group Membership Required</b>\n\n` +
+            `To generate a dedicated sniper wallet and execute live automated trades, you must be a member of our official community.\n\n` +
+            `👉 <b>Join our official group below</b>, then tap <b>[Verify Access]</b> to generate your wallet:`,
+            {
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+                  [{ text: '🔄 Verify Access & Open Wallet', callback_data: 'cmd_wallet' }],
+                  [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+                ],
+              },
+            }
           );
           return;
         }
@@ -2888,7 +2944,21 @@ ${flagsText}
         if (mint) {
           const membership = await verifyGroupMembership(userId);
           if (!membership.isMember) {
-            await bot.sendMessage(chatId, `⛔ <b>Access Denied:</b> You must be an active member of our official group to execute trades.`, { parse_mode: 'HTML' });
+            await bot.sendMessage(
+              chatId,
+              `⛔ <b>Official Group Membership Required</b>\n\n` +
+              `You must be an active member of our official community to execute live trades.\n\n` +
+              `👉 <b>Join our official group below:</b>`,
+              {
+                parse_mode: 'HTML',
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '👥 Join Official Telegram Group ➔', url: 'https://t.me/+wD9SRVli9INlYmNk' }],
+                    [{ text: '💼 $1,000 Alpha Model (Zero Deposit)', callback_data: 'cmd_paper_portfolio' }],
+                  ],
+                },
+              }
+            );
             return;
           }
 
@@ -3168,6 +3238,18 @@ async function handleEarlyTrendingCommand(chatId: number | string, targetIndex?:
 
     if (!tokens || tokens.length === 0) {
       tokens = await getTokensForDate(today);
+    }
+
+    // Seamless Fallback: If no tokens recorded yet for today, show most recent active session
+    if (!tokens || tokens.length === 0) {
+      const allActive = await getActiveTrackedTokens();
+      if (allActive.length > 0) {
+        const dates = [...new Set(allActive.map((t) => t.alertDate).filter(Boolean))].sort().reverse();
+        if (dates.length > 0) {
+          const latestDate = dates[0];
+          tokens = allActive.filter((t) => t.alertDate === latestDate);
+        }
+      }
     }
 
     if (tokens.length === 0) {
