@@ -6,3 +6,10 @@ dist
 scratch/
 
 tg_cookies.txt
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
